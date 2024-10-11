@@ -27,7 +27,7 @@ class Formatter(logging.Formatter):
         elif record.levelno == logging.DEBUG:
             self._style._fmt = f"[{Fore.YELLOW}+{Style.RESET_ALL}] %(message)s"
         else:
-            self._style._fmt = f"[{Fore.RED}+{Style.RESET_ALL}] %(message)s"
+            self._style._fmt = f"[{Fore.RED}-{Style.RESET_ALL}] %(message)s"
         return super().format(record)
 
 
@@ -56,7 +56,7 @@ def print_share_info(
     elif share_perms["read"] and not share_perms["write"]:
         prefix = "[" + Fore.YELLOW + "+" + Style.RESET_ALL + "]"
     else:
-        prefix = "[" + Fore.RED + "+" + Style.RESET_ALL + "]"
+        prefix = "[" + Fore.RED + "-" + Style.RESET_ALL + "]"
 
     if share_perms["read"]:
         read = "Yes"
@@ -83,10 +83,10 @@ class Enumerate:
         self,
         target: str,
         mach_name: str,
-        domain: str,
-        smbclient,
-        default_shares,
+        smbclient: Any,
+        default_shares: list,
         spider=False,
+        desired_share="",
     ) -> dict:
         shares = smbclient.listShares()
         results = {}
@@ -96,6 +96,11 @@ class Enumerate:
 
         # Assuming shares is a list of share dictionaries
         share_names = [share["shi1_netname"][:-1] for share in shares]
+
+        # only print desired share
+        if desired_share:
+            default_shares = share_names
+            default_shares.remove(desired_share)
 
         if default_shares not in share_names:
             for share in shares:
@@ -126,7 +131,7 @@ class Enumerate:
                             Shrawler().spider_shares(target, share_name, "", smbclient)
 
                         # If you're not spidering, will print out
-                        elif share_perms["read"]:
+                        else:
                             print_share_info(
                                 share_name,
                                 share_comment,
@@ -591,10 +596,10 @@ class Shrawler:
                     results = Enumerate().get_shares(
                         mach_ip,
                         mach_name,
-                        domain,
                         smbclient,
                         self.normal_shares,
                         self.args.spider,
+                        self.args.shares,
                     )
                     # # output to file in json format
                     self.output_to_json(mach_ip, self.username, results)
