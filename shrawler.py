@@ -99,8 +99,10 @@ class Enumerate:
 
         # only print desired share
         if desired_share:
+            desired_share = desired_share.split(",")
             default_shares = share_names
-            default_shares.remove(desired_share)
+            for share in desired_share:
+                default_shares.remove(share)
 
         if default_shares not in share_names:
             for share in shares:
@@ -128,7 +130,7 @@ class Enumerate:
                         if spider and share_perms["read"]:
                             print("")
                             logging.info(f"{mach_name}\\{share_name}")
-                            Shrawler().spider_shares(target, share_name, "", smbclient)
+                            self.spider_shares(target, share_name, "", smbclient)
 
                         # If you're not spidering, will print out
                         else:
@@ -145,6 +147,48 @@ class Enumerate:
         else:
             logging.warning("No desired shares found")
         return results
+
+    def spider_shares(self, target: str, share: str, base_dir: str, smbclient) -> None:
+        directories = []
+        try:
+            # List all items in the base directory
+            for result in smbclient.listPath(share, base_dir + "*", password=None):
+                if result.get_longname() not in [".", ".."]:
+                    next_filedir = result.get_longname()
+                    next_fullpath = base_dir + next_filedir
+                    file_metadata = Shrawler().parse_file(result)
+
+                    size = file_metadata["size"]
+                    mtime = file_metadata["mtime"]
+
+                    file = (
+                        size
+                        + mtime
+                        + f"\\\\{target}\\{share}\\{base_dir}"
+                        + result.get_longname()
+                    )
+
+                    # Clean up the file path to standardize format
+                    file = file.replace("/*", "")
+                    file = file.replace("\\*\\", "\\")
+                    file = file.replace("/\\", "\\")
+                    file = file.replace("/", "\\")
+                    file = file.replace("\\\\", "\\")
+
+                    if result.is_directory():
+                        # Store the directory for later processing
+                        directories.append(next_fullpath + "/")
+                        # if self.args.max_depth <= len(directories):
+                        Shrawler().build_tree_structure(
+                            base_dir,
+                            result.get_longname(),
+                            smbclient,
+                            share,
+                            mtime,
+                        )
+
+        except Exception as e:
+            logging.warning(e)
 
     def check_share_perm(self, share: str, smbclient) -> dict:
         read_write = {"read": False, "write": "N/A"}
@@ -238,16 +282,24 @@ class Shrawler:
             help="AES key to use for Kerberos Authentication (128 or 256 bits)",
         )
 
-        group = parser.add_argument_group("spider")
-        group.add_argument(
+        spider = parser.add_argument_group("spider")
+        spider.add_argument(
             "--spider", action="store_true", help="Spider all shares found"
         )
-        group.add_argument(
+        spider.add_argument(
             "--extensions",
             action="store",
             dest="extensions",
             help="Search for specific file extensions only, separated by ','. "
             "You can also specify '--extensions default' for shrawler to choose the extensions for you.",
+        )
+        spider.add_argument(
+            "--max-depth",
+            action="store",
+            dest="max_depth",
+            type=int,
+            default=5,
+            help="Max depth of spidering. Default: 5",
         )
 
         self.args = parser.parse_args()
@@ -326,10 +378,12 @@ class Shrawler:
         mtime: str,
         indent: str = "",
         last: bool = False,
+        depth: int = 0,
     ) -> None:
         """
         Recursively prints the tree structure for a given directory, appending paths using string concatenation.
         """
+
         connector = "└── " if last else "├── "
         print(indent + connector + Fore.BLUE + directory + Style.RESET_ALL)
 
@@ -347,88 +401,55 @@ class Shrawler:
             )
             count = 0
 
-            for result in results:
-                if result.get_longname() not in [".", ".."]:
-                    next_filedir = result.get_longname()
-                    count += 1
-                    is_last = count == total_items  # Determine if it's the last item
+            # depth has an index of 0, max_depth assumes human readable
+            if depth < self.args.max_depth - 1:
+                for result in results:
+                    if result.get_longname() not in [".", ".."]:
+                        next_filedir = result.get_longname()
+                        is_last = (
+                            count == total_items
+                        )  # Determine if it's the last item
 
-                    # If it's a directory, print its contents
-                    if result.is_directory():
-                        self.build_tree_structure(
-                            base_dir + directory + "/",
-                            next_filedir,
-                            smbclient,
-                            share,
-                            mtime,
-                            indent,
-                            last=is_last,
-                        )
-                    else:
-                        # Print file with the correct connector and indentation
-                        file_connector = "└── " if is_last else "├── "
-                        if self.args.extensions:
-                            if not self.args.extensions == "defualt":
-                                self.extensions = self.args.extensions.split(",")
-                            for ext in self.extensions:
-                                if next_filedir.endswith(ext):
-                                    print(
-                                        indent
-                                        + file_connector
-                                        + Fore.GREEN
-                                        + next_filedir
-                                        + Style.RESET_ALL
-                                        + f"  {Fore.YELLOW + mtime + Style.RESET_ALL}"
-                                    )
-                        else:
-                            print(
-                                indent
-                                + file_connector
-                                + Fore.GREEN
-                                + next_filedir
-                                + Style.RESET_ALL
-                                + f"  {Fore.YELLOW + mtime + Style.RESET_ALL}"
+                        # If it's a directory, print its contents
+                        if result.is_directory():
+                            self.build_tree_structure(
+                                base_dir + directory + "/",
+                                next_filedir,
+                                smbclient,
+                                share,
+                                mtime,
+                                indent,
+                                last=is_last,
+                                depth=depth + 1,
                             )
+                        else:
+                            # Print file with the correct connector and indentation
+                            file_connector = "└── " if is_last else "├── "
+                            if self.args.extensions:
+                                if not self.args.extensions == "default":
+                                    self.extensions = self.args.extensions.split(",")
+                                for ext in self.extensions:
+                                    if next_filedir.endswith(ext):
+                                        print(
+                                            indent
+                                            + file_connector
+                                            + Fore.GREEN
+                                            + next_filedir
+                                            + Style.RESET_ALL
+                                            + f"  {Fore.YELLOW + mtime + Style.RESET_ALL}"
+                                        )
+                            else:
+                                print(
+                                    indent
+                                    + file_connector
+                                    + Fore.GREEN
+                                    + next_filedir
+                                    + Style.RESET_ALL
+                                    + f"  {Fore.YELLOW + mtime + Style.RESET_ALL}"
+                                )
 
         except Exception as e:
             logging.warning(f"Error accessing directory: {e}")
-
-    def spider_shares(self, target: str, share: str, base_dir: str, smbclient) -> None:
-        directories = []
-        try:
-            # List all items in the base directory
-            for result in smbclient.listPath(share, base_dir + "*", password=None):
-                if result.get_longname() not in [".", ".."]:
-                    next_filedir = result.get_longname()
-                    next_fullpath = base_dir + next_filedir
-                    file_metadata = self.parse_file(result)
-
-                    size = file_metadata["size"]
-                    mtime = file_metadata["mtime"]
-
-                    file = (
-                        size
-                        + mtime
-                        + f"\\\\{target}\\{share}\\{base_dir}"
-                        + result.get_longname()
-                    )
-
-                    # Clean up the file path to standardize format
-                    file = file.replace("/*", "")
-                    file = file.replace("\\*\\", "\\")
-                    file = file.replace("/\\", "\\")
-                    file = file.replace("/", "\\")
-                    file = file.replace("\\\\", "\\")
-
-                    if result.is_directory():
-                        # Store the directory for later processing
-                        directories.append(next_fullpath + "/")
-                        self.build_tree_structure(
-                            base_dir, result.get_longname(), smbclient, share, mtime
-                        )
-
-        except Exception as e:
-            logging.warning(e)
 
     def readable_file_size(self, nbytes: float) -> str:
         "Convert into readable file sizes"
@@ -448,6 +469,7 @@ class Shrawler:
         return time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(timestamp))
 
     def parse_file(self, file_info) -> dict:
+        "Parse file and output metadata"
         file_size = file_info.get_filesize()
         file_creation_date = file_info.get_ctime_epoch()
         file_modified_date = file_info.get_mtime_epoch()
@@ -476,8 +498,18 @@ class Shrawler:
         lmhash: str,
         nthash: str,
     ):
+        """
+        Initiate SMB Session with host using impacket libraries.
+        Will try to use Kerberos for authentication.
+        """
         try:
             smbClient = SMBConnection(address, address, sess_port=int(445))
+            try:
+                smbClient._doKerberos = True  # Set this flag to enable Kerberos
+                logging.debug("Using Kerberos Auth")
+            except:
+                logging.debug("Kerberos auth unsuccessful")
+
             dialect = smbClient.getDialect()
 
             if dialect == SMB_DIALECT:
