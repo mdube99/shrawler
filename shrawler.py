@@ -23,11 +23,11 @@ class Formatter(logging.Formatter):
     def format(self, record):
         init()
         if record.levelno == logging.INFO:
-            self._style._fmt = f"[{Fore.GREEN}+{Style.RESET_ALL}] %(message)s"
+            self._style._fmt = f"{Fore.GREEN}[+]{Style.RESET_ALL} %(message)s"
         elif record.levelno == logging.DEBUG:
-            self._style._fmt = f"[{Fore.YELLOW}+{Style.RESET_ALL}] %(message)s"
+            self._style._fmt = f"{Fore.YELLOW}[+]{Style.RESET_ALL} %(message)s"
         else:
-            self._style._fmt = f"[{Fore.RED}-{Style.RESET_ALL}] %(message)s"
+            self._style._fmt = f"{Fore.RED}[-]{Style.RESET_ALL} %(message)s"
         return super().format(record)
 
 
@@ -52,11 +52,11 @@ def print_share_info(
     largest_share_name: int,
 ) -> None:
     if share_perms["read"] and share_perms["write"]:
-        prefix = "[" + Fore.GREEN + "+" + Style.RESET_ALL + "]"
+        prefix = Fore.GREEN + "[+]" + Style.RESET_ALL
     elif share_perms["read"] and not share_perms["write"]:
-        prefix = "[" + Fore.YELLOW + "+" + Style.RESET_ALL + "]"
+        prefix = Fore.YELLOW + "[+]" + Style.RESET_ALL
     else:
-        prefix = "[" + Fore.RED + "-" + Style.RESET_ALL + "]"
+        prefix = Fore.RED + "[-]" + Style.RESET_ALL
 
     if share_perms["read"]:
         read = "Yes"
@@ -70,9 +70,8 @@ def print_share_info(
     else:
         write = "No"
 
-    print(
-        f"    {prefix} {share_name.ljust(largest_share_name + 20)} | Read: {read.ljust(3)} | Write: {write.ljust(3)} | Comment: {share_comment if share_comment else 'N/A'}"
-    )
+    # fmt: off
+    print(f"    {prefix} {share_name.ljust(largest_share_name + 20)} | Read: {read.ljust(3)} | Write: {write.ljust(3)} | Comment: {share_comment if share_comment else 'N/A'}")
 
 
 class Enumerate:
@@ -224,7 +223,9 @@ class Shrawler:
             """python3 shrawler.py homelab.local/user:password@dc-ip"""
         )
         parser.add_argument(
-            "target", action="store", help="[[domain/]username[:password]@]<dc-ip>"
+            "target",
+            action="store",
+            help="[[domain/]username[:password]@]<dc-ip>",
         )
         parser.add_argument("-v", "--verbose", action="store_true", help="Verbose")
         parser.add_argument(
@@ -274,12 +275,6 @@ class Shrawler:
             "-k",
             action="store_true",
             help="Use Kerberos authentication. Grabs credentials from ccache file (KRB5CCNAME) based on target parameters. If valid credentials cannot be found, it will use the ones specified in the command line",
-        )
-        group.add_argument(
-            "-aesKey",
-            action="store",
-            metavar="hex key",
-            help="AES key to use for Kerberos Authentication (128 or 256 bits)",
         )
 
         spider = parser.add_argument_group("spider")
@@ -500,15 +495,9 @@ class Shrawler:
     ):
         """
         Initiate SMB Session with host using impacket libraries.
-        Will try to use Kerberos for authentication.
         """
         try:
             smbClient = SMBConnection(address, address, sess_port=int(445))
-            try:
-                smbClient._doKerberos = True  # Set this flag to enable Kerberos
-                logging.debug("Using Kerberos Auth")
-            except:
-                logging.debug("Kerberos auth unsuccessful")
 
             dialect = smbClient.getDialect()
 
@@ -620,27 +609,36 @@ class Shrawler:
             try:
                 if self.check_port(mach_ip, 445):
                     # Start SMB session against the host in question
-                    smbclient = self.init_smb_session(
-                        domain, self.username, self.password, mach_ip, lmhash, nthash
-                    )
+                    try:
+                        smbclient = self.init_smb_session(
+                            domain,
+                            self.username,
+                            self.password,
+                            mach_ip,
+                            lmhash,
+                            nthash,
+                        )
 
-                    # get shares on host
-                    results = Enumerate().get_shares(
-                        mach_ip,
-                        mach_name,
-                        smbclient,
-                        self.normal_shares,
-                        self.args.spider,
-                        self.args.shares,
-                    )
-                    # # output to file in json format
-                    self.output_to_json(mach_ip, self.username, results)
+                        # get shares on host
+                        results = Enumerate().get_shares(
+                            mach_ip,
+                            mach_name,
+                            smbclient,
+                            self.normal_shares,
+                            self.args.spider,
+                            self.args.shares,
+                        )
+                        # # output to file in json format
+                        self.output_to_json(mach_ip, self.username, results)
 
-                    # just for a new line
-                    print("")
+                        # just for a new line
+                        print("")
 
-                    # This is used to separate hosts. Will print a colored line after each host.
-                    print(success(""))
+                        # This is used to separate hosts. Will print a colored line after each host.
+                        print(success(""))
+                    except Exception as e:
+                        logging.debug(e)
+                        continue
                 else:
                     logging.warning(f"Port 445 not open on '{mach_ip}'")
                     print(error(""))
