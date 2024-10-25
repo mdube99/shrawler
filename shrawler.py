@@ -276,6 +276,12 @@ class Shrawler:
             action="store_true",
             help="Use Kerberos authentication. Grabs credentials from ccache file (KRB5CCNAME) based on target parameters. If valid credentials cannot be found, it will use the ones specified in the command line",
         )
+        group.add_argument(
+            "-aesKey",
+            action="store",
+            metavar="hex key",
+            help="AES key to use for Kerberos Authentication (128 or 256 bits)",
+        )
 
         spider = parser.add_argument_group("spider")
         spider.add_argument(
