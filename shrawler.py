@@ -20,6 +20,8 @@ from colorama import init, Fore, Style
 
 # custom log colors
 class Formatter(logging.Formatter):
+    """Custom Formatter."""
+
     def format(self, record):
         init()
         if record.levelno == logging.INFO:
@@ -32,6 +34,7 @@ class Formatter(logging.Formatter):
 
 
 def error(msg: str) -> str:
+    """Custom error message."""
     max_length: int = 70
     padding: int = max(0, (max_length - len(msg)) // 2)
     this: str = "-" * padding + msg + "-" * (max_length - len(msg) - padding)
@@ -39,6 +42,7 @@ def error(msg: str) -> str:
 
 
 def success(msg: str) -> str:
+    """Custom success message."""
     max_length: int = 70
     padding: int = max(0, (max_length - len(msg)) // 2)
     this: str = "-" * padding + msg + "-" * (max_length - len(msg) - padding)
@@ -48,9 +52,10 @@ def success(msg: str) -> str:
 def print_share_info(
     share_name: str,
     share_comment: str,
-    share_perms: dict,
+    share_perms: dict[str, str],
     largest_share_name: int,
 ) -> None:
+    """Custom print message."""
     if share_perms["read"] and share_perms["write"]:
         prefix = Fore.GREEN + "[+]" + Style.RESET_ALL
     elif share_perms["read"] and not share_perms["write"]:
@@ -74,9 +79,161 @@ def print_share_info(
     print(f"    {prefix} {share_name.ljust(largest_share_name + 20)} | Read: {read.ljust(3)} | Write: {write.ljust(3)} | Comment: {share_comment if share_comment else 'N/A'}")
 
 
-class Enumerate:
+class Shrawler:
+    """SMB Share Crawling Tool."""
+
     def __init__(self) -> None:
-        pass
+        init()  # for Colorama
+        parser = argparse.ArgumentParser(
+            """python3 shrawler.py homelab.local/user:password@dc-ip"""
+        )
+        parser.add_argument(
+            "target",
+            action="store",
+            help="[[domain/]username[:password]@]<dc-ip>",
+        )
+        parser.add_argument("-v", "--verbose", action="store_true", help="Verbose")
+        parser.add_argument(
+            "--read-only",
+            dest="read_only",
+            action="store_true",
+            help="Skip checking for write permission",
+        )
+        parser.add_argument(
+            "--skip-share",
+            dest="skip_share",
+            help="Additional shares to skip, separated by comma. Case Sensitive",
+        )
+        parser.add_argument(
+            "--add-share",
+            dest="add_share",
+            help="Add additional shares to search for, separated by comma. Case sensitive",
+        )
+        parser.add_argument(
+            "--shares",
+            dest="shares",
+            help="Only scan shares specified with this argument",
+        )
+        parser.add_argument("--output", action="store_true", help="Json file output")
+        parser.add_argument(
+            "--hosts-file",
+            action="store",
+            dest="hosts_file",
+            help="File containing IP addresses of target machines",
+        )
+        parser.add_argument("--host", action="store", help="Specific machine to target")
+
+        group = parser.add_argument_group("authentication")
+        group.add_argument(
+            "-H",
+            "--hashes",
+            action="store",
+            metavar="LMHASH:NTHASH",
+            help="NTLM hashes, format is NTHASH:LMHASH",
+        )
+        group.add_argument(
+            "-no-pass",
+            action="store_true",
+            help="Don't ask for password (useful for -k)",
+        )
+        group.add_argument(
+            "-k",
+            action="store_true",
+            help="Use Kerberos authentication. Grabs credentials from ccache file (KRB5CCNAME) based on target parameters. If valid credentials cannot be found, it will use the ones specified in the command line",
+        )
+        group.add_argument(
+            "-aesKey",
+            action="store",
+            metavar="hex key",
+            help="AES key to use for Kerberos Authentication (128 or 256 bits)",
+        )
+
+        spider = parser.add_argument_group("spider")
+        spider.add_argument(
+            "--spider", action="store_true", help="Spider all shares found"
+        )
+        spider.add_argument(
+            "--extensions",
+            action="store",
+            dest="extensions",
+            help="Search for specific file extensions only, separated by ','. "
+            "You can also specify '--extensions default' for shrawler to choose the extensions for you.",
+        )
+        spider.add_argument(
+            "--max-depth",
+            action="store",
+            dest="max_depth",
+            type=int,
+            default=5,
+            help="Max depth of spidering. Default: 5",
+        )
+
+        self.args = parser.parse_args()
+
+        self.verbose = self.args.verbose
+
+        self.normal_shares = [
+            "ADMIN$",
+            "C$",
+            "IPC$",
+            "NETLOGON",
+            "PRINT$",
+            "print$",
+            "SYSVOL",
+        ]
+
+        # extensions that it will look for
+        self.extensions = [
+            ".txt",
+            ".csv",
+            ".xlsx",
+            ".pdf",
+            ".kbdx",
+            ".kbd",
+            ".docx",
+            ".doc",
+            ".xls",
+            ".ps1",
+            ".bat",
+            ".vbs",
+            ".tar",
+            ".zip",
+            ".sh",
+            ".json",
+            ".ini",
+            ".conf",
+            ".cnf",
+            ".config",
+            ".properties",
+            ".prop",
+            ".yaml",
+            ".yml",
+            ".pem",
+            ".key",
+            ".sql",
+            ".db",
+        ]
+
+    def banner(self):
+        ascii = r"""
+   _____ _                        _           
+  / ____| |                      | |          
+ | (___ | |__  _ __ __ ___      _| | ___ _ __ 
+  \___  | '_  | '__/ _` \ \ /\ / / |/ _ \ '__|
+  ____) | | | | | | (_| |\ V  V /| |  __/ |   
+ |_____/|_| |_|_|  \__,_| \_/\_/ |_|\___|_|   
+        """
+        return Fore.GREEN + ascii + Style.RESET_ALL + "\n"
+
+    def check_port(self, machine: str, port: int) -> bool:
+        """Check if port is open."""
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.settimeout(1)
+
+            try:
+                return s.connect_ex((machine, port)) == 0
+            except:
+                return False
 
     def get_shares(
         self,
@@ -214,161 +371,6 @@ class Enumerate:
                 logging.debug(f"Full error: {e}")
                 read_write["write"] = False
         return read_write
-
-
-class Shrawler:
-    def __init__(self) -> None:
-        init()  # for Colorama
-        parser = argparse.ArgumentParser(
-            """python3 shrawler.py homelab.local/user:password@dc-ip"""
-        )
-        parser.add_argument(
-            "target",
-            action="store",
-            help="[[domain/]username[:password]@]<dc-ip>",
-        )
-        parser.add_argument("-v", "--verbose", action="store_true", help="Verbose")
-        parser.add_argument(
-            "--read-only",
-            dest="read_only",
-            action="store_true",
-            help="Skip checking for write permission",
-        )
-        parser.add_argument(
-            "--skip-share",
-            dest="skip_share",
-            help="Additional shares to skip, separated by comma. Case Sensitive",
-        )
-        parser.add_argument(
-            "--add-share",
-            dest="add_share",
-            help="Add additional shares to search for, separated by comma. Case sensitive",
-        )
-        parser.add_argument(
-            "--shares",
-            dest="shares",
-            help="Only scan shares specified with this argument",
-        )
-        parser.add_argument("--output", action="store_true", help="Json file output")
-        parser.add_argument(
-            "--hosts-file",
-            action="store",
-            dest="hosts_file",
-            help="File containing IP addresses of target machines",
-        )
-        parser.add_argument("--host", action="store", help="Specific machine to target")
-
-        group = parser.add_argument_group("authentication")
-        group.add_argument(
-            "-H",
-            "--hashes",
-            action="store",
-            metavar="LMHASH:NTHASH",
-            help="NTLM hashes, format is NTHASH:LMHASH",
-        )
-        group.add_argument(
-            "-no-pass",
-            action="store_true",
-            help="Don't ask for password (useful for -k)",
-        )
-        group.add_argument(
-            "-k",
-            action="store_true",
-            help="Use Kerberos authentication. Grabs credentials from ccache file (KRB5CCNAME) based on target parameters. If valid credentials cannot be found, it will use the ones specified in the command line",
-        )
-        group.add_argument(
-            "-aesKey",
-            action="store",
-            metavar="hex key",
-            help="AES key to use for Kerberos Authentication (128 or 256 bits)",
-        )
-
-        spider = parser.add_argument_group("spider")
-        spider.add_argument(
-            "--spider", action="store_true", help="Spider all shares found"
-        )
-        spider.add_argument(
-            "--extensions",
-            action="store",
-            dest="extensions",
-            help="Search for specific file extensions only, separated by ','. "
-            "You can also specify '--extensions default' for shrawler to choose the extensions for you.",
-        )
-        spider.add_argument(
-            "--max-depth",
-            action="store",
-            dest="max_depth",
-            type=int,
-            default=5,
-            help="Max depth of spidering. Default: 5",
-        )
-
-        self.args = parser.parse_args()
-
-        self.verbose = self.args.verbose
-
-        self.normal_shares = [
-            "ADMIN$",
-            "C$",
-            "IPC$",
-            "NETLOGON",
-            "PRINT$",
-            "print$",
-            "SYSVOL",
-        ]
-
-        # extensions that it will look for
-        self.extensions = [
-            ".txt",
-            ".csv",
-            ".xlsx",
-            ".pdf",
-            ".kbdx",
-            ".kbd",
-            ".docx",
-            ".doc",
-            ".xls",
-            ".ps1",
-            ".bat",
-            ".vbs",
-            ".tar",
-            ".zip",
-            ".sh",
-            ".json",
-            ".ini",
-            ".conf",
-            ".cnf",
-            ".config",
-            ".properties",
-            ".prop",
-            ".yaml",
-            ".yml",
-            ".pem",
-            ".key",
-            ".sql",
-            ".db",
-        ]
-
-    def banner(self):
-        ascii = """
-   _____ _                        _           
-  / ____| |                      | |          
- | (___ | |__  _ __ __ ___      _| | ___ _ __ 
-  \___ \| '_ \| '__/ _` \ \ /\ / / |/ _ \ '__|
-  ____) | | | | | | (_| |\ V  V /| |  __/ |   
- |_____/|_| |_|_|  \__,_| \_/\_/ |_|\___|_|   
-        """
-        return Fore.GREEN + ascii + Style.RESET_ALL + "\n"
-
-    def check_port(self, machine: str, port: int) -> bool:
-        "Check if port is open"
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-            s.settimeout(1)
-
-            try:
-                return s.connect_ex((machine, port)) == 0
-            except:
-                return False
 
     def build_tree_structure(
         self,
@@ -626,7 +628,7 @@ class Shrawler:
                         )
 
                         # get shares on host
-                        results = Enumerate().get_shares(
+                        results = self.get_shares(
                             mach_ip,
                             mach_name,
                             smbclient,
@@ -635,7 +637,8 @@ class Shrawler:
                             self.args.shares,
                         )
                         # # output to file in json format
-                        self.output_to_json(mach_ip, self.username, results)
+                        if self.args.output:
+                            self.output_to_json(mach_ip, self.username, results)
 
                         # just for a new line
                         print("")
@@ -657,5 +660,10 @@ class Shrawler:
                 continue
 
 
-if __name__ == "__main__":
+def main() -> None:
+    """Calling shrawler."""
     Shrawler().main()
+
+
+if __name__ == "__main__":
+    main()
