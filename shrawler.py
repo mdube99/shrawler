@@ -22,7 +22,7 @@ from colorama import init, Fore, Style
 class Formatter(logging.Formatter):
     """Custom Formatter."""
 
-    def format(self, record):
+    def format(self, record: logging.LogRecord):
         init()
         if record.levelno == logging.INFO:
             self._style._fmt = f"{Fore.GREEN}[+]{Style.RESET_ALL} %(message)s"
@@ -240,10 +240,10 @@ class Shrawler:
         target: str,
         mach_name: str,
         smbclient: Any,
-        default_shares: list,
-        spider=False,
-        desired_share="",
-    ) -> dict:
+        default_shares,
+        spider: bool = False,
+        desired_share: str = "",
+    ) -> dict[str, list[Any]]:
         shares = smbclient.listShares()
         results = {}
         results[target] = []
@@ -335,7 +335,7 @@ class Shrawler:
                         # Store the directory for later processing
                         directories.append(next_fullpath + "/")
                         # if self.args.max_depth <= len(directories):
-                        Shrawler().build_tree_structure(
+                        self.build_tree_structure(
                             base_dir,
                             result.get_longname(),
                             smbclient,
@@ -636,7 +636,7 @@ class Shrawler:
                             self.args.spider,
                             self.args.shares,
                         )
-                        # # output to file in json format
+                        # output to file in json format
                         if self.args.output:
                             self.output_to_json(mach_ip, self.username, results)
 
