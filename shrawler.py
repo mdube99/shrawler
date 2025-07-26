@@ -7,13 +7,13 @@ from impacket.smbconnection import (
     SMB_DIALECT,
     SessionError,
 )
-
 from impacket.examples.utils import parse_target
 import socket
 import argparse
 import logging
 import json
 import time
+import os
 from typing import Any
 from colorama import init, Fore, Style
 
@@ -152,12 +152,17 @@ class Shrawler:
         spider.add_argument(
             "--spider", action="store_true", help="Spider all shares found"
         )
+        # Download files
+        # If you specify nothing, it will download everything
         spider.add_argument(
-            "--extensions",
+            "--download",
             action="store",
-            dest="extensions",
-            help="Search for specific file extensions only, separated by ','. "
-            "You can also specify '--extensions default' for shrawler to choose the extensions for you.",
+            dest="download",
+            nargs="?",
+            const=" ",
+            help="Download files. Specify nothing, it will download everything."
+            "You can specify specific extensions limited by a ','."
+            "You can also specify '--download default' for shrawler to choose the extensions for you.",
         )
         spider.add_argument(
             "--max-depth",
@@ -234,6 +239,40 @@ class Shrawler:
                 return s.connect_ex((machine, port)) == 0
             except:
                 return False
+
+    def download_file(
+        self, smbclient, share: str, remote_path: str, local_filename: str
+    ) -> str:
+        """
+        Downloads a file from the SMB share and saves it locally.
+
+        Args:
+            smbclient: The SMB client instance
+            share: SMB share name
+            remote_path: Full path to the remote file
+            local_filename: Local filename to save as
+
+        Returns:
+            bool: True if download successful, False otherwise
+        """
+        try:
+            # Create downloads directory if it doesn't exist
+            downloads_dir = "downloads"
+            if not os.path.exists(downloads_dir):
+                os.makedirs(downloads_dir)
+
+            local_path = os.path.join(downloads_dir, local_filename)
+
+            # Download the file using impacket's getFile method
+            with open(local_path, "wb") as local_file:
+                smbclient.getFile(share, remote_path, local_file.write)
+
+            downloaded = f" {Fore.CYAN}[DOWNLOADED]{Style.RESET_ALL}"
+            return downloaded
+
+        except Exception as e:
+            failed = f" {Fore.RED}[ERROR]{Style.RESET_ALL} Failed to download: {str(e)}"
+            return failed
 
     def get_shares(
         self,
@@ -323,7 +362,6 @@ class Shrawler:
                         + f"\\\\{target}\\{share}\\{base_dir}"
                         + result.get_longname()
                     )
-
                     # Clean up the file path to standardize format
                     file = file.replace("/*", "")
                     file = file.replace("\\*\\", "\\")
@@ -409,6 +447,7 @@ class Shrawler:
                 for result in results:
                     if result.get_longname() not in [".", ".."]:
                         next_filedir = result.get_longname()
+                        count += 1  # Fixed: increment count for each item
                         is_last = (
                             count == total_items
                         )  # Determine if it's the last item
@@ -428,28 +467,53 @@ class Shrawler:
                         else:
                             # Print file with the correct connector and indentation
                             file_connector = "└── " if is_last else "├── "
-                            if self.args.extensions:
-                                if not self.args.extensions == "default":
-                                    self.extensions = self.args.extensions.split(",")
-                                for ext in self.extensions:
-                                    if next_filedir.endswith(ext):
-                                        print(
-                                            indent
-                                            + file_connector
-                                            + Fore.GREEN
-                                            + next_filedir
-                                            + Style.RESET_ALL
-                                            + f"  {Fore.YELLOW + mtime + Style.RESET_ALL}"
-                                        )
-                            else:
-                                print(
-                                    indent
-                                    + file_connector
-                                    + Fore.GREEN
-                                    + next_filedir
-                                    + Style.RESET_ALL
-                                    + f"  {Fore.YELLOW + mtime + Style.RESET_ALL}"
+                            download_status = ""
+
+                            if self.args.download and self.args.download != "default":
+                                # Split extensions and check if file matches any
+                                extensions = self.args.download.split(",")
+                                for ext in extensions:
+                                    if next_filedir.endswith(ext.strip()):
+                                        should_download = True
+                                        break
+                            elif self.args.download == "default":
+                                # Download all files when set to "default"
+                                should_download = True
+
+                            # Download the file if criteria met
+                            if should_download:
+                                remote_file_path = (
+                                    base_dir + directory + "/" + next_filedir
                                 )
+                                # Create local filename by replacing '/' with '_'
+                                local_filename = f"{self.args.host}_{remote_file_path.replace('/', '_').lstrip('_')}"
+                                # local_filename = remote_file_path.replace(
+                                #     "/", "_"
+                                # ).lstrip("_")
+
+                                download_success = self.download_file(
+                                    smbclient,
+                                    share,
+                                    remote_file_path,
+                                    local_filename,
+                                )
+                                # Add download status indicator
+                                download_status = (
+                                    f" {Fore.CYAN}[DOWNLOADED]{Style.RESET_ALL}"
+                                    if download_success
+                                    else f" {Fore.RED}[FAILED]{Style.RESET_ALL}"
+                                )
+
+                            # Always print the file (regardless of download status)
+                            print(
+                                indent
+                                + file_connector
+                                + Fore.GREEN
+                                + next_filedir
+                                + Style.RESET_ALL
+                                + f"  {Fore.YELLOW + mtime + Style.RESET_ALL}"
+                                + download_status
+                            )
 
         except Exception as e:
             logging.warning(f"Error accessing directory: {e}")
