@@ -425,6 +425,8 @@ class Shrawler:
         Recursively prints the tree structure for a given directory, appending paths using string concatenation.
         """
 
+        should_download = False
+
         connector = "└── " if last else "├── "
         print(indent + connector + Fore.BLUE + directory + Style.RESET_ALL)
 
@@ -479,6 +481,8 @@ class Shrawler:
                             elif self.args.download == "default":
                                 # Download all files when set to "default"
                                 should_download = True
+                            else:
+                                should_download = False
 
                             # Download the file if criteria met
                             if should_download:
@@ -593,7 +597,7 @@ class Shrawler:
                     lmhash,
                     nthash,
                     self.args.aesKey,
-                    self.args.domaincontroller,
+                    self.domain_controller,
                 )
 
             else:
@@ -632,7 +636,9 @@ class Shrawler:
 
         print(self.banner())
         # parses the argument 'target' to get the values needed
-        domain, self.username, self.password, _ = parse_target(self.args.target)
+        domain, self.username, self.password, self.domain_controller = parse_target(
+            self.args.target
+        )
         if (
             len(self.password) == 0
             and len(self.username) != 0
