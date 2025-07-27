@@ -57,3 +57,6 @@ requires-python = ">=3.8"
 
 [project.scripts]
 shrawler = "shrawler:main"
+
+[tool.setuptools]
+py-modules = ["shrawler"]
