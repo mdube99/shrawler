@@ -470,20 +470,31 @@ class Shrawler:
                             # Print file with the correct connector and indentation
                             file_connector = "└── " if is_last else "├── "
                             download_status = ""
-
-                            if self.args.download and self.args.download != "default":
+                            if (
+                                self.args.download
+                                and self.args.download.strip()
+                                and self.args.download != "default"
+                            ):
                                 # Split extensions and check if file matches any
                                 extensions = self.args.download.split(",")
                                 for ext in extensions:
-                                    if next_filedir.endswith(ext.strip()):
+                                    ext = ext.strip()
+                                    # Ensure the extension starts with a dot
+                                    if not ext.startswith("."):
+                                        ext = "." + ext
+                                    if next_filedir.lower().endswith(ext.lower()):
                                         should_download = True
                                         break
                             elif self.args.download == "default":
                                 # Download all files when set to "default"
                                 should_download = True
+                            elif (
+                                self.args.download and self.args.download.strip() == ""
+                            ):
+                                # Download everything when --download is used without arguments
+                                should_download = True
                             else:
                                 should_download = False
-
                             # Download the file if criteria met
                             if should_download:
                                 remote_file_path = (
