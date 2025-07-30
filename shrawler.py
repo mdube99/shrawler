@@ -325,7 +325,7 @@ class Shrawler:
                         if spider and share_perms["read"]:
                             print("")
                             logging.info(f"{mach_name}\\{share_name}")
-                            self.spider_shares(target, share_name, "", smbclient)
+                            self.spider_shares(target, share_name, "/", smbclient)
 
                         # If you're not spidering, will print out
                         else:
@@ -345,41 +345,52 @@ class Shrawler:
 
     def spider_shares(self, target: str, share: str, base_dir: str, smbclient) -> None:
         directories = []
+        files = []
         try:
             # List all items in the base directory
-            for result in smbclient.listPath(share, base_dir + "*", password=None):
+            results = list(smbclient.listPath(share, base_dir + "*", password=None))
+
+            # Separate directories and files
+            for result in results:
                 if result.get_longname() not in [".", ".."]:
-                    next_filedir = result.get_longname()
-                    next_fullpath = base_dir + next_filedir
-                    file_metadata = Shrawler().parse_file(result)
-
-                    size = file_metadata["size"]
-                    mtime = file_metadata["mtime"]
-
-                    file = (
-                        size
-                        + mtime
-                        + f"\\\\{target}\\{share}\\{base_dir}"
-                        + result.get_longname()
-                    )
-                    # Clean up the file path to standardize format
-                    file = file.replace("/*", "")
-                    file = file.replace("\\*\\", "\\")
-                    file = file.replace("/\\", "\\")
-                    file = file.replace("/", "\\")
-                    file = file.replace("\\\\", "\\")
-
                     if result.is_directory():
-                        # Store the directory for later processing
-                        directories.append(next_fullpath + "/")
-                        # if self.args.max_depth <= len(directories):
-                        self.build_tree_structure(
-                            base_dir,
-                            result.get_longname(),
-                            smbclient,
-                            share,
-                            mtime,
-                        )
+                        directories.append(result)
+                    else:
+                        files.append(result)
+
+            # Calculate total items for proper tree formatting
+            total_items = len(directories) + len(files)
+            current_item = 0
+
+            # Process directories first
+            for directory in directories:
+                current_item += 1
+                is_last = current_item == total_items
+
+                next_filedir = directory.get_longname()
+                file_metadata = Shrawler().parse_file(directory)
+                mtime = file_metadata["mtime"]
+
+                self.build_tree_structure(
+                    base_dir, next_filedir, smbclient, share, mtime
+                )
+
+            # Process files at root level
+            for file_result in files:
+                current_item += 1
+                is_last = current_item == total_items
+
+                file_metadata = Shrawler().parse_file(file_result)
+                mtime = file_metadata["mtime"]
+
+                connector = "└── " if is_last else "├── "
+                print(
+                    connector
+                    + Fore.GREEN
+                    + file_result.get_longname()
+                    + Style.RESET_ALL
+                    + f"  {Fore.YELLOW + mtime + Style.RESET_ALL}"
+                )
 
         except Exception as e:
             logging.warning(e)
