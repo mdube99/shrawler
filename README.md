@@ -48,14 +48,14 @@
 The basic syntax for running Shrawler is:
 
 ```bash
-shrawler [[domain/]username[:password]@]<target-ip> [options]
+shrawler [[domain/]username[:password]@]<dc-ip> [options]
 ```
 
 ### Command-Line Arguments
 
 | Argument | Description |
 | :--- | :--- |
-| **`target`** | **Required**. Specifies the target and credentials. Format: `[[domain/]username[:password]@]<ip>` |
+| **`target`** | **Required**. Specifies the target and credentials. Format: `[[domain/]username[:password]@]<dc-ip>` |
 | `-v`, `--verbose` | Enable verbose output for debugging. |
 | `--read-only` | Skips the write permission check, only checking for read access. |
 | `--skip-share <shares>` | Comma-separated list of additional shares to skip (e.g., `data,backup`). |
