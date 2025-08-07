@@ -172,6 +172,14 @@ class Shrawler:
             default=5,
             help="Max depth of spidering. Default: 5",
         )
+        spider.add_argument(
+            "--delay",
+            action="store",
+            dest="delay",
+            type=int,
+            default=0,
+            help="Seconds to wait between file/directory request. Default: 0",
+        )
 
         self.args = parser.parse_args()
 
@@ -409,6 +417,10 @@ class Shrawler:
             if depth < self.args.max_depth - 1:
                 for result in results:
                     if result.get_longname() not in [".", ".."]:
+                        # throttling
+                        if self.args.delay > 0:
+                            time.sleep(self.args.delay)
+
                         next_filedir = result.get_longname()
                         count += 1  # Fixed: increment count for each item
                         is_last = (
