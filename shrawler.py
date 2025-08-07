@@ -343,58 +343,6 @@ class Shrawler:
             logging.warning("No desired shares found")
         return results
 
-    def spider_shares(self, target: str, share: str, base_dir: str, smbclient) -> None:
-        directories = []
-        files = []
-        try:
-            # List all items in the base directory
-            results = list(smbclient.listPath(share, base_dir + "*", password=None))
-
-            # Separate directories and files
-            for result in results:
-                if result.get_longname() not in [".", ".."]:
-                    if result.is_directory():
-                        directories.append(result)
-                    else:
-                        files.append(result)
-
-            # Calculate total items for proper tree formatting
-            total_items = len(directories) + len(files)
-            current_item = 0
-
-            # Process directories first
-            for directory in directories:
-                current_item += 1
-                is_last = current_item == total_items
-
-                next_filedir = directory.get_longname()
-                file_metadata = Shrawler().parse_file(directory)
-                mtime = file_metadata["mtime"]
-
-                self.build_tree_structure(
-                    base_dir, next_filedir, smbclient, share, mtime
-                )
-
-            # Process files at root level
-            for file_result in files:
-                current_item += 1
-                is_last = current_item == total_items
-
-                file_metadata = Shrawler().parse_file(file_result)
-                mtime = file_metadata["mtime"]
-
-                connector = "└── " if is_last else "├── "
-                print(
-                    connector
-                    + Fore.GREEN
-                    + file_result.get_longname()
-                    + Style.RESET_ALL
-                    + f"  {Fore.YELLOW + mtime + Style.RESET_ALL}"
-                )
-
-        except Exception as e:
-            logging.warning(e)
-
     def check_share_perm(self, share: str, smbclient) -> dict:
         read_write = {"read": False, "write": "N/A"}
 
@@ -436,8 +384,6 @@ class Shrawler:
         Recursively prints the tree structure for a given directory, appending paths using string concatenation.
         """
 
-        should_download = False
-
         connector = "└── " if last else "├── "
         print(indent + connector + Fore.BLUE + directory + Style.RESET_ALL)
 
@@ -478,34 +424,50 @@ class Shrawler:
                                 depth=depth + 1,
                             )
                         else:
+                            # Get file metadata for this specific file
+                            file_metadata = Shrawler().parse_file(result)
+                            file_mtime = file_metadata["mtime"]
+
                             # Print file with the correct connector and indentation
                             file_connector = "└── " if is_last else "├── "
                             download_status = ""
-                            if (
-                                self.args.download
-                                and self.args.download.strip()
-                                and self.args.download != "default"
-                            ):
-                                # Split extensions and check if file matches any
-                                extensions = self.args.download.split(",")
-                                for ext in extensions:
-                                    ext = ext.strip()
-                                    # Ensure the extension starts with a dot
-                                    if not ext.startswith("."):
-                                        ext = "." + ext
-                                    if next_filedir.lower().endswith(ext.lower()):
-                                        should_download = True
-                                        break
-                            elif self.args.download == "default":
-                                # Download all files when set to "default"
-                                should_download = True
-                            elif (
-                                self.args.download and self.args.download.strip() == ""
-                            ):
-                                # Download everything when --download is used without arguments
-                                should_download = True
-                            else:
-                                should_download = False
+                            should_download = False
+
+                            # Fixed download logic
+                            if self.args.download is not None:  # --download was used
+                                if (
+                                    self.args.download.strip() == ""
+                                ):  # --download with no args (const=" ")
+                                    should_download = True
+                                elif (
+                                    self.args.download == "default"
+                                ):  # --download default
+                                    # Use self.extensions for default behavior
+                                    filename_lower = next_filedir.lower()
+                                    for ext in self.extensions:
+                                        ext_lower = ext.lower()
+                                        # Ensure the extension starts with a dot
+                                        if not ext_lower.startswith("."):
+                                            ext_lower = "." + ext_lower
+                                        if filename_lower.endswith(ext_lower):
+                                            should_download = True
+                                            break
+                                else:  # --download with specific extensions
+                                    extensions = [
+                                        ext.strip()
+                                        for ext in self.args.download.split(",")
+                                    ]
+                                    filename_lower = next_filedir.lower()
+
+                                    for ext in extensions:
+                                        ext = ext.strip().lower()
+                                        # Ensure the extension starts with a dot
+                                        if not ext.startswith("."):
+                                            ext = "." + ext
+                                        if filename_lower.endswith(ext):
+                                            should_download = True
+                                            break
+
                             # Download the file if criteria met
                             if should_download:
                                 remote_file_path = (
@@ -513,9 +475,6 @@ class Shrawler:
                                 )
                                 # Create local filename by replacing '/' with '_'
                                 local_filename = f"{self.args.host}_{remote_file_path.replace('/', '_').lstrip('_')}"
-                                # local_filename = remote_file_path.replace(
-                                #     "/", "_"
-                                # ).lstrip("_")
 
                                 download_success = self.download_file(
                                     smbclient,
@@ -530,17 +489,119 @@ class Shrawler:
                                     else f" {Fore.RED}[FAILED]{Style.RESET_ALL}"
                                 )
 
-                            # Always print the file (regardless of download status)
+                            # Always print the file (use file-specific mtime, not directory mtime)
                             print(
                                 indent
                                 + file_connector
                                 + Fore.GREEN
                                 + next_filedir
                                 + Style.RESET_ALL
-                                + f"  {Fore.YELLOW + mtime + Style.RESET_ALL}"
+                                + f"  {Fore.YELLOW + file_mtime + Style.RESET_ALL}"
                                 + download_status
                             )
 
+        except Exception as e:
+            logging.warning(f"Error accessing directory: {e}")
+
+    def spider_shares(self, target: str, share: str, base_dir: str, smbclient) -> None:
+        directories = []
+        files = []
+        try:
+            # List all items in the base directory
+            results = list(smbclient.listPath(share, base_dir + "*", password=None))
+
+            # Separate directories and files
+            for result in results:
+                if result.get_longname() not in [".", ".."]:
+                    if result.is_directory():
+                        directories.append(result)
+                    else:
+                        files.append(result)
+
+            # Calculate total items for proper tree formatting
+            total_items = len(directories) + len(files)
+            current_item = 0
+
+            # Process directories first
+            for directory in directories:
+                current_item += 1
+                is_last = current_item == total_items
+
+                next_filedir = directory.get_longname()
+                file_metadata = Shrawler().parse_file(directory)
+                mtime = file_metadata["mtime"]
+
+                self.build_tree_structure(
+                    base_dir, next_filedir, smbclient, share, mtime
+                )
+
+            # Process files at root level with download logic
+            for file_result in files:
+                current_item += 1
+                is_last = current_item == total_items
+
+                file_metadata = Shrawler().parse_file(file_result)
+                mtime = file_metadata["mtime"]
+
+                connector = "└── " if is_last else "├── "
+                download_status = ""
+                should_download = False
+
+                # Apply the same fixed download logic here
+                if self.args.download is not None:  # --download was used
+                    if self.args.download.strip() == "":  # --download with no args
+                        should_download = True
+                    elif self.args.download == "default":  # --download default
+                        # Use self.extensions for default behavior
+                        filename_lower = file_result.get_longname().lower()
+                        for ext in self.extensions:
+                            ext_lower = ext.lower()
+                            # Ensure the extension starts with a dot
+                            if not ext_lower.startswith("."):
+                                ext_lower = "." + ext_lower
+                            if filename_lower.endswith(ext_lower):
+                                should_download = True
+                                break
+                    else:  # --download with specific extensions
+                        extensions = [
+                            ext.strip() for ext in self.args.download.split(",")
+                        ]
+                        filename_lower = file_result.get_longname().lower()
+
+                        for ext in extensions:
+                            ext = ext.strip().lower()
+                            # Ensure the extension starts with a dot
+                            if not ext.startswith("."):
+                                ext = "." + ext
+                            if filename_lower.endswith(ext):
+                                should_download = True
+                                break
+
+                # Download the file if criteria met
+                if should_download:
+                    remote_file_path = base_dir + file_result.get_longname()
+                    local_filename = f"{self.args.host}_{remote_file_path.replace('/', '_').lstrip('_')}"
+
+                    download_success = self.download_file(
+                        smbclient,
+                        share,
+                        remote_file_path,
+                        local_filename,
+                    )
+                    download_status = (
+                        f" {Fore.CYAN}[DOWNLOADED]{Style.RESET_ALL}"
+                        if download_success
+                        else f" {Fore.RED}[FAILED]{Style.RESET_ALL}"
+                    )
+
+                print(
+                    connector
+                    + Fore.GREEN
+                    + file_result.get_longname()
+                    + Style.RESET_ALL
+                    + f"  {Fore.YELLOW + mtime + Style.RESET_ALL}"
+                    + download_status
+                )
         except Exception as e:
             logging.warning(f"Error accessing directory: {e}")
 
