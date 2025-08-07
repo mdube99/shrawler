@@ -176,7 +176,7 @@ class Shrawler:
             "--delay",
             action="store",
             dest="delay",
-            type=int,
+            type=float,
             default=0,
             help="Seconds to wait between file/directory request. Default: 0",
         )
