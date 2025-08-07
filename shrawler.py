@@ -76,7 +76,7 @@ def print_share_info(
         write = "No"
 
     # fmt: off
-    print(f"    {prefix} {share_name.ljust(largest_share_name + 20)} | Read: {read.ljust(3)} | Write: {write.ljust(3)} | Comment: {share_comment if share_comment else 'N/A'}")
+    print(f"     {prefix} {share_name.ljust(largest_share_name + 20)} | Read: {read.ljust(3)} | Write: {write.ljust(3)} | Comment: {share_comment if share_comment else 'N/A'}")
 
 
 class Shrawler:
@@ -172,8 +172,19 @@ class Shrawler:
             default=5,
             help="Max depth of spidering. Default: 5",
         )
+        spider.add_argument(
+            "--delay",
+            action="store",
+            dest="delay",
+            type=float,
+            default=0,
+            help="Seconds to wait between file/directory request. Default: 0",
+        )
 
         self.args = parser.parse_args()
+
+        self.download_count = 0
+        self.files_seen_count = 0
 
         self.verbose = self.args.verbose
 
@@ -221,12 +232,12 @@ class Shrawler:
 
     def banner(self):
         ascii = r"""
-   _____ _                        _           
-  / ____| |                      | |          
- | (___ | |__  _ __ __ ___      _| | ___ _ __ 
-  \___  | '_  | '__/ _` \ \ /\ / / |/ _ \ '__|
-  ____) | | | | | | (_| |\ V  V /| |  __/ |   
- |_____/|_| |_|_|  \__,_| \_/\_/ |_|\___|_|   
+  _____ _                      _            
+ / ____| |                    | |           
+| (___ | |__  _ __ __ ___   __| | ___ _ __  
+ \___ \| '_ \| '__/ _` \ \ /\ / / |/ _ \ '__|
+ ____) | | | | | | (_| |\ V  V /| |  __/ |   
+|_____/|_| |_|_|  \__,_| \_/\_/ |_|\___|_|   
         """
         return Fore.GREEN + ascii + Style.RESET_ALL + "\n"
 
@@ -242,7 +253,7 @@ class Shrawler:
 
     def download_file(
         self, smbclient, share: str, remote_path: str, local_filename: str
-    ) -> str:
+    ) -> bool:
         """
         Downloads a file from the SMB share and saves it locally.
 
@@ -267,12 +278,13 @@ class Shrawler:
             with open(local_path, "wb") as local_file:
                 smbclient.getFile(share, remote_path, local_file.write)
 
-            downloaded = f" {Fore.CYAN}[DOWNLOADED]{Style.RESET_ALL}"
-            return downloaded
+            # Increment counter on success
+            self.download_count += 1
+            return True
 
         except Exception as e:
-            failed = f" {Fore.RED}[ERROR]{Style.RESET_ALL} Failed to download: {str(e)}"
-            return failed
+            logging.warning(f"Failed to download {remote_path}: {str(e)}")
+            return False
 
     def get_shares(
         self,
@@ -316,7 +328,7 @@ class Shrawler:
                                     "name": share_name,
                                     "comment": share_comment,
                                     "read_write": share_perms,
-                                    "path": f"\\{target}\\{share_name}",
+                                    "path": f"\\\\{target}\\{share_name}",
                                 },
                             }
                         )
@@ -354,7 +366,7 @@ class Shrawler:
             read_write["read"] = False
 
         # check for write rights
-        if not Shrawler().args.read_only:
+        if not self.args.read_only:
             try:
                 # pretty much all tools that crawl shares have to attempt to write to disk.
                 # If it does not allow, you've got your write perms
@@ -405,6 +417,10 @@ class Shrawler:
             if depth < self.args.max_depth - 1:
                 for result in results:
                     if result.get_longname() not in [".", ".."]:
+                        # throttling
+                        if self.args.delay > 0:
+                            time.sleep(self.args.delay)
+
                         next_filedir = result.get_longname()
                         count += 1  # Fixed: increment count for each item
                         is_last = (
@@ -424,8 +440,9 @@ class Shrawler:
                                 depth=depth + 1,
                             )
                         else:
-                            # Get file metadata for this specific file
-                            file_metadata = Shrawler().parse_file(result)
+                            self.files_seen_count += 1
+
+                            file_metadata = self.parse_file(result)
                             file_mtime = file_metadata["mtime"]
 
                             # Print file with the correct connector and indentation
@@ -446,7 +463,6 @@ class Shrawler:
                                     filename_lower = next_filedir.lower()
                                     for ext in self.extensions:
                                         ext_lower = ext.lower()
-                                        # Ensure the extension starts with a dot
                                         if not ext_lower.startswith("."):
                                             ext_lower = "." + ext_lower
                                         if filename_lower.endswith(ext_lower):
@@ -461,7 +477,6 @@ class Shrawler:
 
                                     for ext in extensions:
                                         ext = ext.strip().lower()
-                                        # Ensure the extension starts with a dot
                                         if not ext.startswith("."):
                                             ext = "." + ext
                                         if filename_lower.endswith(ext):
@@ -482,7 +497,6 @@ class Shrawler:
                                     remote_file_path,
                                     local_filename,
                                 )
-                                # Add download status indicator
                                 download_status = (
                                     f" {Fore.CYAN}[DOWNLOADED]{Style.RESET_ALL}"
                                     if download_success
@@ -528,11 +542,11 @@ class Shrawler:
                 is_last = current_item == total_items
 
                 next_filedir = directory.get_longname()
-                file_metadata = Shrawler().parse_file(directory)
+                file_metadata = self.parse_file(directory)
                 mtime = file_metadata["mtime"]
 
                 self.build_tree_structure(
-                    base_dir, next_filedir, smbclient, share, mtime
+                    base_dir, next_filedir, smbclient, share, mtime, last=is_last
                 )
 
             # Process files at root level with download logic
@@ -540,7 +554,9 @@ class Shrawler:
                 current_item += 1
                 is_last = current_item == total_items
 
-                file_metadata = Shrawler().parse_file(file_result)
+                self.files_seen_count += 1
+
+                file_metadata = self.parse_file(file_result)
                 mtime = file_metadata["mtime"]
 
                 connector = "└── " if is_last else "├── "
@@ -556,7 +572,6 @@ class Shrawler:
                         filename_lower = file_result.get_longname().lower()
                         for ext in self.extensions:
                             ext_lower = ext.lower()
-                            # Ensure the extension starts with a dot
                             if not ext_lower.startswith("."):
                                 ext_lower = "." + ext_lower
                             if filename_lower.endswith(ext_lower):
@@ -570,7 +585,6 @@ class Shrawler:
 
                         for ext in extensions:
                             ext = ext.strip().lower()
-                            # Ensure the extension starts with a dot
                             if not ext.startswith("."):
                                 ext = "." + ext
                             if filename_lower.endswith(ext):
@@ -812,10 +826,26 @@ class Shrawler:
                 input("Press enter to continue...")
                 continue
 
+        print(success("Shrawler Scan Complete"))
+        if self.args.spider:
+            logging.info(f"Total files seen: {self.files_seen_count}")
+        if self.args.download is not None:
+            logging.info(f"Total files downloaded: {self.download_count}")
+
 
 def main() -> None:
     """Calling shrawler."""
-    Shrawler().main()
+    s = Shrawler()
+    try:
+        s.main()
+    except KeyboardInterrupt:
+        print("\n\n" + error("User interrupted scan."))
+        print(success("Summary of work done:"))
+        if s.args.spider:
+            logging.info(f"Total files seen: {s.files_seen_count}")
+        if s.args.download is not None:
+            logging.info(f"Total files downloaded: {s.download_count}")
+        quit()
 
 
 if __name__ == "__main__":
