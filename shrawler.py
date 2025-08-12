@@ -155,14 +155,20 @@ class Shrawler:
         # Download files
         # If you specify nothing, it will download everything
         spider.add_argument(
-            "--download",
+            "--download-ext",
             action="store",
-            dest="download",
+            dest="download_ext",
             nargs="?",
             const=" ",
             help="Download files. Specify nothing, it will download everything."
             "You can specify specific extensions limited by a ','."
             "You can also specify '--download default' for shrawler to choose the extensions for you.",
+        )
+        spider.add_argument(
+            "--download-name",
+            action="store",
+            dest="download_name",
+            help="Download files if their name contains any of these comma-separated substrings",
         )
         spider.add_argument(
             "--max-depth",
@@ -180,11 +186,35 @@ class Shrawler:
             default=0,
             help="Seconds to wait between file/directory request. Default: 0",
         )
+        spider.add_argument(
+            "--count-ext",
+            action="store",
+            dest="count_ext",
+            nargs="?",
+            const="default",
+            help="Count files by extension. Specify nothing for default extensions, "
+            "or provide comma-separated extensions (e.g., '.txt,.log,.sh')",
+        )
+        spider.add_argument(
+            "--count-string",
+            action="store",
+            dest="count_string",
+            help="Count files containing specific strings in their names. Provide comma-separated strings "
+            "(e.g., 'backup,config,password')",
+        )
 
         self.args = parser.parse_args()
 
         self.download_count = 0
         self.files_seen_count = 0
+
+        # Initialize file counting data structures
+        self.file_counts = {}
+        self.count_extensions_list = []
+        self.count_strings_list = []
+
+        # Process counting arguments
+        self._process_count_arguments()
 
         self.verbose = self.args.verbose
 
@@ -229,6 +259,57 @@ class Shrawler:
             ".sql",
             ".db",
         ]
+
+    def _process_count_arguments(self) -> None:
+        """Process --count-ext and --count-string arguments."""
+        # Process --count-ext argument
+        if self.args.count_ext is not None:
+            if self.args.count_ext == "default":
+                # Use default extensions for counting
+                self.count_extensions_list = [ext.lower() for ext in self.extensions]
+            else:
+                # Process user-provided extensions
+                extensions = [ext.strip() for ext in self.args.count_ext.split(",")]
+                for ext in extensions:
+                    ext = ext.strip().lower()
+                    if not ext.startswith("."):
+                        ext = "." + ext
+                    self.count_extensions_list.append(ext)
+
+        # Process --count-string argument
+        if self.args.count_string is not None:
+            string = [string.strip() for string in self.args.count_string.split(",")]
+            self.count_strings_list = [string.strip().lower() for string in string]
+
+    def _count_file(self, filename: str) -> None:
+        """Count a file based on extension and string criteria."""
+        filename_lower = filename.lower()
+
+        # Check extensions
+        for ext in self.count_extensions_list:
+            if filename_lower.endswith(ext):
+                self.file_counts[ext] = self.file_counts.get(ext, 0) + 1
+
+        # Check strings contained in a file name
+        for string in self.count_strings_list:
+            if string in filename_lower:
+                self.file_counts[string] = self.file_counts.get(string, 0) + 1
+
+    def _display_file_count_summary(self) -> None:
+        """Display the final file count summary."""
+        if not self.file_counts:
+            return
+
+        init()  # Initialize colorama
+        print(f"\n{Fore.GREEN}[+] File Count Summary:{Style.RESET_ALL}")
+
+        # Sort by count (descending) for better readability
+        sorted_counts = sorted(
+            self.file_counts.items(), key=lambda x: x[1], reverse=True
+        )
+
+        for item, count in sorted_counts:
+            print(f"  - {item}: {count}")
 
     def banner(self):
         ascii = r"""
@@ -442,46 +523,70 @@ class Shrawler:
                         else:
                             self.files_seen_count += 1
 
+                            # Count the file based on counting criteria
+                            if self.count_extensions_list or self.count_strings_list:
+                                self._count_file(next_filedir)
+
                             file_metadata = self.parse_file(result)
                             file_mtime = file_metadata["mtime"]
 
                             # Print file with the correct connector and indentation
                             file_connector = "└── " if is_last else "├── "
                             download_status = ""
-                            should_download = False
 
-                            # Fixed download logic
-                            if self.args.download is not None:  # --download was used
+                            # Initialize download flags
+                            download_by_extension = False
+                            download_by_name = False
+
+                            # Cache filename once
+                            filename_lower = next_filedir.lower()
+
+                            # Check extension-based download criteria
+                            if (
+                                self.args.download_ext is not None
+                            ):  # --download was used
                                 if (
-                                    self.args.download.strip() == ""
+                                    self.args.download_ext.strip() == ""
                                 ):  # --download with no args (const=" ")
-                                    should_download = True
+                                    download_by_extension = True
                                 elif (
-                                    self.args.download == "default"
+                                    self.args.download_ext == "default"
                                 ):  # --download default
                                     # Use self.extensions for default behavior
-                                    filename_lower = next_filedir.lower()
                                     for ext in self.extensions:
                                         ext_lower = ext.lower()
                                         if not ext_lower.startswith("."):
                                             ext_lower = "." + ext_lower
                                         if filename_lower.endswith(ext_lower):
-                                            should_download = True
+                                            download_by_extension = True
                                             break
                                 else:  # --download with specific extensions
                                     extensions = [
                                         ext.strip()
-                                        for ext in self.args.download.split(",")
+                                        for ext in self.args.download_ext.split(",")
                                     ]
-                                    filename_lower = next_filedir.lower()
 
                                     for ext in extensions:
                                         ext = ext.strip().lower()
                                         if not ext.startswith("."):
                                             ext = "." + ext
                                         if filename_lower.endswith(ext):
-                                            should_download = True
+                                            download_by_extension = True
                                             break
+
+                            # Check name-based download criteria
+                            if self.args.download_name is not None:
+                                search_terms = [
+                                    term.strip().lower()
+                                    for term in self.args.download_name.split(",")
+                                ]
+                                for term in search_terms:
+                                    if term in filename_lower:
+                                        download_by_name = True
+                                        break
+
+                            # Final download decision
+                            should_download = download_by_extension or download_by_name
 
                             # Download the file if criteria met
                             if should_download:
@@ -556,40 +661,62 @@ class Shrawler:
 
                 self.files_seen_count += 1
 
+                # Count the file based on counting criteria
+                if self.count_extensions_list or self.count_strings_list:
+                    self._count_file(file_result.get_longname())
+
                 file_metadata = self.parse_file(file_result)
                 mtime = file_metadata["mtime"]
 
                 connector = "└── " if is_last else "├── "
                 download_status = ""
-                should_download = False
 
-                # Apply the same fixed download logic here
-                if self.args.download is not None:  # --download was used
-                    if self.args.download.strip() == "":  # --download with no args
-                        should_download = True
-                    elif self.args.download == "default":  # --download default
+                # Initialize download flags
+                download_by_extension = False
+                download_by_name = False
+
+                # Cache filename once
+                filename_lower = file_result.get_longname().lower()
+
+                # Check extension-based download criteria
+                if self.args.download_ext is not None:  # --download was used
+                    if self.args.download_ext.strip() == "":  # --download with no args
+                        download_by_extension = True
+                    elif self.args.download_ext == "default":  # --download default
                         # Use self.extensions for default behavior
-                        filename_lower = file_result.get_longname().lower()
                         for ext in self.extensions:
                             ext_lower = ext.lower()
                             if not ext_lower.startswith("."):
                                 ext_lower = "." + ext_lower
                             if filename_lower.endswith(ext_lower):
-                                should_download = True
+                                download_by_extension = True
                                 break
                     else:  # --download with specific extensions
                         extensions = [
-                            ext.strip() for ext in self.args.download.split(",")
+                            ext.strip() for ext in self.args.download_ext.split(",")
                         ]
-                        filename_lower = file_result.get_longname().lower()
 
                         for ext in extensions:
                             ext = ext.strip().lower()
                             if not ext.startswith("."):
                                 ext = "." + ext
                             if filename_lower.endswith(ext):
-                                should_download = True
+                                download_by_extension = True
                                 break
+
+                # Check name-based download criteria
+                if self.args.download_name is not None:
+                    search_terms = [
+                        term.strip().lower()
+                        for term in self.args.download_name.split(",")
+                    ]
+                    for term in search_terms:
+                        if term in filename_lower:
+                            download_by_name = True
+                            break
+
+                # Final download decision
+                should_download = download_by_extension or download_by_name
 
                 # Download the file if criteria met
                 if should_download:
@@ -829,8 +956,12 @@ class Shrawler:
         print(success("Shrawler Scan Complete"))
         if self.args.spider:
             logging.info(f"Total files seen: {self.files_seen_count}")
-        if self.args.download is not None:
+        if self.args.download_ext is not None:
             logging.info(f"Total files downloaded: {self.download_count}")
+
+        # Display file count summary if counting was enabled
+        if self.count_extensions_list or self.count_strings_list:
+            self._display_file_count_summary()
 
 
 def main() -> None:
@@ -845,6 +976,10 @@ def main() -> None:
             logging.info(f"Total files seen: {s.files_seen_count}")
         if s.args.download is not None:
             logging.info(f"Total files downloaded: {s.download_count}")
+
+        # Display file count summary if counting was enabled
+        if s.count_extensions_list or s.count_strings_list:
+            s._display_file_count_summary()
         quit()
 
 
