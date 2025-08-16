@@ -152,7 +152,6 @@ shrawler ludus.local/domainuser:password@192.168.1.100 --host 192.168.1.100 --sh
 
 Download *everything* found during a spidering session.
 
-```bash
 #### **6. Download Files by Name Pattern**
 
 Download files containing specific keywords in their filenames.
@@ -264,15 +263,12 @@ Configure Nemesis settings via environment variables and upload downloaded files
 ```bash
 Example .env file:
 
-```
 NEMESIS_URL=https://nemesis:7443/api
 NEMESIS_AUTH=username:password
 NEMESIS_PROJECT=assessment_2024
 ```
-```
 
 ```
-
 # Run with automatic Nemesis upload
 shrawler user:Password123@192.168.1.100 --host 192.168.1.100 --spider --download-ext default --nemesis-ingest
 ```
@@ -413,7 +409,7 @@ All downloaded files are tracked in `manifest.json`:
 
 Shrawler supports configuration via a `.env` file in the working directory:
 
-```bash
+```
 # Nemesis API Configuration
 NEMESIS_URL=https://nemesis:7443/api
 NEMESIS_AUTH=username:password  
