@@ -14,15 +14,57 @@ import logging
 import json
 import time
 import os
-from typing import Any
+import requests
+import urllib3
+from typing import Any, Union, List, Dict, Tuple, Set
+from collections import defaultdict
+from datetime import datetime, timezone, timedelta
 from colorama import init, Fore, Style
+from dotenv import load_dotenv
+
+# Load .env file if it exists
+load_dotenv()
+
+# Disable SSL warnings for unverified HTTPS requests
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
+
+def sanitize_filename(filename: str) -> str:
+    """
+    Sanitize filename for Linux filesystem compatibility.
+
+    Args:
+        filename: The filename to sanitize
+
+    Returns:
+        Sanitized filename with illegal characters replaced
+    """
+    # Characters that are problematic in Linux filenames
+    illegal_chars = ["\\", ":", "*", "?", '"', "<", ">", "|", "\0"]
+
+    sanitized = filename
+    for char in illegal_chars:
+        sanitized = sanitized.replace(char, "_")
+
+    # Replace multiple consecutive underscores with single underscore
+    while "__" in sanitized:
+        sanitized = sanitized.replace("__", "_")
+
+    # Remove leading/trailing underscores
+    sanitized = sanitized.strip("_")
+
+    # Ensure we don't have an empty filename
+    if not sanitized:
+        sanitized = "unnamed_file"
+
+    return sanitized
 
 
 # custom log colors
 class Formatter(logging.Formatter):
     """Custom Formatter."""
 
-    def format(self, record: logging.LogRecord):
+    def format(self, record: logging.LogRecord) -> str:
         init()
         if record.levelno == logging.INFO:
             self._style._fmt = f"{Fore.GREEN}[+]{Style.RESET_ALL} %(message)s"
@@ -52,7 +94,7 @@ def success(msg: str) -> str:
 def print_share_info(
     share_name: str,
     share_comment: str,
-    share_perms: dict[str, str],
+    share_perms: Dict[str, Union[str, bool]],
     largest_share_name: int,
 ) -> None:
     """Custom print message."""
@@ -77,6 +119,83 @@ def print_share_info(
 
     # fmt: off
     print(f"     {prefix} {share_name.ljust(largest_share_name + 20)} | Read: {read.ljust(3)} | Write: {write.ljust(3)} | Comment: {share_comment if share_comment else 'N/A'}")
+
+
+def find_unique_files_by_mtime(
+    file_list: List[Tuple[str, float]],
+) -> List[Tuple[float, str]]:
+    """
+    Find files with unique modification times.
+
+    Args:
+        file_list: List of (file_path, mtime) tuples
+
+    Returns:
+        List of (mtime, file_path) tuples for files with unique modification times
+    """
+    mtime_groups: defaultdict[float, List[str]] = defaultdict(list)
+
+    for file_path, mtime in file_list:
+        mtime_groups[mtime].append(file_path)
+
+    unique_files_data: List[Tuple[float, str]] = []
+    for mtime, paths in mtime_groups.items():
+        if len(paths) == 1:
+            unique_files_data.append((mtime, paths[0]))
+
+    return unique_files_data
+
+
+def find_unique_files_in_directory(
+    files_with_mtime: List[Tuple[Any, float]],
+) -> Set[int]:
+    """
+    Find files with unique modification times within a directory.
+
+    Args:
+        files_with_mtime: List of (file_result_object, mtime_epoch) tuples
+
+    Returns:
+        Set of indices of files that are unique within the directory
+    """
+    if len(files_with_mtime) <= 1:
+        return set()  # No files are unique if there's only 0 or 1 file
+
+    mtime_counts: defaultdict[int, int] = defaultdict(int)
+
+    # Round epoch timestamps to minutes before comparing (to match display precision)
+    for _, mtime in files_with_mtime:
+        rounded_mtime = (
+            int(mtime // 60) * 60
+        )  # Round to minute precision to match display
+        mtime_counts[rounded_mtime] += 1
+
+    # Find indices of files with unique rounded mtimes
+    unique_indices: Set[int] = set()
+    for i, (_, mtime) in enumerate(files_with_mtime):
+        rounded_mtime = int(mtime // 60) * 60
+        if mtime_counts[rounded_mtime] == 1:
+            unique_indices.add(i)
+
+    return unique_indices
+
+
+def display_unique_files(unique_files_data: List[Tuple[float, str]]) -> None:
+    """
+    Display files with unique modification times in spider-like format.
+
+    Args:
+        unique_files_data: List of (mtime, file_path) tuples
+    """
+    print(f"\n{Fore.GREEN}[+] Files with Unique Modification Times{Style.RESET_ALL}\n")
+
+    if not unique_files_data:
+        print(f"{Fore.GREEN}[+]{Style.RESET_ALL} No unique files found.")
+        return
+
+    for mtime, file_path in unique_files_data:
+        readable_time = datetime.fromtimestamp(mtime).strftime("%Y-%m-%d %H:%M:%S")
+        print(f"{Fore.GREEN}[+]{Style.RESET_ALL} {readable_time} | {file_path}")
 
 
 class Shrawler:
@@ -123,6 +242,35 @@ class Shrawler:
         )
         parser.add_argument("--host", action="store", help="Specific machine to target")
 
+        nemesis = parser.add_argument_group("nemesis integration")
+        nemesis.add_argument(
+            "--nemesis-url",
+            action="store",
+            dest="nemesis_url",
+            default=os.getenv("NEMESIS_URL"),
+            help="Nemesis API URL (e.g., https://nemesis:7443/api)",
+        )
+        nemesis.add_argument(
+            "--nemesis-auth",
+            action="store",
+            dest="nemesis_auth",
+            default=os.getenv("NEMESIS_AUTH"),
+            help="Nemesis authentication in username:password format (e.g., n:n)",
+        )
+        nemesis.add_argument(
+            "--nemesis-project",
+            action="store",
+            dest="nemesis_project",
+            default=os.getenv("NEMESIS_PROJECT"),
+            help="Project name for Nemesis file submissions",
+        )
+        nemesis.add_argument(
+            "--nemesis-ingest",
+            action="store_true",
+            dest="nemesis_ingest",
+            help="Enable file submission to Nemesis for downloaded files",
+        )
+
         group = parser.add_argument_group("authentication")
         group.add_argument(
             "-H",
@@ -155,14 +303,20 @@ class Shrawler:
         # Download files
         # If you specify nothing, it will download everything
         spider.add_argument(
-            "--download",
+            "--download-ext",
             action="store",
-            dest="download",
+            dest="download_ext",
             nargs="?",
             const=" ",
             help="Download files. Specify nothing, it will download everything."
             "You can specify specific extensions limited by a ','."
             "You can also specify '--download default' for shrawler to choose the extensions for you.",
+        )
+        spider.add_argument(
+            "--download-name",
+            action="store",
+            dest="download_name",
+            help="Download files if their name contains any of these comma-separated substrings",
         )
         spider.add_argument(
             "--max-depth",
@@ -180,11 +334,47 @@ class Shrawler:
             default=0,
             help="Seconds to wait between file/directory request. Default: 0",
         )
+        spider.add_argument(
+            "--count-ext",
+            action="store",
+            dest="count_ext",
+            nargs="?",
+            const="default",
+            help="Count files by extension. Specify nothing for default extensions, "
+            "or provide comma-separated extensions (e.g., '.txt,.log,.sh')",
+        )
+        spider.add_argument(
+            "--count-string",
+            action="store",
+            dest="count_string",
+            help="Count files containing specific strings in their names. Provide comma-separated strings "
+            "(e.g., 'backup,config,password')",
+        )
+        spider.add_argument(
+            "--unique",
+            action="store_true",
+            dest="unique",
+            help="Identify and display files with unique modification times",
+        )
 
         self.args = parser.parse_args()
 
         self.download_count = 0
         self.files_seen_count = 0
+
+        # Initialize file counting data structures
+        self.file_counts: Dict[str, int] = {}
+        self.count_extensions_list: List[str] = []
+        self.count_strings_list: List[str] = []
+
+        # Initialize unique file timestamp data collection
+        self.unique_files_data: List[Tuple[str, float]] = []
+
+        # Initialize manifest data for JSON download log
+        self.manifest_data: Dict[str, List[Dict[str, Any]]] = {}
+
+        # Process counting arguments
+        self._process_count_arguments()
 
         self.verbose = self.args.verbose
 
@@ -230,7 +420,87 @@ class Shrawler:
             ".db",
         ]
 
-    def banner(self):
+    def _process_count_arguments(self) -> None:
+        """Process --count-ext and --count-string arguments."""
+        # Process --count-ext argument
+        if self.args.count_ext is not None:
+            if self.args.count_ext == "default":
+                # Use default extensions for counting
+                self.count_extensions_list = [ext.lower() for ext in self.extensions]
+            else:
+                # Process user-provided extensions
+                extensions = [ext.strip() for ext in self.args.count_ext.split(",")]
+                for ext in extensions:
+                    ext = ext.strip().lower()
+                    if not ext.startswith("."):
+                        ext = "." + ext
+                    self.count_extensions_list.append(ext)
+
+        # Process --count-string argument
+        if self.args.count_string is not None:
+            string = [string.strip() for string in self.args.count_string.split(",")]
+            self.count_strings_list = [string.strip().lower() for string in string]
+
+    def _count_file(self, filename: str) -> None:
+        """Count a file based on extension and string criteria."""
+        filename_lower = filename.lower()
+
+        # Check extensions
+        for ext in self.count_extensions_list:
+            if filename_lower.endswith(ext):
+                self.file_counts[ext] = self.file_counts.get(ext, 0) + 1
+
+        # Check strings contained in a file name
+        for string in self.count_strings_list:
+            if string in filename_lower:
+                self.file_counts[string] = self.file_counts.get(string, 0) + 1
+
+    def _display_file_count_summary(self) -> None:
+        """Display the final file count summary."""
+        if not self.file_counts:
+            return
+
+        init()  # Initialize colorama
+        print(f"\n{Fore.GREEN}[+] File Count Summary{Style.RESET_ALL}\n")
+
+        # Sort by count (descending) for better readability
+        sorted_counts = sorted(
+            self.file_counts.items(), key=lambda x: x[1], reverse=True
+        )
+
+        # Calculate total count
+        total_count = sum(count for _, count in sorted_counts)
+
+        # Calculate column widths
+        max_type_width = max(
+            len("File Type"),
+            max(len(str(item)) for item, _ in sorted_counts),
+            len("TOTAL"),
+        )
+        count_width = max(len("Count"), len(str(total_count)))
+
+        # Create table format
+        table_width = max_type_width + count_width + 3  # 3 for separators
+        border_line = (
+            "+" + "=" * (max_type_width + 2) + "+" + "=" * (count_width + 2) + "+"
+        )
+
+        # Print table
+        print(border_line)
+        print(f"| {'File Type'.ljust(max_type_width)} | {'Count'.rjust(count_width)} |")
+        print(border_line)
+
+        for item, count in sorted_counts:
+            print(
+                f"| {str(item).ljust(max_type_width)} | {str(count).rjust(count_width)} |"
+            )
+
+        print(border_line)
+        print(
+            f"| {'TOTAL'.ljust(max_type_width)} | {str(total_count).rjust(count_width)} |\n"
+        )
+
+    def banner(self) -> str:
         ascii = r"""
   _____ _                      _            
  / ____| |                    | |           
@@ -248,12 +518,20 @@ class Shrawler:
 
             try:
                 return s.connect_ex((machine, port)) == 0
-            except:
+            except (socket.timeout, socket.error, OSError) as e:
+                logging.debug(f"Port check failed for {machine}:{port} - {e}")
                 return False
 
     def download_file(
-        self, smbclient, share: str, remote_path: str, local_filename: str
-    ) -> bool:
+        self,
+        smbclient: Any,
+        share: str,
+        remote_path: str,
+        local_filename: str,
+        host: str,
+        file_size: int = 0,
+        mtime_epoch: float = 0,
+    ) -> Tuple[bool, bool]:
         """
         Downloads a file from the SMB share and saves it locally.
 
@@ -262,41 +540,186 @@ class Shrawler:
             share: SMB share name
             remote_path: Full path to the remote file
             local_filename: Local filename to save as
+            host: Target host IP
+            file_size: File size in bytes
+            mtime_epoch: File modification time as epoch
 
         Returns:
-            bool: True if download successful, False otherwise
+            tuple[bool, bool]: (download_success, nemesis_upload_success)
         """
         try:
-            # Create downloads directory if it doesn't exist
-            downloads_dir = "downloads"
-            if not os.path.exists(downloads_dir):
-                os.makedirs(downloads_dir)
+            # Create loot directory if it doesn't exist
+            loot_dir = "downloads"
+            if not os.path.exists(loot_dir):
+                os.makedirs(loot_dir)
 
-            local_path = os.path.join(downloads_dir, local_filename)
+            local_path = os.path.join(loot_dir, local_filename)
 
             # Download the file using impacket's getFile method
             with open(local_path, "wb") as local_file:
                 smbclient.getFile(share, remote_path, local_file.write)
 
+            # Populate manifest data on successful download
+            file_entry: Dict[str, Any] = {
+                "timestamp": datetime.now().isoformat(),
+                "timestamp_utc": datetime.now(timezone.utc).isoformat(),
+                "host": host,
+                "share": share,
+                "remote_path": remote_path,
+                "unc_path": f"\\\\{host}\\{share}\\{remote_path.lstrip('/')}",
+                "local_filename": local_filename,
+                "size_bytes": file_size,
+                "mtime_epoch": mtime_epoch,
+                "mtime_utc": datetime.fromtimestamp(
+                    mtime_epoch, timezone.utc
+                ).isoformat(),
+                "origin_tool": "shrawler",
+            }
+
+            # Submit to Nemesis if enabled (only for successfully downloaded files)
+            nemesis_success = False
+            if self.args.nemesis_ingest:
+                clean_remote_path = remote_path.lstrip("/").replace("/", "\\")
+                unc_path = f"\\\\{host}\\{share}\\{clean_remote_path}"
+                nemesis_result = self.submit_to_nemesis(
+                    local_path, unc_path, mtime_epoch
+                )
+                nemesis_success = nemesis_result["success"]
+
+                # Add Nemesis upload result to file entry
+                file_entry["nemesis_upload"] = nemesis_result
+
+            # Add to manifest data (grouped by host)
+            self.manifest_data.setdefault(host, []).append(file_entry)
+
             # Increment counter on success
             self.download_count += 1
-            return True
+
+            return (True, nemesis_success)
 
         except Exception as e:
             logging.warning(f"Failed to download {remote_path}: {str(e)}")
-            return False
+            return (False, False)
+
+    def submit_to_nemesis(
+        self, local_file_path: str, unc_path: str, file_mtime_epoch: float
+    ) -> Dict[str, Any]:
+        """Submit downloaded file to Nemesis API using multipart form data.
+
+        Returns:
+            dict: Upload status with 'success' (bool), 'timestamp' (str), and optional 'response_id' (str)
+        """
+        upload_result = {
+            "success": False,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "response_id": None,
+        }
+
+        if not self.args.nemesis_ingest:
+            return upload_result
+
+        if (
+            not self.args.nemesis_url
+            or not self.args.nemesis_auth
+            or not self.args.nemesis_project
+        ):
+            logging.warning("Nemesis URL, auth, and project required for ingestion")
+            return upload_result
+
+        if not os.path.exists(local_file_path):
+            logging.warning(
+                f"Local file not found for Nemesis submission: {local_file_path}"
+            )
+            return upload_result
+
+        try:
+            # Parse authentication
+            if ":" not in self.args.nemesis_auth:
+                logging.warning("Nemesis auth must be in username:password format")
+                return upload_result
+
+            username, password = self.args.nemesis_auth.split(":", 1)
+
+            # Prepare endpoint
+            endpoint = f"{self.args.nemesis_url.rstrip('/')}/files"
+
+            # Prepare metadata
+            current_time = datetime.now(timezone.utc)
+            expiration_time = current_time + timedelta(days=365)  # 1 year from now
+            file_mtime = datetime.fromtimestamp(file_mtime_epoch, timezone.utc)
+
+            metadata = {
+                "agent_id": "shrawler",
+                "project": self.args.nemesis_project,
+                "timestamp": current_time.isoformat(),
+                "expiration": expiration_time.isoformat(),
+                "path": unc_path,
+            }
+
+            # Prepare multipart form data
+            with open(local_file_path, "rb") as file_data:
+                files = {
+                    "file": (
+                        os.path.basename(local_file_path),
+                        file_data,
+                        "application/octet-stream",
+                    )
+                }
+                data = {"metadata": json.dumps(metadata)}
+
+                # Submit with basic auth and SSL verification disabled (like curl -k)
+                response = requests.post(
+                    endpoint,
+                    files=files,
+                    data=data,
+                    auth=(username, password),
+                    verify=False,
+                    timeout=30,
+                )
+
+                if response.status_code not in [200, 201]:
+                    logging.warning(
+                        f"Failed to submit file to Nemesis: {unc_path} (HTTP {response.status_code})"
+                    )
+                else:
+                    logging.debug(f"Successfully submitted file to Nemesis: {unc_path}")
+                    upload_result["success"] = True
+
+                    # Try to extract response ID if present
+                    try:
+                        response_data = response.json()
+                        if "id" in response_data:
+                            upload_result["response_id"] = response_data["id"]
+                    except (json.JSONDecodeError, KeyError) as e:
+                        logging.debug(
+                            f"Failed to parse Nemesis response for {unc_path}: {e}"
+                        )
+
+        except (
+            requests.exceptions.RequestException,
+            requests.exceptions.Timeout,
+            requests.exceptions.ConnectionError,
+            FileNotFoundError,
+        ) as e:
+            logging.debug(f"Nemesis submission error for {unc_path}: {str(e)}")
+        except Exception as e:
+            logging.debug(
+                f"Unexpected error in Nemesis submission for {unc_path}: {str(e)}"
+            )
+
+        return upload_result
 
     def get_shares(
         self,
         target: str,
         mach_name: str,
         smbclient: Any,
-        default_shares,
+        default_shares: List[str],
         spider: bool = False,
         desired_share: str = "",
-    ) -> dict[str, list[Any]]:
+    ) -> Dict[str, List[Any]]:
         shares = smbclient.listShares()
-        results = {}
+        results: dict[str, list[Any]] = {}
         results[target] = []
 
         largest_share_name = len(max(shares, key=len))
@@ -306,9 +729,9 @@ class Shrawler:
 
         # only print desired share
         if desired_share:
-            desired_share = desired_share.split(",")
+            desired_share_list = desired_share.split(",")
             default_shares = share_names
-            for share in desired_share:
+            for share in desired_share_list:
                 default_shares.remove(share)
 
         if default_shares not in share_names:
@@ -337,6 +760,7 @@ class Shrawler:
                         if spider and share_perms["read"]:
                             print("")
                             logging.info(f"{mach_name}\\{share_name}")
+                            self.print_table_header()
                             self.spider_shares(target, share_name, "/", smbclient)
 
                         # If you're not spidering, will print out
@@ -355,7 +779,9 @@ class Shrawler:
             logging.warning("No desired shares found")
         return results
 
-    def check_share_perm(self, share: str, smbclient) -> dict:
+    def check_share_perm(
+        self, share: str, smbclient: Any
+    ) -> Dict[str, Union[str, bool]]:
         read_write = {"read": False, "write": "N/A"}
 
         # check for read rights
@@ -384,10 +810,9 @@ class Shrawler:
     def build_tree_structure(
         self,
         base_dir: str,
-        directory: str,
-        smbclient,
+        directory_result: Any,
+        smbclient: Any,
         share: str,
-        mtime: str,
         indent: str = "",
         last: bool = False,
         depth: int = 0,
@@ -395,131 +820,245 @@ class Shrawler:
         """
         Recursively prints the tree structure for a given directory, appending paths using string concatenation.
         """
+        directory = directory_result.get_longname()
 
+        # Format directory in table format
+        size = "-"
+        mtime = self.readable_time_short(directory_result.get_mtime_epoch())
+
+        # Build the proper tree structure for directories
         connector = "└── " if last else "├── "
-        print(indent + connector + Fore.BLUE + directory + Style.RESET_ALL)
+        name = indent + connector + f"{Fore.BLUE}{directory}/{Style.RESET_ALL}"
+
+        print(self.format_table_row(size, mtime, name))
 
         # Update the indent for the next depth level
-        indent += "    " if last else "│   "
+        next_indent = indent + ("    " if last else "│   ")
 
         try:
             results = smbclient.listPath(
                 share, base_dir + directory + "/*", password=None
             )
 
-            # Filter out '.' and '..' and get the total number of valid items
-            total_items = len(
-                [res for res in results if res.get_longname() not in [".", ".."]]
-            )
+            # Filter out '.' and '..' and separate directories from files
+            directories: List[Any] = []
+            files: List[Any] = []
+            for result in results:
+                if result.get_longname() not in [".", ".."]:
+                    if result.is_directory():
+                        directories.append(result)
+                    else:
+                        files.append(result)
+
+            total_items = len(directories) + len(files)
             count = 0
 
             # depth has an index of 0, max_depth assumes human readable
             if depth < self.args.max_depth - 1:
-                for result in results:
-                    if result.get_longname() not in [".", ".."]:
+                # Process directories first
+                for result in directories:
+                    # throttling
+                    if self.args.delay > 0:
+                        time.sleep(self.args.delay)
+
+                    next_filedir = result.get_longname()
+                    count += 1
+                    is_last = count == total_items
+
+                    self.build_tree_structure(
+                        base_dir + directory + "/",
+                        result,
+                        smbclient,
+                        share,
+                        next_indent,
+                        last=is_last,
+                        depth=depth + 1,
+                    )
+
+                # Process files - conditional logic based on --unique-mtime
+                if self.args.unique:
+                    # Collect files with mtime for uniqueness analysis
+                    files_with_mtime: List[Tuple[Any, float]] = []
+                    for file_result in files:
+                        file_mtime_epoch = file_result.get_mtime_epoch()
+                        files_with_mtime.append((file_result, file_mtime_epoch))
+
+                    # Determine which files are unique in this directory
+                    unique_indices = find_unique_files_in_directory(files_with_mtime)
+
+                    # Display files with uniqueness information
+                    for i, (file_result, file_mtime_epoch) in enumerate(
+                        files_with_mtime
+                    ):
                         # throttling
                         if self.args.delay > 0:
                             time.sleep(self.args.delay)
 
-                        next_filedir = result.get_longname()
-                        count += 1  # Fixed: increment count for each item
-                        is_last = (
-                            count == total_items
-                        )  # Determine if it's the last item
+                        count += 1
+                        is_last = count == total_items
+                        is_unique = i in unique_indices
 
-                        # If it's a directory, print its contents
-                        if result.is_directory():
-                            self.build_tree_structure(
-                                base_dir + directory + "/",
-                                next_filedir,
-                                smbclient,
-                                share,
-                                mtime,
-                                indent,
-                                last=is_last,
-                                depth=depth + 1,
-                            )
-                        else:
-                            self.files_seen_count += 1
+                        self._process_and_display_file(
+                            file_result,
+                            base_dir,
+                            directory,
+                            smbclient,
+                            share,
+                            next_indent,
+                            is_last,
+                            is_unique,
+                        )
+                else:
+                    # Original behavior - process files immediately without uniqueness analysis
+                    for file_result in files:
+                        # throttling
+                        if self.args.delay > 0:
+                            time.sleep(self.args.delay)
 
-                            file_metadata = self.parse_file(result)
-                            file_mtime = file_metadata["mtime"]
+                        count += 1
+                        is_last = count == total_items
 
-                            # Print file with the correct connector and indentation
-                            file_connector = "└── " if is_last else "├── "
-                            download_status = ""
-                            should_download = False
-
-                            # Fixed download logic
-                            if self.args.download is not None:  # --download was used
-                                if (
-                                    self.args.download.strip() == ""
-                                ):  # --download with no args (const=" ")
-                                    should_download = True
-                                elif (
-                                    self.args.download == "default"
-                                ):  # --download default
-                                    # Use self.extensions for default behavior
-                                    filename_lower = next_filedir.lower()
-                                    for ext in self.extensions:
-                                        ext_lower = ext.lower()
-                                        if not ext_lower.startswith("."):
-                                            ext_lower = "." + ext_lower
-                                        if filename_lower.endswith(ext_lower):
-                                            should_download = True
-                                            break
-                                else:  # --download with specific extensions
-                                    extensions = [
-                                        ext.strip()
-                                        for ext in self.args.download.split(",")
-                                    ]
-                                    filename_lower = next_filedir.lower()
-
-                                    for ext in extensions:
-                                        ext = ext.strip().lower()
-                                        if not ext.startswith("."):
-                                            ext = "." + ext
-                                        if filename_lower.endswith(ext):
-                                            should_download = True
-                                            break
-
-                            # Download the file if criteria met
-                            if should_download:
-                                remote_file_path = (
-                                    base_dir + directory + "/" + next_filedir
-                                )
-                                # Create local filename by replacing '/' with '_'
-                                local_filename = f"{self.args.host}_{remote_file_path.replace('/', '_').lstrip('_')}"
-
-                                download_success = self.download_file(
-                                    smbclient,
-                                    share,
-                                    remote_file_path,
-                                    local_filename,
-                                )
-                                download_status = (
-                                    f" {Fore.CYAN}[DOWNLOADED]{Style.RESET_ALL}"
-                                    if download_success
-                                    else f" {Fore.RED}[FAILED]{Style.RESET_ALL}"
-                                )
-
-                            # Always print the file (use file-specific mtime, not directory mtime)
-                            print(
-                                indent
-                                + file_connector
-                                + Fore.GREEN
-                                + next_filedir
-                                + Style.RESET_ALL
-                                + f"  {Fore.YELLOW + file_mtime + Style.RESET_ALL}"
-                                + download_status
-                            )
+                        self._process_and_display_file(
+                            file_result,
+                            base_dir,
+                            directory,
+                            smbclient,
+                            share,
+                            next_indent,
+                            is_last,
+                            is_unique=False,
+                        )
 
         except Exception as e:
             logging.warning(f"Error accessing directory: {e}")
 
-    def spider_shares(self, target: str, share: str, base_dir: str, smbclient) -> None:
-        directories = []
-        files = []
+    def _process_and_display_file(
+        self,
+        file_result: Any,
+        base_dir: str,
+        directory: str,
+        smbclient: Any,
+        share: str,
+        indent: str,
+        is_last: bool,
+        is_unique: bool,
+    ) -> None:
+        """Process and display a single file with download and unique logic."""
+        self.files_seen_count += 1
+        next_filedir = file_result.get_longname()
+
+        # Count the file based on counting criteria
+        if self.count_extensions_list or self.count_strings_list:
+            self._count_file(next_filedir)
+
+        # Collect data for global unique timestamp analysis if enabled
+        if self.args.unique:
+            full_file_path = base_dir + directory + "/" + next_filedir
+            file_mtime_epoch = file_result.get_mtime_epoch()
+            self.unique_files_data.append((full_file_path, file_mtime_epoch))
+
+        # Print file with the correct connector and indentation
+        file_connector = "└── " if is_last else "├── "
+        download_status = ""
+        unique_status = f" {Fore.MAGENTA}[UNIQUE]{Style.RESET_ALL}" if is_unique else ""
+
+        # Initialize download flags
+        download_by_extension = False
+        download_by_name = False
+
+        # Cache filename once
+        filename_lower = next_filedir.lower()
+
+        # Check extension-based download criteria
+        if self.args.download_ext is not None:  # --download was used
+            if (
+                self.args.download_ext.strip() == ""
+            ):  # --download with no args (const=" ")
+                download_by_extension = True
+            elif self.args.download_ext == "default":  # --download default
+                # Use self.extensions for default behavior
+                for ext in self.extensions:
+                    ext_lower = ext.lower()
+                    if not ext_lower.startswith("."):
+                        ext_lower = "." + ext_lower
+                    if filename_lower.endswith(ext_lower):
+                        download_by_extension = True
+                        break
+            else:  # --download with specific extensions
+                extensions = [ext.strip() for ext in self.args.download_ext.split(",")]
+
+                for ext in extensions:
+                    ext = ext.strip().lower()
+                    if not ext.startswith("."):
+                        ext = "." + ext
+                    if filename_lower.endswith(ext):
+                        download_by_extension = True
+                        break
+
+        # Check name-based download criteria
+        if self.args.download_name is not None:
+            search_terms = [
+                term.strip().lower() for term in self.args.download_name.split(",")
+            ]
+            for term in search_terms:
+                if term in filename_lower:
+                    download_by_name = True
+                    break
+
+        # Final download decision
+        should_download = download_by_extension or download_by_name
+
+        # Download the file if criteria met
+        if should_download:
+            remote_file_path = base_dir + directory + "/" + next_filedir
+            # Create local filename with double underscore delimiters and sanitization
+            sanitized_path = sanitize_filename(
+                remote_file_path.replace("/", "_").lstrip("_")
+            )
+            local_filename = f"{self.args.host}__{share}__{sanitized_path}"
+
+            download_success, nemesis_success = self.download_file(
+                smbclient,
+                share,
+                remote_file_path,
+                local_filename,
+                self.args.host,
+                file_result.get_filesize(),
+                file_result.get_mtime_epoch(),
+            )
+
+            # Build download status with both download and Nemesis upload results
+            if download_success:
+                download_status = f" {Fore.CYAN}[DOWNLOADED]{Style.RESET_ALL}"
+                if self.args.nemesis_ingest and nemesis_success:
+                    download_status += (
+                        f" {Fore.MAGENTA}[UPLOADED TO NEMESIS]{Style.RESET_ALL}"
+                    )
+                elif self.args.nemesis_ingest and not nemesis_success:
+                    download_status += f" {Fore.RED}[NEMESIS FAILED]{Style.RESET_ALL}"
+            else:
+                download_status = f" {Fore.RED}[DOWNLOAD FAILED]{Style.RESET_ALL}"
+
+        # Always print the file in table format
+        file_metadata = self.parse_file(file_result)
+        size = file_metadata["size"]
+        mtime = self.readable_time_short(file_result.get_mtime_epoch())
+
+        # Build name with tree structure and download/unique status
+        file_connector = "└── " if is_last else "├── "
+        name = indent + file_connector + f"{Fore.GREEN}{next_filedir}{Style.RESET_ALL}"
+        if unique_status:
+            name += unique_status
+        if download_status:
+            name += download_status
+
+        print(self.format_table_row(size, mtime, name))
+
+    def spider_shares(
+        self, target: str, share: str, base_dir: str, smbclient: Any
+    ) -> None:
+        directories: List[Any] = []
+        files: List[Any] = []
         try:
             # List all items in the base directory
             results = list(smbclient.listPath(share, base_dir + "*", password=None))
@@ -542,87 +1081,187 @@ class Shrawler:
                 is_last = current_item == total_items
 
                 next_filedir = directory.get_longname()
-                file_metadata = self.parse_file(directory)
-                mtime = file_metadata["mtime"]
+
+                # Format directory in table format with tree characters
+                size = "-"
+                mtime = self.readable_time_short(directory.get_mtime_epoch())
+                connector = "└── " if is_last else "├── "
+                name = connector + f"{Fore.BLUE}{next_filedir}/{Style.RESET_ALL}"
+
+                # print(self.format_table_row(size, mtime, name))
 
                 self.build_tree_structure(
-                    base_dir, next_filedir, smbclient, share, mtime, last=is_last
+                    base_dir, directory, smbclient, share, last=is_last
                 )
 
-            # Process files at root level with download logic
-            for file_result in files:
-                current_item += 1
-                is_last = current_item == total_items
+            # Process files at root level - conditional logic based on --unique-mtime
+            if self.args.unique:
+                # Collect files with mtime for uniqueness analysis
+                files_with_mtime: List[Tuple[Any, float]] = []
+                for file_result in files:
+                    file_mtime_epoch = file_result.get_mtime_epoch()
+                    files_with_mtime.append((file_result, file_mtime_epoch))
 
-                self.files_seen_count += 1
+                # Determine which files are unique in this directory
+                unique_indices = find_unique_files_in_directory(files_with_mtime)
 
-                file_metadata = self.parse_file(file_result)
-                mtime = file_metadata["mtime"]
+                # Display files with uniqueness information
+                for i, (file_result, file_mtime_epoch) in enumerate(files_with_mtime):
+                    current_item += 1
+                    is_last = current_item == total_items
+                    is_unique = i in unique_indices
 
-                connector = "└── " if is_last else "├── "
-                download_status = ""
-                should_download = False
-
-                # Apply the same fixed download logic here
-                if self.args.download is not None:  # --download was used
-                    if self.args.download.strip() == "":  # --download with no args
-                        should_download = True
-                    elif self.args.download == "default":  # --download default
-                        # Use self.extensions for default behavior
-                        filename_lower = file_result.get_longname().lower()
-                        for ext in self.extensions:
-                            ext_lower = ext.lower()
-                            if not ext_lower.startswith("."):
-                                ext_lower = "." + ext_lower
-                            if filename_lower.endswith(ext_lower):
-                                should_download = True
-                                break
-                    else:  # --download with specific extensions
-                        extensions = [
-                            ext.strip() for ext in self.args.download.split(",")
-                        ]
-                        filename_lower = file_result.get_longname().lower()
-
-                        for ext in extensions:
-                            ext = ext.strip().lower()
-                            if not ext.startswith("."):
-                                ext = "." + ext
-                            if filename_lower.endswith(ext):
-                                should_download = True
-                                break
-
-                # Download the file if criteria met
-                if should_download:
-                    remote_file_path = base_dir + file_result.get_longname()
-                    local_filename = f"{self.args.host}_{remote_file_path.replace('/', '_').lstrip('_')}"
-
-                    download_success = self.download_file(
+                    self._process_and_display_file_root(
+                        file_result,
+                        base_dir,
                         smbclient,
                         share,
-                        remote_file_path,
-                        local_filename,
+                        is_last,
+                        is_unique,
                     )
-                    download_status = (
-                        f" {Fore.CYAN}[DOWNLOADED]{Style.RESET_ALL}"
-                        if download_success
-                        else f" {Fore.RED}[FAILED]{Style.RESET_ALL}"
+            else:
+                # Original behavior - process files immediately without uniqueness analysis
+                for file_result in files:
+                    current_item += 1
+                    is_last = current_item == total_items
+
+                    self._process_and_display_file_root(
+                        file_result,
+                        base_dir,
+                        smbclient,
+                        share,
+                        is_last,
+                        is_unique=False,
                     )
 
-                print(
-                    connector
-                    + Fore.GREEN
-                    + file_result.get_longname()
-                    + Style.RESET_ALL
-                    + f"  {Fore.YELLOW + mtime + Style.RESET_ALL}"
-                    + download_status
-                )
         except Exception as e:
             logging.warning(f"Error accessing directory: {e}")
+
+    def _process_and_display_file_root(
+        self,
+        file_result: Any,
+        base_dir: str,
+        smbclient: Any,
+        share: str,
+        is_last: bool,
+        is_unique: bool,
+    ) -> None:
+        """Process and display a file at root level with download and unique logic."""
+        self.files_seen_count += 1
+
+        # Count the file based on counting criteria
+        if self.count_extensions_list or self.count_strings_list:
+            self._count_file(file_result.get_longname())
+
+        # Collect data for global unique timestamp analysis if enabled
+        if self.args.unique:
+            full_file_path = base_dir + file_result.get_longname()
+            file_mtime_epoch = file_result.get_mtime_epoch()
+            self.unique_files_data.append((full_file_path, file_mtime_epoch))
+
+        connector = "└── " if is_last else "├── "
+        download_status = ""
+        unique_status = (
+            f" {Fore.MAGENTA}[POTENTIAL UNIQUE FILE]{Style.RESET_ALL}"
+            if is_unique
+            else ""
+        )
+
+        # Initialize download flags
+        download_by_extension = False
+        download_by_name = False
+
+        # Cache filename once
+        filename_lower = file_result.get_longname().lower()
+
+        # Check extension-based download criteria
+        if self.args.download_ext is not None:  # --download was used
+            if self.args.download_ext.strip() == "":  # --download with no args
+                download_by_extension = True
+            elif self.args.download_ext == "default":  # --download default
+                # Use self.extensions for default behavior
+                for ext in self.extensions:
+                    ext_lower = ext.lower()
+                    if not ext_lower.startswith("."):
+                        ext_lower = "." + ext_lower
+                    if filename_lower.endswith(ext_lower):
+                        download_by_extension = True
+                        break
+            else:  # --download with specific extensions
+                extensions = [ext.strip() for ext in self.args.download_ext.split(",")]
+
+                for ext in extensions:
+                    ext = ext.strip().lower()
+                    if not ext.startswith("."):
+                        ext = "." + ext
+                    if filename_lower.endswith(ext):
+                        download_by_extension = True
+                        break
+
+        # Check name-based download criteria
+        if self.args.download_name is not None:
+            search_terms = [
+                term.strip().lower() for term in self.args.download_name.split(",")
+            ]
+            for term in search_terms:
+                if term in filename_lower:
+                    download_by_name = True
+                    break
+
+        # Final download decision
+        should_download = download_by_extension or download_by_name
+
+        # Download the file if criteria met
+        if should_download:
+            remote_file_path = base_dir + file_result.get_longname()
+            # Create local filename with double underscore delimiters and sanitization
+            sanitized_path = sanitize_filename(
+                remote_file_path.replace("/", "_").lstrip("_")
+            )
+            local_filename = f"{self.args.host}__{share}__{sanitized_path}"
+
+            download_success, nemesis_success = self.download_file(
+                smbclient,
+                share,
+                remote_file_path,
+                local_filename,
+                self.args.host,
+                file_result.get_filesize(),
+                file_result.get_mtime_epoch(),
+            )
+
+            # Build download status with both download and Nemesis upload results
+            if download_success:
+                download_status = f" {Fore.CYAN}[DOWNLOADED]{Style.RESET_ALL}"
+                if self.args.nemesis_ingest and nemesis_success:
+                    download_status += (
+                        f" {Fore.MAGENTA}[UPLOADED TO NEMESIS]{Style.RESET_ALL}"
+                    )
+                elif self.args.nemesis_ingest and not nemesis_success:
+                    download_status += f" {Fore.RED}[NEMESIS FAILED]{Style.RESET_ALL}"
+            else:
+                download_status = f" {Fore.RED}[DOWNLOAD FAILED]{Style.RESET_ALL}"
+
+        # Format file in table format
+        file_metadata = self.parse_file(file_result)
+        size = file_metadata["size"]
+        mtime = self.readable_time_short(file_result.get_mtime_epoch())
+
+        # Build name with tree structure and status
+        connector = "└── " if is_last else "├── "
+        name = connector + f"{Fore.GREEN}{file_result.get_longname()}{Style.RESET_ALL}"
+        if unique_status:
+            name += unique_status
+        if download_status:
+            name += download_status
+
+        print(self.format_table_row(size, mtime, name))
 
     def readable_file_size(self, nbytes: float) -> str:
         "Convert into readable file sizes"
         suffixes = ["B", "KB", "MB", "GB"]
 
+        i = 0
         for i in range(len(suffixes)):
             if nbytes < 1024 or i == len(suffixes) - 1:
                 break
@@ -636,7 +1275,23 @@ class Shrawler:
         "convert into readable time"
         return time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(timestamp))
 
-    def parse_file(self, file_info) -> dict:
+    def readable_time_short(self, timestamp: float) -> str:
+        "convert into readable time without seconds"
+        return time.strftime("%Y-%m-%d %H:%M", time.localtime(timestamp))
+
+    def format_table_row(self, size: str, mtime: str, name: str) -> str:
+        "format a table row with fixed-width columns"
+        return f"{size:>9} {mtime:<21} {name}"
+
+    def print_table_header(self) -> None:
+        "print the table header and separator"
+        print()
+        header = self.format_table_row("SIZE", "LAST MODIFIED", "NAME")
+        separator = self.format_table_row("-" * 9, "-" * 21, "-" * 40)
+        print(header)
+        print(separator)
+
+    def parse_file(self, file_info: Any) -> Dict[str, str]:
         "Parse file and output metadata"
         file_size = file_info.get_filesize()
         file_creation_date = file_info.get_ctime_epoch()
@@ -649,7 +1304,9 @@ class Shrawler:
         }
         return results
 
-    def output_to_json(self, mach_ip: str, username: str, output: dict) -> None:
+    def output_to_json(
+        self, mach_ip: str, username: str, output: Dict[str, Any]
+    ) -> None:
         "output into json file"
         out_file = f"{mach_ip}_{username}_shares.json"
 
@@ -694,7 +1351,7 @@ class Shrawler:
                     lmhash,
                     nthash,
                     self.args.aesKey,
-                    self.domain_controller,
+                    domain,
                 )
 
             else:
@@ -712,7 +1369,7 @@ class Shrawler:
         logging.info(f"Connected to {address}")
         return smbClient
 
-    def get_ip_addrs(self, file: str) -> list:
+    def get_ip_addrs(self, file: str) -> List[str]:
         with open(file, "r") as f:
             lines = f.read().splitlines()
 
@@ -829,8 +1486,27 @@ class Shrawler:
         print(success("Shrawler Scan Complete"))
         if self.args.spider:
             logging.info(f"Total files seen: {self.files_seen_count}")
-        if self.args.download is not None:
+        if self.args.download_ext is not None:
             logging.info(f"Total files downloaded: {self.download_count}")
+
+        # Write manifest file if any files were downloaded
+        if self.manifest_data:
+            try:
+                with open("manifest.json", "w") as f:
+                    json.dump(self.manifest_data, f, indent=4)
+                logging.info("Download manifest written to manifest.json")
+            except Exception as e:
+                logging.warning(f"Failed to write manifest file: {str(e)}")
+
+        # Display file count summary if counting was enabled
+        if self.count_extensions_list or self.count_strings_list:
+            self._display_file_count_summary()
+
+        # Display unique files summary if unique timestamp analysis was enabled
+        # Only show this summary if NOT in spider mode
+        if self.args.unique and self.unique_files_data and not self.args.spider:
+            unique_results = find_unique_files_by_mtime(self.unique_files_data)
+            display_unique_files(unique_results)
 
 
 def main() -> None:
@@ -843,8 +1519,18 @@ def main() -> None:
         print(success("Summary of work done:"))
         if s.args.spider:
             logging.info(f"Total files seen: {s.files_seen_count}")
-        if s.args.download is not None:
+        if s.args.download_ext is not None:
             logging.info(f"Total files downloaded: {s.download_count}")
+
+        # Display file count summary if counting was enabled
+        if s.count_extensions_list or s.count_strings_list:
+            s._display_file_count_summary()
+
+        # Display unique files summary if unique timestamp analysis was enabled
+        # Only show this summary if NOT in spider mode
+        if s.args.unique and s.unique_files_data and not s.args.spider:
+            unique_results = find_unique_files_by_mtime(s.unique_files_data)
+            display_unique_files(unique_results)
         quit()
 
 
