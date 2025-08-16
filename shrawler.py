@@ -596,7 +596,6 @@ class Shrawler:
         directory = directory_result.get_longname()
 
         # Format directory in table format
-        perms = self.get_file_permissions(directory, True)
         size = "-"
         mtime = self.readable_time_short(directory_result.get_mtime_epoch())
 
@@ -604,7 +603,7 @@ class Shrawler:
         connector = "└── " if last else "├── "
         name = indent + connector + f"{Fore.BLUE}{directory}/{Style.RESET_ALL}"
 
-        print(self.format_table_row(perms, size, mtime, name))
+        print(self.format_table_row(size, mtime, name))
 
         # Update the indent for the next depth level
         next_indent = indent + ("    " if last else "│   ")
@@ -787,7 +786,7 @@ class Shrawler:
             remote_file_path = base_dir + directory + "/" + next_filedir
             # Create local filename by replacing '/' with '_'
             local_filename = (
-                f"{self.args.host}_{remote_file_path.replace('/', '_').lstrip('_')}"
+                f"{self.args.host}_{share}_{remote_file_path.replace('/', '_').lstrip('_')}"
             )
 
             download_success = self.download_file(
@@ -803,7 +802,6 @@ class Shrawler:
             )
 
         # Always print the file in table format
-        perms = self.get_file_permissions(next_filedir, False)
         file_metadata = self.parse_file(file_result)
         size = file_metadata["size"]
         mtime = self.readable_time_short(file_result.get_mtime_epoch())
@@ -816,7 +814,7 @@ class Shrawler:
         if download_status:
             name += download_status
 
-        print(self.format_table_row(perms, size, mtime, name))
+        print(self.format_table_row(size, mtime, name))
 
     def spider_shares(self, target: str, share: str, base_dir: str, smbclient) -> None:
         directories = []
@@ -845,13 +843,12 @@ class Shrawler:
                 next_filedir = directory.get_longname()
 
                 # Format directory in table format with tree characters
-                perms = self.get_file_permissions(next_filedir, True)
                 size = "-"
                 mtime = self.readable_time_short(directory.get_mtime_epoch())
                 connector = "└── " if is_last else "├── "
                 name = connector + f"{Fore.BLUE}{next_filedir}/{Style.RESET_ALL}"
 
-                # print(self.format_table_row(perms, size, mtime, name))
+                # print(self.format_table_row(size, mtime, name))
 
                 self.build_tree_structure(
                     base_dir, directory, smbclient, share, last=is_last
@@ -978,7 +975,7 @@ class Shrawler:
         if should_download:
             remote_file_path = base_dir + file_result.get_longname()
             local_filename = (
-                f"{self.args.host}_{remote_file_path.replace('/', '_').lstrip('_')}"
+                f"{self.args.host}_{share}_{remote_file_path.replace('/', '_').lstrip('_')}"
             )
 
             download_success = self.download_file(
@@ -994,7 +991,6 @@ class Shrawler:
             )
 
         # Format file in table format
-        perms = self.get_file_permissions(file_result.get_longname(), False)
         file_metadata = self.parse_file(file_result)
         size = file_metadata["size"]
         mtime = self.readable_time_short(file_result.get_mtime_epoch())
@@ -1007,7 +1003,7 @@ class Shrawler:
         if download_status:
             name += download_status
 
-        print(self.format_table_row(perms, size, mtime, name))
+        print(self.format_table_row(size, mtime, name))
 
     def readable_file_size(self, nbytes: float) -> str:
         "Convert into readable file sizes"
@@ -1030,38 +1026,17 @@ class Shrawler:
         "convert into readable time without seconds"
         return time.strftime("%Y-%m-%d %H:%M", time.localtime(timestamp))
 
-    def get_file_permissions(self, filename: str, is_directory: bool) -> str:
-        "simulate Unix-style permissions for SMB files"
-        if is_directory:
-            return "drwxr-xr-x"
 
-        # Check for executable files
-        executable_extensions = [
-            ".exe",
-            ".bat",
-            ".ps1",
-            ".sh",
-            ".py",
-            ".com",
-            ".cmd",
-        ]
-        filename_lower = filename.lower()
 
-        for ext in executable_extensions:
-            if filename_lower.endswith(ext):
-                return "-rwxr-xr-x"
-
-        return "-rw-r--r--"
-
-    def format_table_row(self, perms: str, size: str, mtime: str, name: str) -> str:
+    def format_table_row(self, size: str, mtime: str, name: str) -> str:
         "format a table row with fixed-width columns"
-        return f"{perms:<10} {size:>9} {mtime:<21} {name}"
+        return f"{size:>9} {mtime:<21} {name}"
 
     def print_table_header(self) -> None:
         "print the table header and separator"
         print()
-        header = self.format_table_row("PERMS", "SIZE", "LAST MODIFIED", "NAME")
-        separator = self.format_table_row("-" * 10, "-" * 9, "-" * 21, "-" * 40)
+        header = self.format_table_row("SIZE", "LAST MODIFIED", "NAME")
+        separator = self.format_table_row("-" * 9, "-" * 21, "-" * 40)
         print(header)
         print(separator)
 
