@@ -14,17 +14,57 @@ import logging
 import json
 import time
 import os
-from typing import Any
+import requests
+import urllib3
+from typing import Any, Union, List, Dict, Tuple, Set
 from collections import defaultdict
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
 from colorama import init, Fore, Style
+from dotenv import load_dotenv
+
+# Load .env file if it exists
+load_dotenv()
+
+# Disable SSL warnings for unverified HTTPS requests
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
+
+def sanitize_filename(filename: str) -> str:
+    """
+    Sanitize filename for Linux filesystem compatibility.
+
+    Args:
+        filename: The filename to sanitize
+
+    Returns:
+        Sanitized filename with illegal characters replaced
+    """
+    # Characters that are problematic in Linux filenames
+    illegal_chars = ["\\", ":", "*", "?", '"', "<", ">", "|", "\0"]
+
+    sanitized = filename
+    for char in illegal_chars:
+        sanitized = sanitized.replace(char, "_")
+
+    # Replace multiple consecutive underscores with single underscore
+    while "__" in sanitized:
+        sanitized = sanitized.replace("__", "_")
+
+    # Remove leading/trailing underscores
+    sanitized = sanitized.strip("_")
+
+    # Ensure we don't have an empty filename
+    if not sanitized:
+        sanitized = "unnamed_file"
+
+    return sanitized
 
 
 # custom log colors
 class Formatter(logging.Formatter):
     """Custom Formatter."""
 
-    def format(self, record: logging.LogRecord):
+    def format(self, record: logging.LogRecord) -> str:
         init()
         if record.levelno == logging.INFO:
             self._style._fmt = f"{Fore.GREEN}[+]{Style.RESET_ALL} %(message)s"
@@ -54,7 +94,7 @@ def success(msg: str) -> str:
 def print_share_info(
     share_name: str,
     share_comment: str,
-    share_perms: dict[str, str],
+    share_perms: Dict[str, Union[str, bool]],
     largest_share_name: int,
 ) -> None:
     """Custom print message."""
@@ -82,8 +122,8 @@ def print_share_info(
 
 
 def find_unique_files_by_mtime(
-    file_list: list[tuple[str, float]],
-) -> list[tuple[float, str]]:
+    file_list: List[Tuple[str, float]],
+) -> List[Tuple[float, str]]:
     """
     Find files with unique modification times.
 
@@ -93,12 +133,12 @@ def find_unique_files_by_mtime(
     Returns:
         List of (mtime, file_path) tuples for files with unique modification times
     """
-    mtime_groups = defaultdict(list)
+    mtime_groups: defaultdict[float, List[str]] = defaultdict(list)
 
     for file_path, mtime in file_list:
         mtime_groups[mtime].append(file_path)
 
-    unique_files_data = []
+    unique_files_data: List[Tuple[float, str]] = []
     for mtime, paths in mtime_groups.items():
         if len(paths) == 1:
             unique_files_data.append((mtime, paths[0]))
@@ -107,8 +147,8 @@ def find_unique_files_by_mtime(
 
 
 def find_unique_files_in_directory(
-    files_with_mtime: list[tuple[Any, float]],
-) -> set[int]:
+    files_with_mtime: List[Tuple[Any, float]],
+) -> Set[int]:
     """
     Find files with unique modification times within a directory.
 
@@ -121,7 +161,7 @@ def find_unique_files_in_directory(
     if len(files_with_mtime) <= 1:
         return set()  # No files are unique if there's only 0 or 1 file
 
-    mtime_counts: dict[int, int] = defaultdict(int)
+    mtime_counts: defaultdict[int, int] = defaultdict(int)
 
     # Round epoch timestamps to minutes before comparing (to match display precision)
     for _, mtime in files_with_mtime:
@@ -131,7 +171,7 @@ def find_unique_files_in_directory(
         mtime_counts[rounded_mtime] += 1
 
     # Find indices of files with unique rounded mtimes
-    unique_indices = set()
+    unique_indices: Set[int] = set()
     for i, (_, mtime) in enumerate(files_with_mtime):
         rounded_mtime = int(mtime // 60) * 60
         if mtime_counts[rounded_mtime] == 1:
@@ -140,7 +180,7 @@ def find_unique_files_in_directory(
     return unique_indices
 
 
-def display_unique_files(unique_files_data: list[tuple[float, str]]) -> None:
+def display_unique_files(unique_files_data: List[Tuple[float, str]]) -> None:
     """
     Display files with unique modification times in spider-like format.
 
@@ -201,6 +241,35 @@ class Shrawler:
             help="File containing IP addresses of target machines",
         )
         parser.add_argument("--host", action="store", help="Specific machine to target")
+
+        nemesis = parser.add_argument_group("nemesis integration")
+        nemesis.add_argument(
+            "--nemesis-url",
+            action="store",
+            dest="nemesis_url",
+            default=os.getenv("NEMESIS_URL"),
+            help="Nemesis API URL (e.g., https://nemesis:7443/api)",
+        )
+        nemesis.add_argument(
+            "--nemesis-auth",
+            action="store",
+            dest="nemesis_auth",
+            default=os.getenv("NEMESIS_AUTH"),
+            help="Nemesis authentication in username:password format (e.g., n:n)",
+        )
+        nemesis.add_argument(
+            "--nemesis-project",
+            action="store",
+            dest="nemesis_project",
+            default=os.getenv("NEMESIS_PROJECT"),
+            help="Project name for Nemesis file submissions",
+        )
+        nemesis.add_argument(
+            "--nemesis-ingest",
+            action="store_true",
+            dest="nemesis_ingest",
+            help="Enable file submission to Nemesis for downloaded files",
+        )
 
         group = parser.add_argument_group("authentication")
         group.add_argument(
@@ -294,12 +363,15 @@ class Shrawler:
         self.files_seen_count = 0
 
         # Initialize file counting data structures
-        self.file_counts: dict[str, int] = {}
-        self.count_extensions_list: list[str] = []
-        self.count_strings_list: list[str] = []
+        self.file_counts: Dict[str, int] = {}
+        self.count_extensions_list: List[str] = []
+        self.count_strings_list: List[str] = []
 
         # Initialize unique file timestamp data collection
-        self.unique_files_data: list[tuple[str, float]] = []
+        self.unique_files_data: List[Tuple[str, float]] = []
+
+        # Initialize manifest data for JSON download log
+        self.manifest_data: Dict[str, List[Dict[str, Any]]] = {}
 
         # Process counting arguments
         self._process_count_arguments()
@@ -428,7 +500,7 @@ class Shrawler:
             f"| {'TOTAL'.ljust(max_type_width)} | {str(total_count).rjust(count_width)} |\n"
         )
 
-    def banner(self):
+    def banner(self) -> str:
         ascii = r"""
   _____ _                      _            
  / ____| |                    | |           
@@ -446,12 +518,20 @@ class Shrawler:
 
             try:
                 return s.connect_ex((machine, port)) == 0
-            except:
+            except (socket.timeout, socket.error, OSError) as e:
+                logging.debug(f"Port check failed for {machine}:{port} - {e}")
                 return False
 
     def download_file(
-        self, smbclient, share: str, remote_path: str, local_filename: str
-    ) -> bool:
+        self,
+        smbclient: Any,
+        share: str,
+        remote_path: str,
+        local_filename: str,
+        host: str,
+        file_size: int = 0,
+        mtime_epoch: float = 0,
+    ) -> Tuple[bool, bool]:
         """
         Downloads a file from the SMB share and saves it locally.
 
@@ -460,39 +540,184 @@ class Shrawler:
             share: SMB share name
             remote_path: Full path to the remote file
             local_filename: Local filename to save as
+            host: Target host IP
+            file_size: File size in bytes
+            mtime_epoch: File modification time as epoch
 
         Returns:
-            bool: True if download successful, False otherwise
+            tuple[bool, bool]: (download_success, nemesis_upload_success)
         """
         try:
-            # Create downloads directory if it doesn't exist
-            downloads_dir = "downloads"
-            if not os.path.exists(downloads_dir):
-                os.makedirs(downloads_dir)
+            # Create loot directory if it doesn't exist
+            loot_dir = "downloads"
+            if not os.path.exists(loot_dir):
+                os.makedirs(loot_dir)
 
-            local_path = os.path.join(downloads_dir, local_filename)
+            local_path = os.path.join(loot_dir, local_filename)
 
             # Download the file using impacket's getFile method
             with open(local_path, "wb") as local_file:
                 smbclient.getFile(share, remote_path, local_file.write)
 
+            # Populate manifest data on successful download
+            file_entry: Dict[str, Any] = {
+                "timestamp": datetime.now().isoformat(),
+                "timestamp_utc": datetime.now(timezone.utc).isoformat(),
+                "host": host,
+                "share": share,
+                "remote_path": remote_path,
+                "unc_path": f"\\\\{host}\\{share}\\{remote_path.lstrip('/')}",
+                "local_filename": local_filename,
+                "size_bytes": file_size,
+                "mtime_epoch": mtime_epoch,
+                "mtime_utc": datetime.fromtimestamp(
+                    mtime_epoch, timezone.utc
+                ).isoformat(),
+                "origin_tool": "shrawler",
+            }
+
+            # Submit to Nemesis if enabled (only for successfully downloaded files)
+            nemesis_success = False
+            if self.args.nemesis_ingest:
+                clean_remote_path = remote_path.lstrip("/").replace("/", "\\")
+                unc_path = f"\\\\{host}\\{share}\\{clean_remote_path}"
+                nemesis_result = self.submit_to_nemesis(
+                    local_path, unc_path, mtime_epoch
+                )
+                nemesis_success = nemesis_result["success"]
+
+                # Add Nemesis upload result to file entry
+                file_entry["nemesis_upload"] = nemesis_result
+
+            # Add to manifest data (grouped by host)
+            self.manifest_data.setdefault(host, []).append(file_entry)
+
             # Increment counter on success
             self.download_count += 1
-            return True
+
+            return (True, nemesis_success)
 
         except Exception as e:
             logging.warning(f"Failed to download {remote_path}: {str(e)}")
-            return False
+            return (False, False)
+
+    def submit_to_nemesis(
+        self, local_file_path: str, unc_path: str, file_mtime_epoch: float
+    ) -> Dict[str, Any]:
+        """Submit downloaded file to Nemesis API using multipart form data.
+
+        Returns:
+            dict: Upload status with 'success' (bool), 'timestamp' (str), and optional 'response_id' (str)
+        """
+        upload_result = {
+            "success": False,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "response_id": None,
+        }
+
+        if not self.args.nemesis_ingest:
+            return upload_result
+
+        if (
+            not self.args.nemesis_url
+            or not self.args.nemesis_auth
+            or not self.args.nemesis_project
+        ):
+            logging.warning("Nemesis URL, auth, and project required for ingestion")
+            return upload_result
+
+        if not os.path.exists(local_file_path):
+            logging.warning(
+                f"Local file not found for Nemesis submission: {local_file_path}"
+            )
+            return upload_result
+
+        try:
+            # Parse authentication
+            if ":" not in self.args.nemesis_auth:
+                logging.warning("Nemesis auth must be in username:password format")
+                return upload_result
+
+            username, password = self.args.nemesis_auth.split(":", 1)
+
+            # Prepare endpoint
+            endpoint = f"{self.args.nemesis_url.rstrip('/')}/files"
+
+            # Prepare metadata
+            current_time = datetime.now(timezone.utc)
+            expiration_time = current_time + timedelta(days=365)  # 1 year from now
+            file_mtime = datetime.fromtimestamp(file_mtime_epoch, timezone.utc)
+
+            metadata = {
+                "agent_id": "shrawler",
+                "project": self.args.nemesis_project,
+                "timestamp": current_time.isoformat(),
+                "expiration": expiration_time.isoformat(),
+                "path": unc_path,
+            }
+
+            # Prepare multipart form data
+            with open(local_file_path, "rb") as file_data:
+                files = {
+                    "file": (
+                        os.path.basename(local_file_path),
+                        file_data,
+                        "application/octet-stream",
+                    )
+                }
+                data = {"metadata": json.dumps(metadata)}
+
+                # Submit with basic auth and SSL verification disabled (like curl -k)
+                response = requests.post(
+                    endpoint,
+                    files=files,
+                    data=data,
+                    auth=(username, password),
+                    verify=False,
+                    timeout=30,
+                )
+
+                if response.status_code not in [200, 201]:
+                    logging.warning(
+                        f"Failed to submit file to Nemesis: {unc_path} (HTTP {response.status_code})"
+                    )
+                else:
+                    logging.debug(f"Successfully submitted file to Nemesis: {unc_path}")
+                    upload_result["success"] = True
+
+                    # Try to extract response ID if present
+                    try:
+                        response_data = response.json()
+                        if "id" in response_data:
+                            upload_result["response_id"] = response_data["id"]
+                    except (json.JSONDecodeError, KeyError) as e:
+                        logging.debug(
+                            f"Failed to parse Nemesis response for {unc_path}: {e}"
+                        )
+
+        except (
+            requests.exceptions.RequestException,
+            requests.exceptions.Timeout,
+            requests.exceptions.ConnectionError,
+            FileNotFoundError,
+        ) as e:
+            logging.debug(f"Nemesis submission error for {unc_path}: {str(e)}")
+        except Exception as e:
+            logging.debug(
+                f"Unexpected error in Nemesis submission for {unc_path}: {str(e)}"
+            )
+
+        return upload_result
 
     def get_shares(
         self,
         target: str,
         mach_name: str,
         smbclient: Any,
-        default_shares,
+        default_shares: List[str],
         spider: bool = False,
         desired_share: str = "",
-    ) -> dict[str, list[Any]]:
+    ) -> Dict[str, List[Any]]:
         shares = smbclient.listShares()
         results: dict[str, list[Any]] = {}
         results[target] = []
@@ -554,7 +779,9 @@ class Shrawler:
             logging.warning("No desired shares found")
         return results
 
-    def check_share_perm(self, share: str, smbclient) -> dict:
+    def check_share_perm(
+        self, share: str, smbclient: Any
+    ) -> Dict[str, Union[str, bool]]:
         read_write = {"read": False, "write": "N/A"}
 
         # check for read rights
@@ -583,8 +810,8 @@ class Shrawler:
     def build_tree_structure(
         self,
         base_dir: str,
-        directory_result,
-        smbclient,
+        directory_result: Any,
+        smbclient: Any,
         share: str,
         indent: str = "",
         last: bool = False,
@@ -614,8 +841,8 @@ class Shrawler:
             )
 
             # Filter out '.' and '..' and separate directories from files
-            directories = []
-            files = []
+            directories: List[Any] = []
+            files: List[Any] = []
             for result in results:
                 if result.get_longname() not in [".", ".."]:
                     if result.is_directory():
@@ -651,7 +878,7 @@ class Shrawler:
                 # Process files - conditional logic based on --unique-mtime
                 if self.args.unique:
                     # Collect files with mtime for uniqueness analysis
-                    files_with_mtime = []
+                    files_with_mtime: List[Tuple[Any, float]] = []
                     for file_result in files:
                         file_mtime_epoch = file_result.get_mtime_epoch()
                         files_with_mtime.append((file_result, file_mtime_epoch))
@@ -707,10 +934,10 @@ class Shrawler:
 
     def _process_and_display_file(
         self,
-        file_result,
+        file_result: Any,
         base_dir: str,
         directory: str,
-        smbclient,
+        smbclient: Any,
         share: str,
         indent: str,
         is_last: bool,
@@ -784,22 +1011,33 @@ class Shrawler:
         # Download the file if criteria met
         if should_download:
             remote_file_path = base_dir + directory + "/" + next_filedir
-            # Create local filename by replacing '/' with '_'
-            local_filename = (
-                f"{self.args.host}_{share}_{remote_file_path.replace('/', '_').lstrip('_')}"
+            # Create local filename with double underscore delimiters and sanitization
+            sanitized_path = sanitize_filename(
+                remote_file_path.replace("/", "_").lstrip("_")
             )
+            local_filename = f"{self.args.host}__{share}__{sanitized_path}"
 
-            download_success = self.download_file(
+            download_success, nemesis_success = self.download_file(
                 smbclient,
                 share,
                 remote_file_path,
                 local_filename,
+                self.args.host,
+                file_result.get_filesize(),
+                file_result.get_mtime_epoch(),
             )
-            download_status = (
-                f" {Fore.CYAN}[DOWNLOADED]{Style.RESET_ALL}"
-                if download_success
-                else f" {Fore.RED}[FAILED]{Style.RESET_ALL}"
-            )
+
+            # Build download status with both download and Nemesis upload results
+            if download_success:
+                download_status = f" {Fore.CYAN}[DOWNLOADED]{Style.RESET_ALL}"
+                if self.args.nemesis_ingest and nemesis_success:
+                    download_status += (
+                        f" {Fore.MAGENTA}[UPLOADED TO NEMESIS]{Style.RESET_ALL}"
+                    )
+                elif self.args.nemesis_ingest and not nemesis_success:
+                    download_status += f" {Fore.RED}[NEMESIS FAILED]{Style.RESET_ALL}"
+            else:
+                download_status = f" {Fore.RED}[DOWNLOAD FAILED]{Style.RESET_ALL}"
 
         # Always print the file in table format
         file_metadata = self.parse_file(file_result)
@@ -816,9 +1054,11 @@ class Shrawler:
 
         print(self.format_table_row(size, mtime, name))
 
-    def spider_shares(self, target: str, share: str, base_dir: str, smbclient) -> None:
-        directories = []
-        files = []
+    def spider_shares(
+        self, target: str, share: str, base_dir: str, smbclient: Any
+    ) -> None:
+        directories: List[Any] = []
+        files: List[Any] = []
         try:
             # List all items in the base directory
             results = list(smbclient.listPath(share, base_dir + "*", password=None))
@@ -857,7 +1097,7 @@ class Shrawler:
             # Process files at root level - conditional logic based on --unique-mtime
             if self.args.unique:
                 # Collect files with mtime for uniqueness analysis
-                files_with_mtime = []
+                files_with_mtime: List[Tuple[Any, float]] = []
                 for file_result in files:
                     file_mtime_epoch = file_result.get_mtime_epoch()
                     files_with_mtime.append((file_result, file_mtime_epoch))
@@ -899,9 +1139,9 @@ class Shrawler:
 
     def _process_and_display_file_root(
         self,
-        file_result,
+        file_result: Any,
         base_dir: str,
-        smbclient,
+        smbclient: Any,
         share: str,
         is_last: bool,
         is_unique: bool,
@@ -974,21 +1214,33 @@ class Shrawler:
         # Download the file if criteria met
         if should_download:
             remote_file_path = base_dir + file_result.get_longname()
-            local_filename = (
-                f"{self.args.host}_{share}_{remote_file_path.replace('/', '_').lstrip('_')}"
+            # Create local filename with double underscore delimiters and sanitization
+            sanitized_path = sanitize_filename(
+                remote_file_path.replace("/", "_").lstrip("_")
             )
+            local_filename = f"{self.args.host}__{share}__{sanitized_path}"
 
-            download_success = self.download_file(
+            download_success, nemesis_success = self.download_file(
                 smbclient,
                 share,
                 remote_file_path,
                 local_filename,
+                self.args.host,
+                file_result.get_filesize(),
+                file_result.get_mtime_epoch(),
             )
-            download_status = (
-                f" {Fore.CYAN}[DOWNLOADED]{Style.RESET_ALL}"
-                if download_success
-                else f" {Fore.RED}[FAILED]{Style.RESET_ALL}"
-            )
+
+            # Build download status with both download and Nemesis upload results
+            if download_success:
+                download_status = f" {Fore.CYAN}[DOWNLOADED]{Style.RESET_ALL}"
+                if self.args.nemesis_ingest and nemesis_success:
+                    download_status += (
+                        f" {Fore.MAGENTA}[UPLOADED TO NEMESIS]{Style.RESET_ALL}"
+                    )
+                elif self.args.nemesis_ingest and not nemesis_success:
+                    download_status += f" {Fore.RED}[NEMESIS FAILED]{Style.RESET_ALL}"
+            else:
+                download_status = f" {Fore.RED}[DOWNLOAD FAILED]{Style.RESET_ALL}"
 
         # Format file in table format
         file_metadata = self.parse_file(file_result)
@@ -1009,6 +1261,7 @@ class Shrawler:
         "Convert into readable file sizes"
         suffixes = ["B", "KB", "MB", "GB"]
 
+        i = 0
         for i in range(len(suffixes)):
             if nbytes < 1024 or i == len(suffixes) - 1:
                 break
@@ -1026,8 +1279,6 @@ class Shrawler:
         "convert into readable time without seconds"
         return time.strftime("%Y-%m-%d %H:%M", time.localtime(timestamp))
 
-
-
     def format_table_row(self, size: str, mtime: str, name: str) -> str:
         "format a table row with fixed-width columns"
         return f"{size:>9} {mtime:<21} {name}"
@@ -1040,7 +1291,7 @@ class Shrawler:
         print(header)
         print(separator)
 
-    def parse_file(self, file_info) -> dict:
+    def parse_file(self, file_info: Any) -> Dict[str, str]:
         "Parse file and output metadata"
         file_size = file_info.get_filesize()
         file_creation_date = file_info.get_ctime_epoch()
@@ -1053,7 +1304,9 @@ class Shrawler:
         }
         return results
 
-    def output_to_json(self, mach_ip: str, username: str, output: dict) -> None:
+    def output_to_json(
+        self, mach_ip: str, username: str, output: Dict[str, Any]
+    ) -> None:
         "output into json file"
         out_file = f"{mach_ip}_{username}_shares.json"
 
@@ -1098,7 +1351,7 @@ class Shrawler:
                     lmhash,
                     nthash,
                     self.args.aesKey,
-                    self.domain_controller,
+                    domain,
                 )
 
             else:
@@ -1116,7 +1369,7 @@ class Shrawler:
         logging.info(f"Connected to {address}")
         return smbClient
 
-    def get_ip_addrs(self, file: str) -> list:
+    def get_ip_addrs(self, file: str) -> List[str]:
         with open(file, "r") as f:
             lines = f.read().splitlines()
 
@@ -1236,6 +1489,15 @@ class Shrawler:
         if self.args.download_ext is not None:
             logging.info(f"Total files downloaded: {self.download_count}")
 
+        # Write manifest file if any files were downloaded
+        if self.manifest_data:
+            try:
+                with open("manifest.json", "w") as f:
+                    json.dump(self.manifest_data, f, indent=4)
+                logging.info("Download manifest written to manifest.json")
+            except Exception as e:
+                logging.warning(f"Failed to write manifest file: {str(e)}")
+
         # Display file count summary if counting was enabled
         if self.count_extensions_list or self.count_strings_list:
             self._display_file_count_summary()
@@ -1257,7 +1519,7 @@ def main() -> None:
         print(success("Summary of work done:"))
         if s.args.spider:
             logging.info(f"Total files seen: {s.files_seen_count}")
-        if s.args.download is not None:
+        if s.args.download_ext is not None:
             logging.info(f"Total files downloaded: {s.download_count}")
 
         # Display file count summary if counting was enabled
@@ -1266,7 +1528,7 @@ def main() -> None:
 
         # Display unique files summary if unique timestamp analysis was enabled
         # Only show this summary if NOT in spider mode
-        if s.args.unique_mtime and s.unique_files_data and not s.args.spider:
+        if s.args.unique and s.unique_files_data and not s.args.spider:
             unique_results = find_unique_files_by_mtime(s.unique_files_data)
             display_unique_files(unique_results)
         quit()

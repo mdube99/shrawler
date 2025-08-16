@@ -52,6 +52,8 @@ description = "A simple SMB share enumeration and spidering tool."
 dependencies = [
     "impacket",
     "colorama",
+    "python-dotenv",
+    "requests",
 ]
 requires-python = ">=3.8"
 
