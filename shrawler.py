@@ -233,7 +233,7 @@ class Shrawler:
             dest="shares",
             help="Only scan shares specified with this argument",
         )
-        parser.add_argument("--output", action="store_true", help="Json file output")
+
         parser.add_argument(
             "--hosts-file",
             action="store",
@@ -370,8 +370,8 @@ class Shrawler:
         # Initialize unique file timestamp data collection
         self.unique_files_data: List[Tuple[str, float]] = []
 
-        # Initialize manifest data for JSON download log
-        self.manifest_data: Dict[str, List[Dict[str, Any]]] = {}
+        # Initialize scan results for consolidated JSON output
+        self.scan_results: Dict[str, Any] = {}
 
         # Process counting arguments
         self._process_count_arguments()
@@ -589,8 +589,8 @@ class Shrawler:
                 # Add Nemesis upload result to file entry
                 file_entry["nemesis_upload"] = nemesis_result
 
-            # Add to manifest data (grouped by host)
-            self.manifest_data.setdefault(host, []).append(file_entry)
+            # Add to scan results (within the appropriate share's downloaded_files list)
+            self.scan_results[host]["shares"][share]["downloaded_files"].append(file_entry)
 
             # Increment counter on success
             self.download_count += 1
@@ -717,10 +717,8 @@ class Shrawler:
         default_shares: List[str],
         spider: bool = False,
         desired_share: str = "",
-    ) -> Dict[str, List[Any]]:
+    ) -> None:
         shares = smbclient.listShares()
-        results: dict[str, list[Any]] = {}
-        results[target] = []
 
         largest_share_name = len(max(shares, key=len))
 
@@ -744,17 +742,22 @@ class Shrawler:
                 if share_name not in default_shares:
                     try:
                         share_perms = self.check_share_perm(share_name, smbclient)
-                        results[target].append(
-                            {
-                                "computer": {"ip": target},
-                                "share": {
-                                    "name": share_name,
-                                    "comment": share_comment,
-                                    "read_write": share_perms,
-                                    "path": f"\\\\{target}\\{share_name}",
-                                },
+                        
+                        # Initialize host entry in scan_results if it doesn't exist
+                        if target not in self.scan_results:
+                            self.scan_results[target] = {
+                                "scan_timestamp_utc": datetime.now(timezone.utc).isoformat(),
+                                "shares": {}
                             }
-                        )
+                        
+                        # Add share information to scan_results
+                        self.scan_results[target]["shares"][share_name] = {
+                            "comment": share_comment,
+                            "permissions": share_perms,
+                            "unc_path": f"\\\\{target}\\{share_name}",
+                            "downloaded_files": []
+                        }
+                        
                         # If you're spidering you don't need to print out share perms
                         # Assumes you're doing this in separate steps - will still print out what it finds though
                         if spider and share_perms["read"]:
@@ -777,7 +780,6 @@ class Shrawler:
                         continue
         else:
             logging.warning("No desired shares found")
-        return results
 
     def check_share_perm(
         self, share: str, smbclient: Any
@@ -1304,15 +1306,7 @@ class Shrawler:
         }
         return results
 
-    def output_to_json(
-        self, mach_ip: str, username: str, output: Dict[str, Any]
-    ) -> None:
-        "output into json file"
-        out_file = f"{mach_ip}_{username}_shares.json"
 
-        with open(out_file, "w") as f:
-            f.write(json.dumps(output, indent=2))
-        f.close()
 
     def init_smb_session(
         self,
@@ -1452,7 +1446,7 @@ class Shrawler:
                         )
 
                         # get shares on host
-                        results = self.get_shares(
+                        self.get_shares(
                             mach_ip,
                             mach_name,
                             smbclient,
@@ -1460,9 +1454,7 @@ class Shrawler:
                             self.args.spider,
                             self.args.shares,
                         )
-                        # output to file in json format
-                        if self.args.output:
-                            self.output_to_json(mach_ip, self.username, results)
+
 
                         # just for a new line
                         print("")
@@ -1489,14 +1481,14 @@ class Shrawler:
         if self.args.download_ext is not None:
             logging.info(f"Total files downloaded: {self.download_count}")
 
-        # Write manifest file if any files were downloaded
-        if self.manifest_data:
+        # Write consolidated scan results if any data was collected
+        if self.scan_results:
             try:
-                with open("manifest.json", "w") as f:
-                    json.dump(self.manifest_data, f, indent=4)
-                logging.info("Download manifest written to manifest.json")
+                with open("shrawler_results.json", "w") as f:
+                    json.dump(self.scan_results, f, indent=4)
+                logging.info("Scan results written to shrawler_results.json")
             except Exception as e:
-                logging.warning(f"Failed to write manifest file: {str(e)}")
+                logging.warning(f"Failed to write scan results file: {str(e)}")
 
         # Display file count summary if counting was enabled
         if self.count_extensions_list or self.count_strings_list:

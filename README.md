@@ -25,7 +25,7 @@
   * **Customizable Depth**: Control the recursion depth of the spider to manage scan time and output verbosity.
   * **Nemesis Integration**: Upload downloaded files directly to Nemesis API for centralized file management and analysis.
   * **Environment Variables**: Configure Nemesis settings via `.env` file for streamlined workflow integration.
-  * **Download Manifest**: Automatic generation of `manifest.json` with detailed metadata for all downloaded files.
+  * **Consolidated Scan Results**: Automatic generation of `shrawler_results.json` with hierarchical structure containing share enumeration data and detailed metadata for all downloaded files.
   * **File Analysis**: Count files by extension or filename patterns, and identify files with unique modification times.
   * **Cross-Platform Compatibility**: Automatic filename sanitization ensures downloads work across different operating systems.
   * **Enhanced Status Indicators**: Real-time feedback on download success, Nemesis uploads, and unique file identification.
@@ -81,7 +81,7 @@ shrawler [[domain/]username[:password]@]<dc-ip> [options]
 | `--skip-share <shares>` | Comma-separated list of additional shares to skip (e.g., `data,backup`). |
 | `--add-share <shares>` | Comma-separated list of shares to remove from the default skip list (e.g., `C$,ADMIN$`). |
 | `--shares <shares>` | Only scan the shares specified in this comma-separated list. |
-| `--output` | Save scan results to a JSON file named `<ip>_<username>_shares.json`. |
+
 | `--hosts-file <file>` | Path to a file containing a list of target IPs (one per line). |
 | `--host <ip>` | Specify a single target host IP. Overrides the IP in the main `target` argument. |
 | **Authentication** | |
@@ -372,32 +372,48 @@ When using `--unique`, files with unique modification times are highlighted:
 [+] 2025-01-22 16:43:22 | /temp/anomalous_file.log
 ```
 
-#### **Download Manifest**
+#### **Consolidated Scan Results**
 
-All downloaded files are tracked in `manifest.json`:
+All scan data including share enumeration and downloaded files are tracked in `shrawler_results.json`:
 
 ```json
 {
-  "192.168.1.100": [
-    {
-      "timestamp": "2025-08-16T10:30:15.123456",
-      "timestamp_utc": "2025-08-16T14:30:15.123456+00:00",
-      "host": "192.168.1.100",
-      "share": "backup", 
-      "remote_path": "/Documents/creds.txt",
-      "unc_path": "\\\\192.168.1.100\\backup\\Documents\\creds.txt",
-      "local_filename": "192.168.1.100__backup__Documents_creds.txt",
-      "size_bytes": 1024,
-      "mtime_epoch": 1723456215.0,
-      "mtime_utc": "2025-08-06T08:30:15+00:00",
-      "origin_tool": "shrawler",
-      "nemesis_upload": {
-        "success": true,
-        "timestamp": "2025-08-16T14:30:16.789123+00:00", 
-        "response_id": "file_12345"
+  "192.168.1.100": {
+    "scan_timestamp_utc": "2025-08-16T14:30:15.123456+00:00",
+    "shares": {
+      "backup": {
+        "comment": "Backup files",
+        "permissions": {"read": true, "write": true},
+        "unc_path": "\\\\192.168.1.100\\backup",
+        "downloaded_files": [
+          {
+            "timestamp": "2025-08-16T10:30:15.123456",
+            "timestamp_utc": "2025-08-16T14:30:15.123456+00:00",
+            "host": "192.168.1.100",
+            "share": "backup", 
+            "remote_path": "/Documents/creds.txt",
+            "unc_path": "\\\\192.168.1.100\\backup\\Documents\\creds.txt",
+            "local_filename": "192.168.1.100__backup__Documents_creds.txt",
+            "size_bytes": 1024,
+            "mtime_epoch": 1723456215.0,
+            "mtime_utc": "2025-08-06T08:30:15+00:00",
+            "origin_tool": "shrawler",
+            "nemesis_upload": {
+              "success": true,
+              "timestamp": "2025-08-16T14:30:16.789123+00:00", 
+              "response_id": "file_12345"
+            }
+          }
+        ]
+      },
+      "data": {
+        "comment": "Company Data",
+        "permissions": {"read": true, "write": false},
+        "unc_path": "\\\\192.168.1.100\\data",
+        "downloaded_files": []
       }
     }
-  ]
+  }
 }
 ```
 
@@ -432,8 +448,7 @@ When using `--download-ext default` or `--count-ext` without arguments, Shrawler
 
 | File | Description |
 | :--- | :--- |
-| `<ip>_<username>_shares.json` | Share enumeration results (when using `--output`) |
-| `manifest.json` | Download log with metadata for all downloaded files |
+| `shrawler_results.json` | Consolidated scan results with share enumeration and download metadata |
 | `downloads/` | Directory containing all downloaded files with sanitized names |
 | `.env` | Optional environment configuration file |
 
@@ -484,7 +499,7 @@ Downloaded files are automatically sanitized for cross-platform compatibility:
 3. **Combine analysis features** (`--count-ext`, `--unique`, `--count-string`) for comprehensive reconnaissance
 4. **Set appropriate delays** (`--delay 0.2-0.5`) when scanning production systems
 5. **Use environment variables** for Nemesis configuration to avoid exposing credentials in command line
-6. **Monitor manifest.json** for detailed download tracking and forensic analysis
+6. **Monitor shrawler_results.json** for comprehensive scan results including share enumeration and download tracking
 7. **Use `--download-ext default`** as a starting point, then refine with specific extensions
 
 -----
