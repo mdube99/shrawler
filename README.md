@@ -81,7 +81,6 @@ shrawler [[domain/]username[:password]@]<dc-ip> [options]
 | `--skip-share <shares>` | Comma-separated list of additional shares to skip (e.g., `data,backup`). |
 | `--add-share <shares>` | Comma-separated list of shares to remove from the default skip list (e.g., `C$,ADMIN$`). |
 | `--shares <shares>` | Only scan the shares specified in this comma-separated list. |
-
 | `--hosts-file <file>` | Path to a file containing a list of target IPs (one per line). |
 | `--host <ip>` | Specify a single target host IP. Overrides the IP in the main `target` argument. |
 | **Authentication** | |
