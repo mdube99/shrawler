@@ -373,6 +373,9 @@ class Shrawler:
         # Initialize scan results for consolidated JSON output
         self.scan_results: Dict[str, Any] = {}
 
+        # Track the currently processed host for download operations
+        self.current_host = None
+
         # Process counting arguments
         self._process_count_arguments()
 
@@ -590,7 +593,9 @@ class Shrawler:
                 file_entry["nemesis_upload"] = nemesis_result
 
             # Add to scan results (within the appropriate share's downloaded_files list)
-            self.scan_results[host]["shares"][share]["downloaded_files"].append(file_entry)
+            self.scan_results[host]["shares"][share]["downloaded_files"].append(
+                file_entry
+            )
 
             # Increment counter on success
             self.download_count += 1
@@ -742,22 +747,24 @@ class Shrawler:
                 if share_name not in default_shares:
                     try:
                         share_perms = self.check_share_perm(share_name, smbclient)
-                        
+
                         # Initialize host entry in scan_results if it doesn't exist
                         if target not in self.scan_results:
                             self.scan_results[target] = {
-                                "scan_timestamp_utc": datetime.now(timezone.utc).isoformat(),
-                                "shares": {}
+                                "scan_timestamp_utc": datetime.now(
+                                    timezone.utc
+                                ).isoformat(),
+                                "shares": {},
                             }
-                        
+
                         # Add share information to scan_results
                         self.scan_results[target]["shares"][share_name] = {
                             "comment": share_comment,
                             "permissions": share_perms,
                             "unc_path": f"\\\\{target}\\{share_name}",
-                            "downloaded_files": []
+                            "downloaded_files": [],
                         }
-                        
+
                         # If you're spidering you don't need to print out share perms
                         # Assumes you're doing this in separate steps - will still print out what it finds though
                         if spider and share_perms["read"]:
@@ -1017,14 +1024,14 @@ class Shrawler:
             sanitized_path = sanitize_filename(
                 remote_file_path.replace("/", "_").lstrip("_")
             )
-            local_filename = f"{self.args.host}__{share}__{sanitized_path}"
+            local_filename = f"{self.current_host}__{share}__{sanitized_path}"
 
             download_success, nemesis_success = self.download_file(
                 smbclient,
                 share,
                 remote_file_path,
                 local_filename,
-                self.args.host,
+                self.current_host,
                 file_result.get_filesize(),
                 file_result.get_mtime_epoch(),
             )
@@ -1220,14 +1227,14 @@ class Shrawler:
             sanitized_path = sanitize_filename(
                 remote_file_path.replace("/", "_").lstrip("_")
             )
-            local_filename = f"{self.args.host}__{share}__{sanitized_path}"
+            local_filename = f"{self.current_host}__{share}__{sanitized_path}"
 
             download_success, nemesis_success = self.download_file(
                 smbclient,
                 share,
                 remote_file_path,
                 local_filename,
-                self.args.host,
+                self.current_host,
                 file_result.get_filesize(),
                 file_result.get_mtime_epoch(),
             )
@@ -1305,8 +1312,6 @@ class Shrawler:
             "mtime": self.readable_time(file_modified_date),
         }
         return results
-
-
 
     def init_smb_session(
         self,
@@ -1432,6 +1437,8 @@ class Shrawler:
 
         # iterate through machine IPs and machines at the same time
         for mach_ip, mach_name in zip(machine_ip, machine_names):
+            # Set the current host being processed for download operations
+            self.current_host = mach_ip
             try:
                 if self.check_port(mach_ip, 445):
                     # Start SMB session against the host in question
@@ -1454,7 +1461,6 @@ class Shrawler:
                             self.args.spider,
                             self.args.shares,
                         )
-
 
                         # just for a new line
                         print("")
