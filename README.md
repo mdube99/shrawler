@@ -97,6 +97,7 @@ shrawler [[domain/]username[:password]@]<dc-ip> [options]
 | `--count-ext [ext]` | Count files by extension. Use without args for default extensions, or provide comma-separated extensions (e.g., `.txt,.log,.sh`). |
 | `--count-string <strings>` | Count files containing specific strings in their names. Provide comma-separated strings (e.g., `backup,config,password`). |
 | `--unique` | Identify and display files with unique modification times. |
+| `--csv-output` | Output results in CSV format (generates shrawler_shares.csv, shrawler_files.csv, shrawler_downloads.csv). |
 | **Nemesis Integration** | |
 | `--nemesis-url <url>` | Nemesis API URL (e.g., `https://nemesis:7443/api`). Can also be set via `NEMESIS_URL` environment variable. |
 | `--nemesis-auth <auth>` | Nemesis authentication in `username:password` format (e.g., `n:n`). Can also be set via `NEMESIS_AUTH` environment variable. |
@@ -287,6 +288,38 @@ shrawler user:Password123@192.168.1.100 --host 192.168.1.100 --spider \
   --delay 0.2
 ```
 
+#### **14. CSV Output Format**
+
+Output scan results in CSV format instead of JSON:
+
+```bash
+shrawler user:Password123@192.168.1.100 --host 192.168.1.100 --spider --csv-output
+```
+
+This will generate three CSV files:
+- `shrawler_shares.csv` - Share enumeration data
+- `shrawler_files.csv` - All files discovered during spidering
+- `shrawler_downloads.csv` - Files that were downloaded
+
+**Example shrawler_shares.csv:**
+```csv
+host,share_name,comment,read_permission,write_permission,unc_path,scan_timestamp_utc
+192.168.1.100,backup,Backup files,True,True,\\192.168.1.100\backup,2025-08-16T14:30:15+00:00
+192.168.1.100,data,Company Data,True,False,\\192.168.1.100\data,2025-08-16T14:30:15+00:00
+```
+
+**Example shrawler_files.csv:**
+```csv
+host,share_name,remote_path,unc_path,file_name,size_bytes,readable_size,mtime_utc,is_directory,can_read,can_write,scan_timestamp_utc
+192.168.1.100,backup,/Documents/file.txt,\\192.168.1.100\backup\Documents\file.txt,file.txt,1024,1KB,2025-08-06T08:30:15+00:00,False,,,
+```
+
+**Example shrawler_downloads.csv:**
+```csv
+host,share_name,remote_path,unc_path,local_filename,size_bytes,mtime_utc,nemesis_success,nemesis_response_id,download_success,timestamp_utc
+192.168.1.100,backup,/Documents/creds.txt,\\192.168.1.100\backup\Documents\creds.txt,192.168.1.100__backup__Documents_creds.txt,1024,2025-08-06T08:30:15+00:00,True,file_12345,True,2025-08-16T14:30:16+00:00
+```
+
 -----
 
 ## 📊 Example Output
@@ -389,19 +422,14 @@ All scan data including share enumeration and downloaded files are tracked in `s
             "timestamp": "2025-08-16T10:30:15.123456",
             "timestamp_utc": "2025-08-16T14:30:15.123456+00:00",
             "host": "192.168.1.100",
-            "share": "backup", 
+            "share": "backup",
             "remote_path": "/Documents/creds.txt",
             "unc_path": "\\\\192.168.1.100\\backup\\Documents\\creds.txt",
             "local_filename": "192.168.1.100__backup__Documents_creds.txt",
             "size_bytes": 1024,
             "mtime_epoch": 1723456215.0,
             "mtime_utc": "2025-08-06T08:30:15+00:00",
-            "origin_tool": "shrawler",
-            "nemesis_upload": {
-              "success": true,
-              "timestamp": "2025-08-16T14:30:16.789123+00:00", 
-              "response_id": "file_12345"
-            }
+            "origin_tool": "shrawler"
           }
         ]
       },
@@ -447,7 +475,10 @@ When using `--download-ext default` or `--count-ext` without arguments, Shrawler
 
 | File | Description |
 | :--- | :--- |
-| `shrawler_results.json` | Consolidated scan results with share enumeration and download metadata |
+| `shrawler_results.json` | Consolidated scan results with share enumeration and download metadata (default output) |
+| `shrawler_shares.csv` | Share enumeration data in CSV format (generated with --csv-output) |
+| `shrawler_files.csv` | All discovered files during spidering in CSV format (generated with --csv-output) |
+| `shrawler_downloads.csv` | Downloaded files metadata in CSV format (generated with --csv-output) |
 | `downloads/` | Directory containing all downloaded files with sanitized names |
 | `.env` | Optional environment configuration file |
 

@@ -356,6 +356,18 @@ class Shrawler:
             dest="unique",
             help="Identify and display files with unique modification times",
         )
+        spider.add_argument(
+            "--csv-output",
+            action="store_true",
+            dest="csv_output",
+            help="Output results in CSV format (generates shrawler_shares.csv, shrawler_files.csv, shrawler_downloads.csv)",
+        )
+        spider.add_argument(
+            "--json-output",
+            action="store_true",
+            dest="json_output",
+            help="Output results in JSON format (generates shrawler_results.json)",
+        )
 
         self.args = parser.parse_args()
 
@@ -375,6 +387,13 @@ class Shrawler:
 
         # Track the currently processed host for download operations
         self.current_host = None
+
+        # CSV output data structures
+        self.share_rows: List[Dict[str, Any]] = []
+        self.file_rows: List[Dict[str, Any]] = []
+        self.download_rows: List[Dict[str, Any]] = []
+        self.csv_enabled = False
+        self.json_enabled = False
 
         # Process counting arguments
         self._process_count_arguments()
@@ -422,6 +441,10 @@ class Shrawler:
             ".sql",
             ".db",
         ]
+
+        # Set CSV output flag
+        self.csv_enabled = self.args.csv_output
+        self.json_enabled = self.args.json_output
 
     def _process_count_arguments(self) -> None:
         """Process --count-ext and --count-string arguments."""
@@ -589,8 +612,23 @@ class Shrawler:
                 )
                 nemesis_success = nemesis_result["success"]
 
-                # Add Nemesis upload result to file entry
-                file_entry["nemesis_upload"] = nemesis_result
+            # Collect data for CSV output
+            if self.args.csv_output:
+                clean_remote_path = remote_path.lstrip("/").replace("/", "\\")
+                unc_path = f"\\\\{host}\\{share}\\{clean_remote_path}"
+
+                self.download_rows.append(
+                    {
+                        "host": host,
+                        "share_name": share,
+                        "remote_path": remote_path,
+                        "unc_path": unc_path,
+                        "local_filename": local_filename,
+                        "size_bytes": file_size,
+                        "mtime_utc": file_entry["mtime_utc"],
+                        "timestamp_utc": file_entry["timestamp_utc"],
+                    }
+                )
 
             # Add to scan results (within the appropriate share's downloaded_files list)
             self.scan_results[host]["shares"][share]["downloaded_files"].append(
@@ -714,6 +752,75 @@ class Shrawler:
 
         return upload_result
 
+    def write_csv_outputs(self) -> List[str]:
+        """Write CSV output files conditionally based on data presence.
+
+        Returns:
+            List of CSV filenames that were actually written
+        """
+        import csv
+
+        csv_files_written = []
+
+        # Write shares CSV (only if share data exists)
+        if self.share_rows:
+            shares_fieldnames = [
+                "host",
+                "share_name",
+                "comment",
+                "read_permission",
+                "write_permission",
+                "unc_path",
+                "scan_timestamp_utc",
+            ]
+            with open("shrawler_shares.csv", "w", newline="") as f:
+                writer = csv.DictWriter(f, fieldnames=shares_fieldnames)
+                writer.writeheader()
+                writer.writerows(self.share_rows)
+            csv_files_written.append("shrawler_shares.csv")
+
+        # Write files CSV (only if file data exists - requires --spider)
+        if self.file_rows:
+            files_fieldnames = [
+                "host",
+                "share_name",
+                "remote_path",
+                "unc_path",
+                "file_name",
+                "size_bytes",
+                "readable_size",
+                "mtime_utc",
+                "is_directory",
+                "can_read",
+                "can_write",
+                "scan_timestamp_utc",
+            ]
+            with open("shrawler_files.csv", "w", newline="") as f:
+                writer = csv.DictWriter(f, fieldnames=files_fieldnames)
+                writer.writeheader()
+                writer.writerows(self.file_rows)
+            csv_files_written.append("shrawler_files.csv")
+
+        # Write downloads CSV (only if download data exists - requires download criteria)
+        if self.download_rows:
+            downloads_fieldnames = [
+                "host",
+                "share_name",
+                "remote_path",
+                "unc_path",
+                "local_filename",
+                "size_bytes",
+                "mtime_utc",
+                "timestamp_utc",
+            ]
+            with open("shrawler_downloads.csv", "w", newline="") as f:
+                writer = csv.DictWriter(f, fieldnames=downloads_fieldnames)
+                writer.writeheader()
+                writer.writerows(self.download_rows)
+            csv_files_written.append("shrawler_downloads.csv")
+
+        return csv_files_written
+
     def get_shares(
         self,
         target: str,
@@ -764,6 +871,22 @@ class Shrawler:
                             "unc_path": f"\\\\{target}\\{share_name}",
                             "downloaded_files": [],
                         }
+
+                        # Collect data for CSV output
+                        if self.csv_enabled:
+                            self.share_rows.append(
+                                {
+                                    "host": target,
+                                    "share_name": share_name,
+                                    "comment": share_comment,
+                                    "read_permission": share_perms["read"],
+                                    "write_permission": share_perms["write"],
+                                    "unc_path": f"\\\\{target}\\{share_name}",
+                                    "scan_timestamp_utc": datetime.now(
+                                        timezone.utc
+                                    ).isoformat(),
+                                }
+                            )
 
                         # If you're spidering you don't need to print out share perms
                         # Assumes you're doing this in separate steps - will still print out what it finds though
@@ -965,6 +1088,32 @@ class Shrawler:
             full_file_path = base_dir + directory + "/" + next_filedir
             file_mtime_epoch = file_result.get_mtime_epoch()
             self.unique_files_data.append((full_file_path, file_mtime_epoch))
+
+        # Collect data for CSV output
+        if self.csv_enabled:
+            remote_file_path = base_dir + directory + "/" + next_filedir
+            file_mtime_utc = datetime.fromtimestamp(
+                file_result.get_mtime_epoch(), timezone.utc
+            ).isoformat()
+
+            self.file_rows.append(
+                {
+                    "host": self.current_host,
+                    "share_name": share,
+                    "remote_path": remote_file_path,
+                    "unc_path": f"\\\\{self.current_host}\\{share}\\{remote_file_path.lstrip('/')}",
+                    "file_name": next_filedir,
+                    "size_bytes": file_result.get_filesize(),
+                    "readable_size": self.readable_file_size(
+                        file_result.get_filesize()
+                    ),
+                    "mtime_utc": file_mtime_utc,
+                    "is_directory": False,
+                    "can_read": None,
+                    "can_write": None,
+                    "scan_timestamp_utc": datetime.now(timezone.utc).isoformat(),
+                }
+            )
 
         # Print file with the correct connector and indentation
         file_connector = "└── " if is_last else "├── "
@@ -1168,6 +1317,32 @@ class Shrawler:
             file_mtime_epoch = file_result.get_mtime_epoch()
             self.unique_files_data.append((full_file_path, file_mtime_epoch))
 
+        # Collect data for CSV output
+        if self.csv_enabled:
+            remote_file_path = base_dir + file_result.get_longname()
+            file_mtime_utc = datetime.fromtimestamp(
+                file_result.get_mtime_epoch(), timezone.utc
+            ).isoformat()
+
+            self.file_rows.append(
+                {
+                    "host": self.current_host,
+                    "share_name": share,
+                    "remote_path": remote_file_path,
+                    "unc_path": f"\\\\{self.current_host}\\{share}\\{remote_file_path.lstrip('/')}",
+                    "file_name": file_result.get_longname(),
+                    "size_bytes": file_result.get_filesize(),
+                    "readable_size": self.readable_file_size(
+                        file_result.get_filesize()
+                    ),
+                    "mtime_utc": file_mtime_utc,
+                    "is_directory": False,
+                    "can_read": None,
+                    "can_write": None,
+                    "scan_timestamp_utc": datetime.now(timezone.utc).isoformat(),
+                }
+            )
+
         connector = "└── " if is_last else "├── "
         download_status = ""
         unique_status = (
@@ -1327,6 +1502,7 @@ class Shrawler:
         """
         try:
             smbClient = SMBConnection(address, address, sess_port=int(445))
+            smbClient.enableDFSSupport = True
 
             dialect = smbClient.getDialect()
 
@@ -1487,8 +1663,14 @@ class Shrawler:
         if self.args.download_ext is not None:
             logging.info(f"Total files downloaded: {self.download_count}")
 
-        # Write consolidated scan results if any data was collected
-        if self.scan_results:
+        # Write CSV or JSON output if any data was collected
+        if self.csv_enabled:
+            files_written = self.write_csv_outputs()
+            if files_written:
+                logging.info(f"CSV files written: {', '.join(files_written)}")
+            else:
+                logging.info("No data to write to CSV files")
+        elif self.json_enabled and self.scan_results:
             try:
                 with open("shrawler_results.json", "w") as f:
                     json.dump(self.scan_results, f, indent=4)
@@ -1529,6 +1711,15 @@ def main() -> None:
         if s.args.unique and s.unique_files_data and not s.args.spider:
             unique_results = find_unique_files_by_mtime(s.unique_files_data)
             display_unique_files(unique_results)
+
+        # Write CSV output before exiting
+        if s.csv_enabled:
+            files_written = s.write_csv_outputs()
+            if files_written:
+                logging.info(f"CSV files written: {', '.join(files_written)}")
+            else:
+                logging.info("No data to write to CSV files")
+
         quit()
 
 
