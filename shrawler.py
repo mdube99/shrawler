@@ -16,6 +16,7 @@ import time
 import os
 import requests
 import urllib3
+import ipaddress
 from typing import Any, Union, List, Dict, Tuple, Set
 from collections import defaultdict
 from datetime import datetime, timezone, timedelta
@@ -238,9 +239,13 @@ class Shrawler:
             "--hosts-file",
             action="store",
             dest="hosts_file",
-            help="File containing IP addresses of target machines",
+            help="File containing IP addresses or CIDR ranges of target machines (supports comments with #)",
         )
-        parser.add_argument("--host", action="store", help="Specific machine to target")
+        parser.add_argument(
+            "--host",
+            action="store",
+            help="Specific machine or CIDR range to target (e.g., 10.0.0.0/24)",
+        )
 
         nemesis = parser.add_argument_group("nemesis integration")
         nemesis.add_argument(
@@ -1544,11 +1549,89 @@ class Shrawler:
         logging.info(f"Connected to {address}")
         return smbClient
 
+    def expand_hosts(self, raw_hosts: List[str]) -> List[str]:
+        """
+        Expand host entries including CIDR notation into individual IP addresses.
+
+        Args:
+            raw_hosts: List of raw host strings (IPs, CIDR ranges, or hostnames)
+
+        Returns:
+            List of unique individual host addresses
+
+        Features:
+            - Expands CIDR notation (e.g., 192.168.1.0/24) into individual hosts
+            - Excludes network and broadcast addresses for CIDR ranges
+            - Strips whitespace and skips empty lines
+            - Supports comments (lines starting with #)
+            - Deduplicates hosts while preserving order
+            - Gracefully handles invalid CIDR notation with warnings
+        """
+        expanded = []
+        seen = set()
+        cidr_count = 0
+        total_expanded = 0
+
+        for entry in raw_hosts:
+            # Strip whitespace
+            entry = entry.strip()
+
+            # Skip empty lines and comments
+            if not entry or entry.startswith("#"):
+                continue
+
+            # Check if this is CIDR notation
+            if "/" in entry:
+                cidr_count += 1
+                try:
+                    # Parse as IP network (strict=False allows host bits to be set)
+                    network = ipaddress.ip_network(entry, strict=False)
+
+                    # Expand to individual hosts (excludes network and broadcast)
+                    # For /31 and /32, .hosts() returns appropriate hosts
+                    for host in network.hosts():
+                        host_str = str(host)
+                        total_expanded += 1
+                        if host_str not in seen:
+                            seen.add(host_str)
+                            expanded.append(host_str)
+
+                    # Special case: /32 (single host) - .hosts() returns empty
+                    # Use the network address itself
+                    if network.num_addresses == 1:
+                        host_str = str(network.network_address)
+                        total_expanded += 1
+                        if host_str not in seen:
+                            seen.add(host_str)
+                            expanded.append(host_str)
+
+                except (
+                    ValueError,
+                    ipaddress.AddressValueError,
+                    ipaddress.NetmaskValueError,
+                ) as e:
+                    logging.warning(f"Invalid CIDR notation '{entry}': {e}")
+                    continue
+            else:
+                # Single IP or hostname - pass through as-is
+                if entry not in seen:
+                    seen.add(entry)
+                    expanded.append(entry)
+
+        # Log expansion summary
+        if cidr_count > 0:
+            logging.info(
+                f"Expanded {cidr_count} CIDR range(s) into {total_expanded} host(s), "
+                f"{len(expanded)} unique total"
+            )
+
+        return expanded
+
     def get_ip_addrs(self, file: str) -> List[str]:
         with open(file, "r") as f:
             lines = f.read().splitlines()
 
-        return lines
+        return self.expand_hosts(lines)
 
     def main(self) -> None:
         # Logging
@@ -1602,7 +1685,7 @@ class Shrawler:
             machine_names = machine_ip
 
         elif self.args.host:
-            machine_ip = [self.args.host]
+            machine_ip = self.expand_hosts([self.args.host])
             machine_names = machine_ip
 
         else:
