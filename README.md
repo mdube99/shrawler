@@ -479,6 +479,7 @@ When using `--download-ext default` or `--count-ext` without arguments, Shrawler
 | `shrawler_shares.csv` | Share enumeration data in CSV format (generated with --csv-output) |
 | `shrawler_files.csv` | All discovered files during spidering in CSV format (generated with --csv-output) |
 | `shrawler_downloads.csv` | Downloaded files metadata in CSV format (generated with --csv-output) |
+| `shrawler_content_matches.csv` | Content search matches with pattern names and matched lines (generated with --csv-output) |
 | `downloads/` | Directory containing all downloaded files with sanitized names |
 | `.env` | Optional environment configuration file |
 
@@ -504,6 +505,7 @@ Shrawler provides real-time visual feedback during operations:
 - **[NEMESIS FAILED]** - Nemesis upload failed (file still downloaded locally)
 - **[DOWNLOAD FAILED]** - File download failed
 - **[UNIQUE]** - File has unique modification time within its directory
+- **[MATCH: pattern]** - File contents matched a content search pattern
 
 ### Cross-Platform Compatibility
 
@@ -519,6 +521,66 @@ Downloaded files are automatically sanitized for cross-platform compatibility:
 - **Depth Control**: Use `--max-depth` to limit recursion depth
 - **Selective Downloads**: Combine extension and name-based filtering
 - **Batch Analysis**: File counting and unique analysis run during traversal
+
+### Content Search
+
+Search file contents for sensitive patterns like passwords, API keys, and connection strings during the spider phase:
+
+```bash
+# Use built-in default patterns for finding secrets
+python3 shrawler.py homelab.local/user:password@dc-ip --host 10.0.0.5 --spider --content-search
+
+# Custom comma-separated patterns (supports regex)
+python3 shrawler.py homelab.local/user:password@dc-ip --host 10.0.0.5 --spider \
+    --content-search "password,connectionstring,api_key"
+
+# Load patterns from a file (one regex per line, # for comments)
+python3 shrawler.py homelab.local/user:password@dc-ip --host 10.0.0.5 --spider \
+    --content-search-file patterns.txt
+
+# Combine default patterns with a custom pattern file
+python3 shrawler.py homelab.local/user:password@dc-ip --host 10.0.0.5 --spider \
+    --content-search default --content-search-file extra_patterns.txt
+
+# Increase max file size for content scanning (default: 5MB)
+python3 shrawler.py homelab.local/user:password@dc-ip --host 10.0.0.5 --spider \
+    --content-search default --content-search-max-size 10485760
+```
+
+**Default patterns** search for:
+- Passwords in config files (`password=`, `passwd:`, `pwd=`)
+- API keys and tokens
+- Connection strings
+- AWS access keys
+- Private key headers (PEM format)
+- Credentials embedded in URLs
+- Database credentials
+- NTLM and Net-NTLMv2 hashes
+
+**Behavior:**
+- Files matching content patterns are **automatically downloaded**
+- Binary files are detected and skipped (null-byte check)
+- Files larger than the max size limit (default 5MB) are skipped
+- Matches display inline as `[MATCH: pattern]` in the tree view
+- A full summary table with matched lines is shown at scan completion
+- Content matches can be exported to CSV with `--csv-output` (generates `shrawler_content_matches.csv`)
+
+**Example output:**
+```
+[+] Content Search Matches (3 match(es))
+
++==================+==========+==============================+==========================================+
+| Host             | Share    | Pattern                      | File Path                                |
++==================+==========+==============================+==========================================+
+| 10.0.0.5         | backups  | Password in config           | /configs/web.config                      |
+|                  |          |                              | → password = "SuperSecret123"            |
++------------------+----------+------------------------------+------------------------------------------+
+| 10.0.0.5         | IT       | API Key                      | /scripts/deploy.ps1                      |
+|                  |          |                              | → $apiKey = "sk-live-abc123..."          |
++------------------+----------+------------------------------+------------------------------------------+
+
+[+] Total: 3 match(es) across 2 file(s)
+```
 
 -----
 
