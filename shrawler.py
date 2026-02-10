@@ -14,6 +14,8 @@ import logging
 import json
 import time
 import os
+import re
+import io
 import requests
 import urllib3
 import ipaddress
@@ -362,6 +364,29 @@ class Shrawler:
             help="Identify and display files with unique modification times",
         )
         spider.add_argument(
+            "--content-search",
+            action="store",
+            dest="content_search",
+            nargs="?",
+            const="default",
+            help="Search file contents for sensitive patterns. Use 'default' for built-in patterns, "
+            "or provide comma-separated regex patterns (e.g., 'password,api_key,secret')",
+        )
+        spider.add_argument(
+            "--content-search-file",
+            action="store",
+            dest="content_search_file",
+            help="File containing regex patterns for content search, one per line (supports # comments)",
+        )
+        spider.add_argument(
+            "--content-search-max-size",
+            action="store",
+            dest="content_search_max_size",
+            type=int,
+            default=5242880,
+            help="Maximum file size in bytes to scan for content (default: 5242880 / 5MB)",
+        )
+        spider.add_argument(
             "--csv-output",
             action="store_true",
             dest="csv_output",
@@ -400,8 +425,37 @@ class Shrawler:
         self.csv_enabled = False
         self.json_enabled = False
 
+        # Content search data structures
+        self.content_search_patterns: List[Tuple[str, re.Pattern]] = []
+        self.content_matches: List[Dict[str, Any]] = []
+        self.content_match_rows: List[Dict[str, Any]] = []
+
+        # Default sensitive content patterns for pentesting
+        self.default_content_patterns = [
+            ("Password in config", r"(?i)(password|passwd|pwd)\s*[=:]\s*\S+"),
+            ("API Key", r"(?i)(api[_-]?key|apikey)\s*[=:]\s*\S+"),
+            ("Secret/Token", r"(?i)(secret|token|auth[_-]?token)\s*[=:]\s*\S+"),
+            (
+                "Connection String",
+                r"(?i)(connection[_-]?string|connstr|data\s*source|server=.*database=)",
+            ),
+            ("AWS Access Key", r"AKIA[0-9A-Z]{16}"),
+            (
+                "Private Key Header",
+                r"-----BEGIN\s+(RSA |DSA |EC |OPENSSH |PGP )?PRIVATE KEY-----",
+            ),
+            ("Credentials in URL", r"(?i)https?://[^:]+:[^@]+@"),
+            (
+                "Database Credentials",
+                r"(?i)(db[_-]?(user|pass|host|name|password))\s*[=:]\s*\S+",
+            ),
+            ("NTLM Hash", r"[a-fA-F0-9]{32}:[a-fA-F0-9]{32}"),
+            ("Net-NTLMv2 Hash", r"(?i)\w+::\w+:[a-fA-F0-9]+:[a-fA-F0-9]+:[a-fA-F0-9]+"),
+        ]
+
         # Process counting arguments
         self._process_count_arguments()
+        self._process_content_search_arguments()
 
         self.verbose = self.args.verbose
 
@@ -472,6 +526,44 @@ class Shrawler:
             string = [string.strip() for string in self.args.count_string.split(",")]
             self.count_strings_list = [string.strip().lower() for string in string]
 
+    def _process_content_search_arguments(self) -> None:
+        """Process --content-search and --content-search-file arguments."""
+        patterns_to_compile: List[Tuple[str, str]] = []
+
+        # Process --content-search argument
+        if self.args.content_search is not None:
+            if self.args.content_search == "default":
+                patterns_to_compile.extend(self.default_content_patterns)
+            else:
+                # User-provided comma-separated patterns
+                user_patterns = [p.strip() for p in self.args.content_search.split(",")]
+                for pattern in user_patterns:
+                    if pattern:
+                        patterns_to_compile.append((pattern, pattern))
+
+        # Process --content-search-file argument
+        if self.args.content_search_file is not None:
+            try:
+                with open(self.args.content_search_file, "r") as f:
+                    for line in f:
+                        line = line.strip()
+                        if line and not line.startswith("#"):
+                            patterns_to_compile.append((line, line))
+            except FileNotFoundError:
+                logging.error(
+                    f"Content search pattern file not found: {self.args.content_search_file}"
+                )
+            except Exception as e:
+                logging.error(f"Error reading content search pattern file: {e}")
+
+        # Compile all patterns
+        for label, pattern_str in patterns_to_compile:
+            try:
+                compiled = re.compile(pattern_str)
+                self.content_search_patterns.append((label, compiled))
+            except re.error as e:
+                logging.error(f"Invalid regex pattern '{pattern_str}': {e}")
+
     def _count_file(self, filename: str) -> None:
         """Count a file based on extension and string criteria."""
         filename_lower = filename.lower()
@@ -485,6 +577,94 @@ class Shrawler:
         for string in self.count_strings_list:
             if string in filename_lower:
                 self.file_counts[string] = self.file_counts.get(string, 0) + 1
+
+    @staticmethod
+    def _is_binary_file(data: bytes) -> bool:
+        """Check if data appears to be binary by looking for null bytes.
+
+        Args:
+            data: Raw file bytes (checks first 8192 bytes)
+
+        Returns:
+            True if file appears to be binary, False if text-like
+        """
+        check_bytes = data[:8192]
+        return b"\x00" in check_bytes
+
+    def _scan_file_content(
+        self,
+        smbclient: Any,
+        share: str,
+        remote_path: str,
+        file_size: int,
+        host: str,
+    ) -> List[Dict[str, Any]]:
+        """Scan file contents in memory for sensitive patterns.
+
+        Args:
+            smbclient: The SMB client instance
+            share: SMB share name
+            remote_path: Full path to the remote file
+            file_size: File size in bytes
+            host: Target host IP
+
+        Returns:
+            List of match dictionaries with pattern info and matched lines
+        """
+        matches: List[Dict[str, Any]] = []
+
+        # Skip files exceeding size limit
+        if file_size > self.args.content_search_max_size:
+            logging.debug(
+                f"Skipping content scan (size {file_size} > {self.args.content_search_max_size}): {remote_path}"
+            )
+            return matches
+
+        # Skip empty files
+        if file_size == 0:
+            return matches
+
+        try:
+            # Read file into memory
+            buffer = io.BytesIO()
+            smbclient.getFile(share, remote_path, buffer.write)
+            data = buffer.getvalue()
+            buffer.close()
+
+            # Skip binary files
+            if self._is_binary_file(data):
+                logging.debug(f"Skipping binary file: {remote_path}")
+                return matches
+
+            # Decode content (UTF-8 with latin-1 fallback)
+            try:
+                content = data.decode("utf-8")
+            except UnicodeDecodeError:
+                content = data.decode("latin-1")
+
+            # Search line by line
+            for line_num, line in enumerate(content.splitlines(), 1):
+                for label, pattern in self.content_search_patterns:
+                    if pattern.search(line):
+                        clean_remote_path = remote_path.lstrip("/").replace("/", "\\")
+                        matches.append(
+                            {
+                                "host": host,
+                                "share": share,
+                                "remote_path": remote_path,
+                                "unc_path": f"\\\\{host}\\{share}\\{clean_remote_path}",
+                                "pattern_name": label,
+                                "matched_line": line.strip()[:200],
+                                "line_number": line_num,
+                            }
+                        )
+
+        except SessionError as e:
+            logging.debug(f"SMB error scanning {remote_path}: {e}")
+        except Exception as e:
+            logging.debug(f"Error scanning file content {remote_path}: {e}")
+
+        return matches
 
     def _display_file_count_summary(self) -> None:
         """Display the final file count summary."""
@@ -529,6 +709,92 @@ class Shrawler:
         print(border_line)
         print(
             f"| {'TOTAL'.ljust(max_type_width)} | {str(total_count).rjust(count_width)} |\n"
+        )
+
+    def _display_content_search_summary(self) -> None:
+        """Display summary of all content search matches."""
+        if not self.content_matches:
+            if self.content_search_patterns:
+                print(f"\n{Fore.GREEN}[+] Content Search Summary{Style.RESET_ALL}\n")
+                print(f"{Fore.GREEN}[+]{Style.RESET_ALL} No content matches found.")
+            return
+
+        print(
+            f"\n{Fore.RED}[+] Content Search Matches ({len(self.content_matches)} match(es)){Style.RESET_ALL}\n"
+        )
+
+        # Calculate column widths
+        max_host = max(len("Host"), max(len(m["host"]) for m in self.content_matches))
+        max_share = max(
+            len("Share"), max(len(m["share"]) for m in self.content_matches)
+        )
+        max_pattern = max(
+            len("Pattern"),
+            max(len(m["pattern_name"][:30]) for m in self.content_matches),
+        )
+        max_path = max(
+            len("File Path"),
+            max(len(m["remote_path"][:60]) for m in self.content_matches),
+        )
+
+        border = (
+            "+"
+            + "=" * (max_host + 2)
+            + "+"
+            + "=" * (max_share + 2)
+            + "+"
+            + "=" * (max_pattern + 2)
+            + "+"
+            + "=" * (max_path + 2)
+            + "+"
+        )
+        separator = (
+            "+"
+            + "-" * (max_host + 2)
+            + "+"
+            + "-" * (max_share + 2)
+            + "+"
+            + "-" * (max_pattern + 2)
+            + "+"
+            + "-" * (max_path + 2)
+            + "+"
+        )
+
+        # Header
+        print(border)
+        print(
+            f"| {'Host'.ljust(max_host)} "
+            f"| {'Share'.ljust(max_share)} "
+            f"| {'Pattern'.ljust(max_pattern)} "
+            f"| {'File Path'.ljust(max_path)} |"
+        )
+        print(border)
+
+        # Rows
+        for match in self.content_matches:
+            print(
+                f"| {match['host'].ljust(max_host)} "
+                f"| {match['share'].ljust(max_share)} "
+                f"| {match['pattern_name'][:30].ljust(max_pattern)} "
+                f"| {match['remote_path'][:60].ljust(max_path)} |"
+            )
+            # Show matched line preview
+            matched_preview = match["matched_line"][:120]
+            print(
+                f"| {''.ljust(max_host)} "
+                f"| {''.ljust(max_share)} "
+                f"| {''.ljust(max_pattern)} "
+                f"| {Fore.YELLOW}→ {matched_preview}{Style.RESET_ALL}{''.ljust(max(0, max_path - len(matched_preview) - 2))} |"
+            )
+            print(separator)
+
+        # Count unique files
+        unique_files = set(
+            (m["host"], m["share"], m["remote_path"]) for m in self.content_matches
+        )
+        print(
+            f"\n{Fore.RED}[+]{Style.RESET_ALL} "
+            f"Total: {len(self.content_matches)} match(es) across {len(unique_files)} file(s)"
         )
 
     def banner(self) -> str:
@@ -824,6 +1090,24 @@ class Shrawler:
                 writer.writerows(self.download_rows)
             csv_files_written.append("shrawler_downloads.csv")
 
+        # Write content matches CSV (only if content match data exists)
+        if self.content_match_rows:
+            content_fieldnames = [
+                "host",
+                "share_name",
+                "remote_path",
+                "unc_path",
+                "pattern_name",
+                "matched_line",
+                "line_number",
+                "timestamp_utc",
+            ]
+            with open("shrawler_content_matches.csv", "w", newline="") as f:
+                writer = csv.DictWriter(f, fieldnames=content_fieldnames)
+                writer.writeheader()
+                writer.writerows(self.content_match_rows)
+            csv_files_written.append("shrawler_content_matches.csv")
+
         return csv_files_written
 
     def get_shares(
@@ -1084,19 +1368,20 @@ class Shrawler:
         self.files_seen_count += 1
         next_filedir = file_result.get_longname()
 
+        # Compute remote_file_path once (needed for downloads and content scanning)
+        remote_file_path = base_dir + directory + "/" + next_filedir
+
         # Count the file based on counting criteria
         if self.count_extensions_list or self.count_strings_list:
             self._count_file(next_filedir)
 
         # Collect data for global unique timestamp analysis if enabled
         if self.args.unique:
-            full_file_path = base_dir + directory + "/" + next_filedir
             file_mtime_epoch = file_result.get_mtime_epoch()
-            self.unique_files_data.append((full_file_path, file_mtime_epoch))
+            self.unique_files_data.append((remote_file_path, file_mtime_epoch))
 
         # Collect data for CSV output
         if self.csv_enabled:
-            remote_file_path = base_dir + directory + "/" + next_filedir
             file_mtime_utc = datetime.fromtimestamp(
                 file_result.get_mtime_epoch(), timezone.utc
             ).isoformat()
@@ -1173,7 +1458,6 @@ class Shrawler:
 
         # Download the file if criteria met
         if should_download:
-            remote_file_path = base_dir + directory + "/" + next_filedir
             # Create local filename with double underscore delimiters and sanitization
             sanitized_path = sanitize_filename(
                 remote_file_path.replace("/", "_").lstrip("_")
@@ -1202,6 +1486,89 @@ class Shrawler:
             else:
                 download_status = f" {Fore.RED}[DOWNLOAD FAILED]{Style.RESET_ALL}"
 
+        # Content scanning (independent of download criteria)
+        content_match_status = ""
+        if self.content_search_patterns:
+            content_matches = self._scan_file_content(
+                smbclient,
+                share,
+                remote_file_path,
+                file_result.get_filesize(),
+                self.current_host,
+            )
+            if content_matches:
+                self.content_matches.extend(content_matches)
+
+                # Build inline status
+                pattern_names = list(
+                    dict.fromkeys(m["pattern_name"] for m in content_matches)
+                )
+                match_label = ", ".join(pattern_names[:2])
+                if len(pattern_names) > 2:
+                    match_label += f" +{len(pattern_names) - 2} more"
+                content_match_status = (
+                    f" {Fore.RED}[MATCH: {match_label}]{Style.RESET_ALL}"
+                )
+
+                # Add to JSON scan results
+                if self.json_enabled and self.current_host in self.scan_results:
+                    if "content_matches" not in self.scan_results[self.current_host][
+                        "shares"
+                    ].get(share, {}):
+                        self.scan_results[self.current_host]["shares"][share][
+                            "content_matches"
+                        ] = []
+                    self.scan_results[self.current_host]["shares"][share][
+                        "content_matches"
+                    ].extend(content_matches)
+
+                # Collect for CSV output
+                if self.csv_enabled:
+                    for match in content_matches:
+                        self.content_match_rows.append(
+                            {
+                                "host": match["host"],
+                                "share_name": match["share"],
+                                "remote_path": match["remote_path"],
+                                "unc_path": match["unc_path"],
+                                "pattern_name": match["pattern_name"],
+                                "matched_line": match["matched_line"],
+                                "line_number": match["line_number"],
+                                "timestamp_utc": datetime.now(timezone.utc).isoformat(),
+                            }
+                        )
+
+                # Auto-download if not already downloaded
+                if not should_download:
+                    sanitized_path = sanitize_filename(
+                        remote_file_path.replace("/", "_").lstrip("_")
+                    )
+                    local_filename = f"{self.current_host}__{share}__{sanitized_path}"
+
+                    download_success, nemesis_success = self.download_file(
+                        smbclient,
+                        share,
+                        remote_file_path,
+                        local_filename,
+                        self.current_host,
+                        file_result.get_filesize(),
+                        file_result.get_mtime_epoch(),
+                    )
+                    if download_success:
+                        download_status = f" {Fore.CYAN}[DOWNLOADED]{Style.RESET_ALL}"
+                        if self.args.nemesis_ingest and nemesis_success:
+                            download_status += (
+                                f" {Fore.MAGENTA}[UPLOADED TO NEMESIS]{Style.RESET_ALL}"
+                            )
+                        elif self.args.nemesis_ingest and not nemesis_success:
+                            download_status += (
+                                f" {Fore.RED}[NEMESIS FAILED]{Style.RESET_ALL}"
+                            )
+                    else:
+                        download_status = (
+                            f" {Fore.RED}[DOWNLOAD FAILED]{Style.RESET_ALL}"
+                        )
+
         # Always print the file in table format
         file_metadata = self.parse_file(file_result)
         size = file_metadata["size"]
@@ -1214,6 +1581,8 @@ class Shrawler:
             name += unique_status
         if download_status:
             name += download_status
+        if content_match_status:
+            name += content_match_status
 
         print(self.format_table_row(size, mtime, name))
 
@@ -1312,19 +1681,20 @@ class Shrawler:
         """Process and display a file at root level with download and unique logic."""
         self.files_seen_count += 1
 
+        # Compute remote_file_path once (needed for downloads and content scanning)
+        remote_file_path = base_dir + file_result.get_longname()
+
         # Count the file based on counting criteria
         if self.count_extensions_list or self.count_strings_list:
             self._count_file(file_result.get_longname())
 
         # Collect data for global unique timestamp analysis if enabled
         if self.args.unique:
-            full_file_path = base_dir + file_result.get_longname()
             file_mtime_epoch = file_result.get_mtime_epoch()
-            self.unique_files_data.append((full_file_path, file_mtime_epoch))
+            self.unique_files_data.append((remote_file_path, file_mtime_epoch))
 
         # Collect data for CSV output
         if self.csv_enabled:
-            remote_file_path = base_dir + file_result.get_longname()
             file_mtime_utc = datetime.fromtimestamp(
                 file_result.get_mtime_epoch(), timezone.utc
             ).isoformat()
@@ -1402,7 +1772,6 @@ class Shrawler:
 
         # Download the file if criteria met
         if should_download:
-            remote_file_path = base_dir + file_result.get_longname()
             # Create local filename with double underscore delimiters and sanitization
             sanitized_path = sanitize_filename(
                 remote_file_path.replace("/", "_").lstrip("_")
@@ -1431,6 +1800,89 @@ class Shrawler:
             else:
                 download_status = f" {Fore.RED}[DOWNLOAD FAILED]{Style.RESET_ALL}"
 
+        # Content scanning (independent of download criteria)
+        content_match_status = ""
+        if self.content_search_patterns:
+            content_matches = self._scan_file_content(
+                smbclient,
+                share,
+                remote_file_path,
+                file_result.get_filesize(),
+                self.current_host,
+            )
+            if content_matches:
+                self.content_matches.extend(content_matches)
+
+                # Build inline status
+                pattern_names = list(
+                    dict.fromkeys(m["pattern_name"] for m in content_matches)
+                )
+                match_label = ", ".join(pattern_names[:2])
+                if len(pattern_names) > 2:
+                    match_label += f" +{len(pattern_names) - 2} more"
+                content_match_status = (
+                    f" {Fore.RED}[MATCH: {match_label}]{Style.RESET_ALL}"
+                )
+
+                # Add to JSON scan results
+                if self.json_enabled and self.current_host in self.scan_results:
+                    if "content_matches" not in self.scan_results[self.current_host][
+                        "shares"
+                    ].get(share, {}):
+                        self.scan_results[self.current_host]["shares"][share][
+                            "content_matches"
+                        ] = []
+                    self.scan_results[self.current_host]["shares"][share][
+                        "content_matches"
+                    ].extend(content_matches)
+
+                # Collect for CSV output
+                if self.csv_enabled:
+                    for match in content_matches:
+                        self.content_match_rows.append(
+                            {
+                                "host": match["host"],
+                                "share_name": match["share"],
+                                "remote_path": match["remote_path"],
+                                "unc_path": match["unc_path"],
+                                "pattern_name": match["pattern_name"],
+                                "matched_line": match["matched_line"],
+                                "line_number": match["line_number"],
+                                "timestamp_utc": datetime.now(timezone.utc).isoformat(),
+                            }
+                        )
+
+                # Auto-download if not already downloaded
+                if not should_download:
+                    sanitized_path = sanitize_filename(
+                        remote_file_path.replace("/", "_").lstrip("_")
+                    )
+                    local_filename = f"{self.current_host}__{share}__{sanitized_path}"
+
+                    download_success, nemesis_success = self.download_file(
+                        smbclient,
+                        share,
+                        remote_file_path,
+                        local_filename,
+                        self.current_host,
+                        file_result.get_filesize(),
+                        file_result.get_mtime_epoch(),
+                    )
+                    if download_success:
+                        download_status = f" {Fore.CYAN}[DOWNLOADED]{Style.RESET_ALL}"
+                        if self.args.nemesis_ingest and nemesis_success:
+                            download_status += (
+                                f" {Fore.MAGENTA}[UPLOADED TO NEMESIS]{Style.RESET_ALL}"
+                            )
+                        elif self.args.nemesis_ingest and not nemesis_success:
+                            download_status += (
+                                f" {Fore.RED}[NEMESIS FAILED]{Style.RESET_ALL}"
+                            )
+                    else:
+                        download_status = (
+                            f" {Fore.RED}[DOWNLOAD FAILED]{Style.RESET_ALL}"
+                        )
+
         # Format file in table format
         file_metadata = self.parse_file(file_result)
         size = file_metadata["size"]
@@ -1443,6 +1895,8 @@ class Shrawler:
             name += unique_status
         if download_status:
             name += download_status
+        if content_match_status:
+            name += content_match_status
 
         print(self.format_table_row(size, mtime, name))
 
@@ -1765,6 +2219,10 @@ class Shrawler:
         if self.count_extensions_list or self.count_strings_list:
             self._display_file_count_summary()
 
+        # Display content search summary if content search was enabled
+        if self.content_search_patterns:
+            self._display_content_search_summary()
+
         # Display unique files summary if unique timestamp analysis was enabled
         # Only show this summary if NOT in spider mode
         if self.args.unique and self.unique_files_data and not self.args.spider:
@@ -1788,6 +2246,10 @@ def main() -> None:
         # Display file count summary if counting was enabled
         if s.count_extensions_list or s.count_strings_list:
             s._display_file_count_summary()
+
+        # Display content search summary if content search was enabled
+        if s.content_search_patterns:
+            s._display_content_search_summary()
 
         # Display unique files summary if unique timestamp analysis was enabled
         # Only show this summary if NOT in spider mode
