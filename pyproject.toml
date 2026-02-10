@@ -50,7 +50,7 @@ name = "shrawler.py"
 version = "1.0.0"
 description = "A simple SMB share enumeration and spidering tool."
 dependencies = [
-    "impacket",
+    "aiosmb>=0.4.5",
     "colorama",
     "python-dotenv",
     "requests",

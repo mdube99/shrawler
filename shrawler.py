@@ -1,19 +1,22 @@
 #!/usr/bin/env python3
 
-from impacket.smbconnection import (
-    SMBConnection,
-    SMB2_DIALECT_002,
-    SMB2_DIALECT_21,
-    SMB_DIALECT,
-    SessionError,
-)
-from impacket.examples.utils import parse_target
+import asyncio
+from aiosmb.commons.connection.factory import SMBConnectionFactory
+from aiosmb.connection import SMBConnection as AIOSMBConnection
+from aiosmb.commons.interfaces.machine import SMBMachine
+from aiosmb.commons.interfaces.file import SMBFile
+from aiosmb.commons.interfaces.directory import SMBDirectory
+from aiosmb.wintypes.dtyp.constrcuted_security.guid import GUID
+from aiosmb.wintypes.access_mask import DirectoryAccessMask
+from aiosmb.protocol.smb2.commands import CreateDisposition, CreateOptions, ShareAccess
+import signal
 import socket
 import argparse
 import logging
 import json
 import time
 import os
+import sys
 import re
 import io
 import requests
@@ -61,6 +64,72 @@ def sanitize_filename(filename: str) -> str:
         sanitized = "unnamed_file"
 
     return sanitized
+
+
+def parse_target(target: str) -> Tuple[str, str, str, str]:
+    """
+    Parse target string in the format [[domain/]username[:password]@]<target>.
+
+    Args:
+        target: Target string to parse
+
+    Returns:
+        Tuple of (domain, username, password, target_address)
+    """
+    domain = ""
+    username = ""
+    password = ""
+    target_address = target
+
+    # Check if there's an @ sign (credentials provided)
+    if "@" in target:
+        creds, target_address = target.rsplit("@", 1)
+
+        # Check if there's a password (: separator)
+        if ":" in creds:
+            user_part, password = creds.rsplit(":", 1)
+        else:
+            user_part = creds
+
+        # Check if there's a domain (/ or \ separator)
+        if "/" in user_part:
+            domain, username = user_part.split("/", 1)
+        elif "\\" in user_part:
+            domain, username = user_part.split("\\", 1)
+        else:
+            username = user_part
+
+    return domain, username, password, target_address
+
+
+# File attribute helper functions for aiosmb compatibility
+def file_name(obj: Union[SMBFile, SMBDirectory]) -> str:
+    """Equivalent of impacket's .get_longname()"""
+    return obj.name
+
+
+def file_size(obj: Union[SMBFile, SMBDirectory]) -> int:
+    """Equivalent of impacket's .get_filesize()"""
+    return obj.size if hasattr(obj, "size") else 0
+
+
+def file_mtime_epoch(obj: Union[SMBFile, SMBDirectory]) -> float:
+    """Equivalent of impacket's .get_mtime_epoch()"""
+    if obj.last_write_time:
+        return obj.last_write_time.timestamp()
+    return 0.0
+
+
+def file_ctime_epoch(obj: Union[SMBFile, SMBDirectory]) -> float:
+    """Equivalent of impacket's .get_ctime_epoch()"""
+    if obj.creation_time:
+        return obj.creation_time.timestamp()
+    return 0.0
+
+
+def is_directory(obj: Union[SMBFile, SMBDirectory]) -> bool:
+    """Equivalent of impacket's .is_directory()"""
+    return isinstance(obj, SMBDirectory)
 
 
 # custom log colors
@@ -418,6 +487,17 @@ class Shrawler:
         # Track the currently processed host for download operations
         self.current_host = None
 
+        # Connection management for cleanup and reconnection
+        self.current_connection = None
+        # Auth state for reconnection after interrupt
+        self._auth_domain = ""
+        self._auth_lmhash = ""
+        self._auth_nthash = ""
+
+        # Cooperative interrupt handling for spider
+        self._interrupted = False
+        self._original_sigint_handler = None
+
         # CSV output data structures
         self.share_rows: List[Dict[str, Any]] = []
         self.file_rows: List[Dict[str, Any]] = []
@@ -591,9 +671,9 @@ class Shrawler:
         check_bytes = data[:8192]
         return b"\x00" in check_bytes
 
-    def _scan_file_content(
+    async def _scan_file_content(
         self,
-        smbclient: Any,
+        connection: Any,
         share: str,
         remote_path: str,
         file_size: int,
@@ -602,7 +682,7 @@ class Shrawler:
         """Scan file contents in memory for sensitive patterns.
 
         Args:
-            smbclient: The SMB client instance
+            connection: The SMB connection instance
             share: SMB share name
             remote_path: Full path to the remote file
             file_size: File size in bytes
@@ -626,8 +706,25 @@ class Shrawler:
 
         try:
             # Read file into memory
+            unc_path = f"\\\\{host}\\{share}{remote_path}"
+            file_obj = SMBFile.from_uncpath(unc_path)
+
+            _, err = await file_obj.open(connection, "r")
+            if err:
+                logging.debug(f"SMB error opening {remote_path}: {err}")
+                return matches
+
             buffer = io.BytesIO()
-            smbclient.getFile(share, remote_path, buffer.write)
+            async for data, err in file_obj.read_chunked():
+                if err:
+                    logging.debug(f"SMB error reading {remote_path}: {err}")
+                    break
+                if data:
+                    buffer.write(data)
+                else:
+                    break
+
+            await file_obj.close()
             data = buffer.getvalue()
             buffer.close()
 
@@ -659,8 +756,6 @@ class Shrawler:
                             }
                         )
 
-        except SessionError as e:
-            logging.debug(f"SMB error scanning {remote_path}: {e}")
         except Exception as e:
             logging.debug(f"Error scanning file content {remote_path}: {e}")
 
@@ -819,9 +914,9 @@ class Shrawler:
                 logging.debug(f"Port check failed for {machine}:{port} - {e}")
                 return False
 
-    def download_file(
+    async def download_file(
         self,
-        smbclient: Any,
+        connection: Any,
         share: str,
         remote_path: str,
         local_filename: str,
@@ -833,7 +928,7 @@ class Shrawler:
         Downloads a file from the SMB share and saves it locally.
 
         Args:
-            smbclient: The SMB client instance
+            connection: The SMB connection instance
             share: SMB share name
             remote_path: Full path to the remote file
             local_filename: Local filename to save as
@@ -852,9 +947,25 @@ class Shrawler:
 
             local_path = os.path.join(loot_dir, local_filename)
 
-            # Download the file using impacket's getFile method
+            # Download the file using aiosmb
+            # Build UNC path for the file
+            unc_path = f"\\\\{host}\\{share}{remote_path}"
+            file_obj = SMBFile.from_uncpath(unc_path)
+
+            _, err = await file_obj.open(connection, "r")
+            if err:
+                raise Exception(f"Failed to open file: {err}")
+
             with open(local_path, "wb") as local_file:
-                smbclient.getFile(share, remote_path, local_file.write)
+                async for data, err in file_obj.read_chunked():
+                    if err:
+                        raise Exception(f"Error reading file: {err}")
+                    if data:
+                        local_file.write(data)
+                    else:
+                        break
+
+            await file_obj.close()
 
             # Populate manifest data on successful download
             file_entry: Dict[str, Any] = {
@@ -1110,39 +1221,54 @@ class Shrawler:
 
         return csv_files_written
 
-    def get_shares(
+    async def get_shares(
         self,
         target: str,
         mach_name: str,
-        smbclient: Any,
+        connection: Any,
         default_shares: List[str],
         spider: bool = False,
         desired_share: str = "",
     ) -> None:
-        shares = smbclient.listShares()
+        machine = SMBMachine(connection)
 
-        largest_share_name = len(max(shares, key=len))
+        # Collect shares into a list
+        shares_list = []
+        async for share, err in machine.list_shares():
+            if err:
+                logging.debug(f"Error listing share: {err}")
+                continue
+            shares_list.append(share)
 
-        # Assuming shares is a list of share dictionaries
-        share_names = [share["shi1_netname"][:-1] for share in shares]
+        if not shares_list:
+            logging.warning("No shares found")
+            return
+
+        # Get largest share name for formatting
+        largest_share_name = (
+            max(len(share.name) for share in shares_list) if shares_list else 0
+        )
+
+        # Get all share names
+        share_names = [share.name for share in shares_list]
 
         # only print desired share
         if desired_share:
             desired_share_list = desired_share.split(",")
             default_shares = share_names
             for share in desired_share_list:
-                default_shares.remove(share)
+                if share in default_shares:
+                    default_shares.remove(share)
 
         if default_shares not in share_names:
-            for share in shares:
-                # last char can be a hex value
-                # This grabs the sharename without the last character
-                # impacket naming scheme
-                share_name = share["shi1_netname"][:-1]
-                share_comment = share["shi1_remark"][:-1]
+            for share in shares_list:
+                share_name = share.name
+                share_comment = share.remark or ""
                 if share_name not in default_shares:
                     try:
-                        share_perms = self.check_share_perm(share_name, smbclient)
+                        share_perms = await self.check_share_perm(
+                            share_name, connection
+                        )
 
                         # Initialize host entry in scan_results if it doesn't exist
                         if target not in self.scan_results:
@@ -1180,10 +1306,83 @@ class Shrawler:
                         # If you're spidering you don't need to print out share perms
                         # Assumes you're doing this in separate steps - will still print out what it finds though
                         if spider and share_perms["read"]:
-                            print("")
-                            logging.info(f"{mach_name}\\{share_name}")
-                            self.print_table_header()
-                            self.spider_shares(target, share_name, "/", smbclient)
+                            # Spider with cooperative interrupt handling
+                            spider_continue = True
+                            while spider_continue:
+                                self._interrupted = False
+                                self._install_spider_signal_handler()
+
+                                try:
+                                    print("")
+                                    logging.info(f"{mach_name}\\{share_name}")
+                                    self.print_table_header()
+                                    await self.spider_shares(
+                                        target, share_name, "/", connection
+                                    )
+                                except Exception as e:
+                                    # Catch any aiosmb connection errors that might occur
+                                    # during interrupt (SMBConnectionTerminated, etc.)
+                                    if not self._interrupted:
+                                        logging.warning(
+                                            f"Spider error on {share_name}: {e}"
+                                        )
+                                finally:
+                                    self._restore_signal_handler()
+
+                                if self._interrupted:
+                                    # User pressed Ctrl+C during spider
+                                    await self._cleanup_connection()
+
+                                    print(
+                                        "\n"
+                                        + Fore.YELLOW
+                                        + "[!] Spider interrupted"
+                                        + Style.RESET_ALL
+                                    )
+                                    print(
+                                        f"Options: [c]ontinue to next share | [r]etry {share_name} | [q]uit scan"
+                                    )
+                                    choice = input("Choice [c/r/q]: ").lower().strip()
+
+                                    if choice == "r":
+                                        # Reconnect and retry the current share spider
+                                        print(
+                                            Fore.CYAN
+                                            + f"[*] Reconnecting and retrying spider on {share_name}..."
+                                            + Style.RESET_ALL
+                                        )
+                                        connection = await self._reconnect(target)
+                                        if connection is None:
+                                            logging.warning(
+                                                "Failed to reconnect, skipping remaining shares"
+                                            )
+                                            return
+                                        continue
+                                    elif choice == "q":
+                                        # Quit the entire scan
+                                        print(
+                                            Fore.RED
+                                            + "[!] Quitting scan..."
+                                            + Style.RESET_ALL
+                                        )
+                                        raise KeyboardInterrupt()
+                                    else:
+                                        # Continue to next share — need to reconnect
+                                        print(
+                                            Fore.CYAN
+                                            + "[*] Reconnecting and continuing to next share..."
+                                            + Style.RESET_ALL
+                                        )
+                                        connection = await self._reconnect(target)
+                                        if connection is None:
+                                            logging.warning(
+                                                "Failed to reconnect, skipping remaining shares"
+                                            )
+                                            return
+                                        spider_continue = False
+                                else:
+                                    # Spider completed without interruption
+                                    spider_continue = False
 
                         # If you're not spidering, will print out
                         else:
@@ -1195,44 +1394,149 @@ class Shrawler:
                             )
 
                     except KeyboardInterrupt:
-                        input("\nPress enter to continue")
-                        continue
+                        # This catches KeyboardInterrupt raised from the spider retry loop when user chooses 'q'
+                        # Re-raise it to bubble up to the host-level handler
+                        raise
         else:
             logging.warning("No desired shares found")
 
-    def check_share_perm(
-        self, share: str, smbclient: Any
+    async def check_share_perm(
+        self, share: str, connection: Any
     ) -> Dict[str, Union[str, bool]]:
         read_write = {"read": False, "write": "N/A"}
 
-        # check for read rights
+        # check for read rights - try to list share root
         try:
-            smbclient.listPath(share, "*", password=None)
-            read_write["read"] = True
-        except SessionError:
+            target = connection.target.get_hostname_or_ip()
+            share_path = f"\\\\{target}\\{share}"
+            tree_entry, err = await connection.tree_connect(share_path)
+            if err is None:
+                read_write["read"] = True
+            else:
+                read_write["read"] = False
+        except Exception:
             read_write["read"] = False
 
-        # check for write rights
+        # check for write rights - use custom test with minimal access flags
+        # This tests write independently of read to catch cases where write is granted without read
         if not self.args.read_only:
             try:
-                # pretty much all tools that crawl shares have to attempt to write to disk.
-                # If it does not allow, you've got your write perms
-                # Downside, its possible to allow write but not delete perms.
-                # In this case, I like to specify the folder name incase this happens - you can let clients know
+                # Use a custom write test with minimal access mask to avoid false negatives.
+                # SMBDirectory.create_remote() requests too many permissions (READ_DATA, DELETE, READ_CONTROL, etc.)
+                # which can fail even when basic write access is available.
                 directory = "pentest_temp_dir"
-                smbclient.createDirectory(share, directory)
-                smbclient.deleteDirectory(share, directory)
-                read_write["write"] = True
-            except SessionError as e:
-                logging.debug(f"Full error: {e}")
+                target = connection.target.get_hostname_or_ip()
+                share_path = f"\\\\{target}\\{share}"
+                dir_path = f"\\\\{target}\\{share}\\{directory}"
+
+                # Parse the directory path for tree connect
+                remdir = SMBDirectory.from_uncpath(dir_path)
+
+                # Connect to the share tree
+                tree_entry, err = await connection.tree_connect(share_path)
+                if err is not None:
+                    logging.debug(f"Write test tree_connect failed: {err}")
+                    read_write["write"] = False
+                else:
+                    tree_id = tree_entry.tree_id
+
+                    # Minimal access mask: just enough to create and delete a directory
+                    desired_access = (
+                        DirectoryAccessMask.FILE_ADD_SUBDIRECTORY
+                        | DirectoryAccessMask.DELETE
+                    )
+                    share_mode = (
+                        ShareAccess.FILE_SHARE_READ
+                        | ShareAccess.FILE_SHARE_WRITE
+                        | ShareAccess.FILE_SHARE_DELETE
+                    )
+                    create_options = (
+                        CreateOptions.FILE_DIRECTORY_FILE
+                        | CreateOptions.FILE_SYNCHRONOUS_IO_NONALERT
+                    )
+                    create_disposition = CreateDisposition.FILE_CREATE
+                    file_attrs = 0
+
+                    # Attempt to create directory
+                    file_id = None
+                    try:
+                        file_id, err_create = await connection.create(
+                            tree_id,
+                            remdir.fullpath,
+                            desired_access,
+                            share_mode,
+                            create_options,
+                            create_disposition,
+                            file_attrs,
+                            return_reply=False,
+                        )
+
+                        if err_create is not None:
+                            logging.debug(f"Write test create failed: {err_create}")
+                            read_write["write"] = False
+                        else:
+                            # Directory created successfully - we have write access
+                            read_write["write"] = True
+
+                            # Attempt cleanup - close the file handle first
+                            if file_id is not None:
+                                try:
+                                    await connection.close(tree_id, file_id)
+                                except Exception as e:
+                                    logging.debug(f"Write test close failed: {e}")
+
+                            # Delete the test directory
+                            try:
+                                # Use FILE_DELETE_ON_CLOSE to remove it
+                                desired_access_del = DirectoryAccessMask.DELETE
+                                share_mode_del = ShareAccess.FILE_SHARE_DELETE
+                                create_options_del = (
+                                    CreateOptions.FILE_DIRECTORY_FILE
+                                    | CreateOptions.FILE_DELETE_ON_CLOSE
+                                )
+                                create_disposition_del = CreateDisposition.FILE_OPEN
+
+                                file_id_del, err_del = await connection.create(
+                                    tree_id,
+                                    remdir.fullpath,
+                                    desired_access_del,
+                                    share_mode_del,
+                                    create_options_del,
+                                    create_disposition_del,
+                                    0,
+                                    return_reply=False,
+                                )
+
+                                if file_id_del is not None:
+                                    await connection.close(tree_id, file_id_del)
+
+                                if err_del is not None:
+                                    logging.debug(
+                                        f"Write test cleanup failed (dir may remain: {directory}): {err_del}"
+                                    )
+
+                            except Exception as e:
+                                logging.debug(
+                                    f"Write test cleanup exception (dir may remain: {directory}): {e}"
+                                )
+
+                    finally:
+                        # Disconnect from tree
+                        try:
+                            await connection.tree_disconnect(tree_id)
+                        except Exception as e:
+                            logging.debug(f"Write test tree_disconnect failed: {e}")
+
+            except Exception as e:
+                logging.debug(f"Write test exception: {e}")
                 read_write["write"] = False
         return read_write
 
-    def build_tree_structure(
+    async def build_tree_structure(
         self,
         base_dir: str,
         directory_result: Any,
-        smbclient: Any,
+        connection: Any,
         share: str,
         indent: str = "",
         last: bool = False,
@@ -1241,11 +1545,15 @@ class Shrawler:
         """
         Recursively prints the tree structure for a given directory, appending paths using string concatenation.
         """
-        directory = directory_result.get_longname()
+        # Check for cooperative interrupt
+        if self._interrupted:
+            return
+
+        directory = file_name(directory_result)
 
         # Format directory in table format
         size = "-"
-        mtime = self.readable_time_short(directory_result.get_mtime_epoch())
+        mtime = self.readable_time_short(file_mtime_epoch(directory_result))
 
         # Build the proper tree structure for directories
         connector = "└── " if last else "├── "
@@ -1257,19 +1565,35 @@ class Shrawler:
         next_indent = indent + ("    " if last else "│   ")
 
         try:
-            results = smbclient.listPath(
-                share, base_dir + directory + "/*", password=None
-            )
+            # List directory contents using SMBDirectory
+            # base_dir format is "/" or "/path/to/dir/"
+            dir_path = (base_dir + directory).replace("/", "\\")
+            if not dir_path.startswith("\\"):
+                dir_path = "\\" + dir_path
+
+            # Get target from connection
+            target = connection.target.get_hostname_or_ip()
+            unc_path = f"\\\\{target}\\{share}{dir_path}"
+            dir_obj = SMBDirectory.from_uncpath(unc_path)
+
+            # Query directory entries using list_gen
+            results_list = []
+            async for entry, otype, err in dir_obj.list_gen(connection):
+                if err:
+                    logging.debug(f"Error listing directory: {err}")
+                    break
+                if entry and otype in ["file", "dir"]:
+                    results_list.append((entry, otype))
 
             # Filter out '.' and '..' and separate directories from files
             directories: List[Any] = []
             files: List[Any] = []
-            for result in results:
-                if result.get_longname() not in [".", ".."]:
-                    if result.is_directory():
-                        directories.append(result)
-                    else:
-                        files.append(result)
+            for entry, otype in results_list:
+                if file_name(entry) not in [".", ".."]:
+                    if otype == "dir":
+                        directories.append(entry)
+                    elif otype == "file":
+                        files.append(entry)
 
             total_items = len(directories) + len(files)
             count = 0
@@ -1278,18 +1602,22 @@ class Shrawler:
             if depth < self.args.max_depth - 1:
                 # Process directories first
                 for result in directories:
+                    # Check for cooperative interrupt
+                    if self._interrupted:
+                        return
+
                     # throttling
                     if self.args.delay > 0:
-                        time.sleep(self.args.delay)
+                        await asyncio.sleep(self.args.delay)
 
-                    next_filedir = result.get_longname()
+                    next_filedir = file_name(result)
                     count += 1
                     is_last = count == total_items
 
-                    self.build_tree_structure(
+                    await self.build_tree_structure(
                         base_dir + directory + "/",
                         result,
-                        smbclient,
+                        connection,
                         share,
                         next_indent,
                         last=is_last,
@@ -1301,29 +1629,31 @@ class Shrawler:
                     # Collect files with mtime for uniqueness analysis
                     files_with_mtime: List[Tuple[Any, float]] = []
                     for file_result in files:
-                        file_mtime_epoch = file_result.get_mtime_epoch()
-                        files_with_mtime.append((file_result, file_mtime_epoch))
+                        file_mtime = file_mtime_epoch(file_result)
+                        files_with_mtime.append((file_result, file_mtime))
 
                     # Determine which files are unique in this directory
                     unique_indices = find_unique_files_in_directory(files_with_mtime)
 
                     # Display files with uniqueness information
-                    for i, (file_result, file_mtime_epoch) in enumerate(
-                        files_with_mtime
-                    ):
+                    for i, (file_result, file_mtime) in enumerate(files_with_mtime):
+                        # Check for cooperative interrupt
+                        if self._interrupted:
+                            return
+
                         # throttling
                         if self.args.delay > 0:
-                            time.sleep(self.args.delay)
+                            await asyncio.sleep(self.args.delay)
 
                         count += 1
                         is_last = count == total_items
                         is_unique = i in unique_indices
 
-                        self._process_and_display_file(
+                        await self._process_and_display_file(
                             file_result,
                             base_dir,
                             directory,
-                            smbclient,
+                            connection,
                             share,
                             next_indent,
                             is_last,
@@ -1332,18 +1662,22 @@ class Shrawler:
                 else:
                     # Original behavior - process files immediately without uniqueness analysis
                     for file_result in files:
+                        # Check for cooperative interrupt
+                        if self._interrupted:
+                            return
+
                         # throttling
                         if self.args.delay > 0:
-                            time.sleep(self.args.delay)
+                            await asyncio.sleep(self.args.delay)
 
                         count += 1
                         is_last = count == total_items
 
-                        self._process_and_display_file(
+                        await self._process_and_display_file(
                             file_result,
                             base_dir,
                             directory,
-                            smbclient,
+                            connection,
                             share,
                             next_indent,
                             is_last,
@@ -1353,12 +1687,12 @@ class Shrawler:
         except Exception as e:
             logging.warning(f"Error accessing directory: {e}")
 
-    def _process_and_display_file(
+    async def _process_and_display_file(
         self,
         file_result: Any,
         base_dir: str,
         directory: str,
-        smbclient: Any,
+        connection: Any,
         share: str,
         indent: str,
         is_last: bool,
@@ -1366,7 +1700,7 @@ class Shrawler:
     ) -> None:
         """Process and display a single file with download and unique logic."""
         self.files_seen_count += 1
-        next_filedir = file_result.get_longname()
+        next_filedir = file_name(file_result)
 
         # Compute remote_file_path once (needed for downloads and content scanning)
         remote_file_path = base_dir + directory + "/" + next_filedir
@@ -1377,13 +1711,13 @@ class Shrawler:
 
         # Collect data for global unique timestamp analysis if enabled
         if self.args.unique:
-            file_mtime_epoch = file_result.get_mtime_epoch()
-            self.unique_files_data.append((remote_file_path, file_mtime_epoch))
+            file_mtime = file_mtime_epoch(file_result)
+            self.unique_files_data.append((remote_file_path, file_mtime))
 
         # Collect data for CSV output
         if self.csv_enabled:
             file_mtime_utc = datetime.fromtimestamp(
-                file_result.get_mtime_epoch(), timezone.utc
+                file_mtime_epoch(file_result), timezone.utc
             ).isoformat()
 
             self.file_rows.append(
@@ -1393,10 +1727,8 @@ class Shrawler:
                     "remote_path": remote_file_path,
                     "unc_path": f"\\\\{self.current_host}\\{share}\\{remote_file_path.lstrip('/')}",
                     "file_name": next_filedir,
-                    "size_bytes": file_result.get_filesize(),
-                    "readable_size": self.readable_file_size(
-                        file_result.get_filesize()
-                    ),
+                    "size_bytes": file_size(file_result),
+                    "readable_size": self.readable_file_size(file_size(file_result)),
                     "mtime_utc": file_mtime_utc,
                     "is_directory": False,
                     "can_read": None,
@@ -1464,14 +1796,14 @@ class Shrawler:
             )
             local_filename = f"{self.current_host}__{share}__{sanitized_path}"
 
-            download_success, nemesis_success = self.download_file(
-                smbclient,
+            download_success, nemesis_success = await self.download_file(
+                connection,
                 share,
                 remote_file_path,
                 local_filename,
                 self.current_host,
-                file_result.get_filesize(),
-                file_result.get_mtime_epoch(),
+                file_size(file_result),
+                file_mtime_epoch(file_result),
             )
 
             # Build download status with both download and Nemesis upload results
@@ -1489,11 +1821,11 @@ class Shrawler:
         # Content scanning (independent of download criteria)
         content_match_status = ""
         if self.content_search_patterns:
-            content_matches = self._scan_file_content(
-                smbclient,
+            content_matches = await self._scan_file_content(
+                connection,
                 share,
                 remote_file_path,
-                file_result.get_filesize(),
+                file_size(file_result),
                 self.current_host,
             )
             if content_matches:
@@ -1545,14 +1877,14 @@ class Shrawler:
                     )
                     local_filename = f"{self.current_host}__{share}__{sanitized_path}"
 
-                    download_success, nemesis_success = self.download_file(
-                        smbclient,
+                    download_success, nemesis_success = await self.download_file(
+                        connection,
                         share,
                         remote_file_path,
                         local_filename,
                         self.current_host,
-                        file_result.get_filesize(),
-                        file_result.get_mtime_epoch(),
+                        file_size(file_result),
+                        file_mtime_epoch(file_result),
                     )
                     if download_success:
                         download_status = f" {Fore.CYAN}[DOWNLOADED]{Style.RESET_ALL}"
@@ -1572,7 +1904,7 @@ class Shrawler:
         # Always print the file in table format
         file_metadata = self.parse_file(file_result)
         size = file_metadata["size"]
-        mtime = self.readable_time_short(file_result.get_mtime_epoch())
+        mtime = self.readable_time_short(file_mtime_epoch(file_result))
 
         # Build name with tree structure and download/unique status
         file_connector = "└── " if is_last else "├── "
@@ -1586,22 +1918,38 @@ class Shrawler:
 
         print(self.format_table_row(size, mtime, name))
 
-    def spider_shares(
-        self, target: str, share: str, base_dir: str, smbclient: Any
+    async def spider_shares(
+        self, target: str, share: str, base_dir: str, connection: Any
     ) -> None:
         directories: List[Any] = []
         files: List[Any] = []
         try:
-            # List all items in the base directory
-            results = list(smbclient.listPath(share, base_dir + "*", password=None))
+            # List all items in the base directory using aiosmb
+            # Build UNC path for the directory to list
+            # base_dir format is "/" or "/path/to/dir/"
+            dir_path = base_dir.rstrip("/").replace("/", "\\")
+            if not dir_path:
+                dir_path = "\\"
+
+            unc_path = f"\\\\{target}\\{share}{dir_path}"
+            dir_obj = SMBDirectory.from_uncpath(unc_path)
+
+            # Query directory entries using list_gen
+            results_list = []
+            async for entry, otype, err in dir_obj.list_gen(connection):
+                if err:
+                    logging.debug(f"Error listing directory: {err}")
+                    break
+                if entry and otype in ["file", "dir"]:
+                    results_list.append((entry, otype))
 
             # Separate directories and files
-            for result in results:
-                if result.get_longname() not in [".", ".."]:
-                    if result.is_directory():
-                        directories.append(result)
-                    else:
-                        files.append(result)
+            for entry, otype in results_list:
+                if file_name(entry) not in [".", ".."]:
+                    if otype == "dir":
+                        directories.append(entry)
+                    elif otype == "file":
+                        files.append(entry)
 
             # Calculate total items for proper tree formatting
             total_items = len(directories) + len(files)
@@ -1609,21 +1957,25 @@ class Shrawler:
 
             # Process directories first
             for directory in directories:
+                # Check for cooperative interrupt
+                if self._interrupted:
+                    return
+
                 current_item += 1
                 is_last = current_item == total_items
 
-                next_filedir = directory.get_longname()
+                next_filedir = file_name(directory)
 
                 # Format directory in table format with tree characters
                 size = "-"
-                mtime = self.readable_time_short(directory.get_mtime_epoch())
+                mtime = self.readable_time_short(file_mtime_epoch(directory))
                 connector = "└── " if is_last else "├── "
                 name = connector + f"{Fore.BLUE}{next_filedir}/{Style.RESET_ALL}"
 
                 # print(self.format_table_row(size, mtime, name))
 
-                self.build_tree_structure(
-                    base_dir, directory, smbclient, share, last=is_last
+                await self.build_tree_structure(
+                    base_dir, directory, connection, share, last=is_last
                 )
 
             # Process files at root level - conditional logic based on --unique-mtime
@@ -1631,22 +1983,26 @@ class Shrawler:
                 # Collect files with mtime for uniqueness analysis
                 files_with_mtime: List[Tuple[Any, float]] = []
                 for file_result in files:
-                    file_mtime_epoch = file_result.get_mtime_epoch()
-                    files_with_mtime.append((file_result, file_mtime_epoch))
+                    file_mtime = file_mtime_epoch(file_result)
+                    files_with_mtime.append((file_result, file_mtime))
 
                 # Determine which files are unique in this directory
                 unique_indices = find_unique_files_in_directory(files_with_mtime)
 
                 # Display files with uniqueness information
-                for i, (file_result, file_mtime_epoch) in enumerate(files_with_mtime):
+                for i, (file_result, file_mtime) in enumerate(files_with_mtime):
+                    # Check for cooperative interrupt
+                    if self._interrupted:
+                        return
+
                     current_item += 1
                     is_last = current_item == total_items
                     is_unique = i in unique_indices
 
-                    self._process_and_display_file_root(
+                    await self._process_and_display_file_root(
                         file_result,
                         base_dir,
-                        smbclient,
+                        connection,
                         share,
                         is_last,
                         is_unique,
@@ -1654,13 +2010,17 @@ class Shrawler:
             else:
                 # Original behavior - process files immediately without uniqueness analysis
                 for file_result in files:
+                    # Check for cooperative interrupt
+                    if self._interrupted:
+                        return
+
                     current_item += 1
                     is_last = current_item == total_items
 
-                    self._process_and_display_file_root(
+                    await self._process_and_display_file_root(
                         file_result,
                         base_dir,
-                        smbclient,
+                        connection,
                         share,
                         is_last,
                         is_unique=False,
@@ -1669,11 +2029,11 @@ class Shrawler:
         except Exception as e:
             logging.warning(f"Error accessing directory: {e}")
 
-    def _process_and_display_file_root(
+    async def _process_and_display_file_root(
         self,
         file_result: Any,
         base_dir: str,
-        smbclient: Any,
+        connection: Any,
         share: str,
         is_last: bool,
         is_unique: bool,
@@ -1682,21 +2042,21 @@ class Shrawler:
         self.files_seen_count += 1
 
         # Compute remote_file_path once (needed for downloads and content scanning)
-        remote_file_path = base_dir + file_result.get_longname()
+        remote_file_path = base_dir + file_name(file_result)
 
         # Count the file based on counting criteria
         if self.count_extensions_list or self.count_strings_list:
-            self._count_file(file_result.get_longname())
+            self._count_file(file_name(file_result))
 
         # Collect data for global unique timestamp analysis if enabled
         if self.args.unique:
-            file_mtime_epoch = file_result.get_mtime_epoch()
-            self.unique_files_data.append((remote_file_path, file_mtime_epoch))
+            file_mtime = file_mtime_epoch(file_result)
+            self.unique_files_data.append((remote_file_path, file_mtime))
 
         # Collect data for CSV output
         if self.csv_enabled:
             file_mtime_utc = datetime.fromtimestamp(
-                file_result.get_mtime_epoch(), timezone.utc
+                file_mtime_epoch(file_result), timezone.utc
             ).isoformat()
 
             self.file_rows.append(
@@ -1705,11 +2065,9 @@ class Shrawler:
                     "share_name": share,
                     "remote_path": remote_file_path,
                     "unc_path": f"\\\\{self.current_host}\\{share}\\{remote_file_path.lstrip('/')}",
-                    "file_name": file_result.get_longname(),
-                    "size_bytes": file_result.get_filesize(),
-                    "readable_size": self.readable_file_size(
-                        file_result.get_filesize()
-                    ),
+                    "file_name": file_name(file_result),
+                    "size_bytes": file_size(file_result),
+                    "readable_size": self.readable_file_size(file_size(file_result)),
                     "mtime_utc": file_mtime_utc,
                     "is_directory": False,
                     "can_read": None,
@@ -1731,7 +2089,7 @@ class Shrawler:
         download_by_name = False
 
         # Cache filename once
-        filename_lower = file_result.get_longname().lower()
+        filename_lower = file_name(file_result).lower()
 
         # Check extension-based download criteria
         if self.args.download_ext is not None:  # --download was used
@@ -1778,14 +2136,14 @@ class Shrawler:
             )
             local_filename = f"{self.current_host}__{share}__{sanitized_path}"
 
-            download_success, nemesis_success = self.download_file(
-                smbclient,
+            download_success, nemesis_success = await self.download_file(
+                connection,
                 share,
                 remote_file_path,
                 local_filename,
                 self.current_host,
-                file_result.get_filesize(),
-                file_result.get_mtime_epoch(),
+                file_size(file_result),
+                file_mtime_epoch(file_result),
             )
 
             # Build download status with both download and Nemesis upload results
@@ -1803,11 +2161,11 @@ class Shrawler:
         # Content scanning (independent of download criteria)
         content_match_status = ""
         if self.content_search_patterns:
-            content_matches = self._scan_file_content(
-                smbclient,
+            content_matches = await self._scan_file_content(
+                connection,
                 share,
                 remote_file_path,
-                file_result.get_filesize(),
+                file_size(file_result),
                 self.current_host,
             )
             if content_matches:
@@ -1859,14 +2217,14 @@ class Shrawler:
                     )
                     local_filename = f"{self.current_host}__{share}__{sanitized_path}"
 
-                    download_success, nemesis_success = self.download_file(
-                        smbclient,
+                    download_success, nemesis_success = await self.download_file(
+                        connection,
                         share,
                         remote_file_path,
                         local_filename,
                         self.current_host,
-                        file_result.get_filesize(),
-                        file_result.get_mtime_epoch(),
+                        file_size(file_result),
+                        file_mtime_epoch(file_result),
                     )
                     if download_success:
                         download_status = f" {Fore.CYAN}[DOWNLOADED]{Style.RESET_ALL}"
@@ -1886,11 +2244,11 @@ class Shrawler:
         # Format file in table format
         file_metadata = self.parse_file(file_result)
         size = file_metadata["size"]
-        mtime = self.readable_time_short(file_result.get_mtime_epoch())
+        mtime = self.readable_time_short(file_mtime_epoch(file_result))
 
         # Build name with tree structure and status
         connector = "└── " if is_last else "├── "
-        name = connector + f"{Fore.GREEN}{file_result.get_longname()}{Style.RESET_ALL}"
+        name = connector + f"{Fore.GREEN}{file_name(file_result)}{Style.RESET_ALL}"
         if unique_status:
             name += unique_status
         if download_status:
@@ -1936,18 +2294,18 @@ class Shrawler:
 
     def parse_file(self, file_info: Any) -> Dict[str, str]:
         "Parse file and output metadata"
-        file_size = file_info.get_filesize()
-        file_creation_date = file_info.get_ctime_epoch()
-        file_modified_date = file_info.get_mtime_epoch()
+        fsize = file_size(file_info)
+        file_creation_date = file_ctime_epoch(file_info)
+        file_modified_date = file_mtime_epoch(file_info)
 
         results = {
-            "size": self.readable_file_size(file_size),
+            "size": self.readable_file_size(fsize),
             "ctime": self.readable_time(file_creation_date),
             "mtime": self.readable_time(file_modified_date),
         }
         return results
 
-    def init_smb_session(
+    async def init_smb_session(
         self,
         domain: str,
         username: str,
@@ -1957,51 +2315,128 @@ class Shrawler:
         nthash: str,
     ):
         """
-        Initiate SMB Session with host using impacket libraries.
+        Initiate SMB Session with host using aiosmb library.
         """
         try:
-            smbClient = SMBConnection(address, address, sess_port=int(445))
-            smbClient.enableDFSSupport = True
-
-            dialect = smbClient.getDialect()
-
-            if dialect == SMB_DIALECT:
-                logging.debug("SMBv1 dialect used")
-
-            elif dialect == SMB2_DIALECT_002:
-                logging.debug("SMBv2.0 dialect used")
-
-            elif dialect == SMB2_DIALECT_21:
-                logging.debug("SMBv2.1 dialect used")
-
-            else:
-                logging.debug("SMBv3.0 dialect used")
-
+            # Build connection URL based on auth method
             if self.args.k is True:
-                smbClient.kerberosLogin(
-                    username,
-                    password,
-                    domain,
-                    lmhash,
-                    nthash,
-                    self.args.aesKey,
-                    domain,
-                )
-
+                # Kerberos authentication
+                if self.args.aesKey:
+                    # Kerberos with AES key
+                    url = f"smb+kerberos-aes://{domain}\\{username}:{self.args.aesKey}@{address}"
+                else:
+                    # Kerberos with password
+                    url = f"smb+kerberos-password://{domain}\\{username}:{password}@{address}"
+            elif nthash:
+                # NTLM hash authentication
+                url = f"smb+ntlm-nt://{domain}\\{username}:{nthash}@{address}"
             else:
-                smbClient.login(username, password, domain, lmhash, nthash)
-            if smbClient.isGuestSession() > 0:
+                # NTLM password authentication
+                url = f"smb+ntlm-password://{domain}\\{username}:{password}@{address}"
+
+            # Create connection factory and get connection
+            factory = SMBConnectionFactory.from_url(url)
+            connection = factory.get_connection()
+
+            # Perform login
+            _, err = await connection.login()
+            if err:
+                logging.warning(f"Invalid login attempt on '{address}'\n")
+                logging.debug(f"Full error: {err}")
+                print(error(""))
+                return None
+
+            # Log dialect information (informational only)
+            if hasattr(connection, "selected_dialect"):
+                logging.debug(f"SMB dialect: {connection.selected_dialect}")
+
+            # Check guest session
+            if hasattr(connection, "gssapi") and connection.gssapi.is_guest():
                 logging.debug("GUEST Session Granted")
             else:
                 logging.debug("USER Session Granted")
-        except SessionError as e:
+
+        except Exception as e:
             logging.warning(f"Invalid login attempt on '{address}'\n")
             logging.debug(f"Full error: {e}")
             print(error(""))
             return None
 
         logging.info(f"Connected to {address}")
-        return smbClient
+        return connection
+
+    async def _cleanup_connection(self) -> None:
+        """
+        Safely terminate the current SMB connection to prevent socket spam.
+        This stops all background tasks (keepalive, incoming reader) and closes the socket.
+        """
+        if self.current_connection is not None:
+            try:
+                # Terminate with timeout to avoid hanging
+                await asyncio.wait_for(self.current_connection.terminate(), timeout=3)
+            except asyncio.TimeoutError:
+                logging.debug("Connection terminate timed out, forcing disconnect")
+                # Force disconnect if terminate hangs
+                try:
+                    await asyncio.wait_for(
+                        self.current_connection.disconnect(), timeout=2
+                    )
+                except Exception:
+                    pass
+            except Exception as e:
+                logging.debug(f"Connection cleanup exception: {e}")
+            finally:
+                self.current_connection = None
+
+    def _install_spider_signal_handler(self) -> None:
+        """
+        Install a SIGINT handler that sets a flag instead of raising KeyboardInterrupt.
+        This allows the spider to exit gracefully at the next checkpoint.
+        """
+        self._interrupted = False
+        self._original_sigint_handler = signal.getsignal(signal.SIGINT)
+
+        def _handle_sigint(signum: int, frame: Any) -> None:
+            self._interrupted = True
+            # Suppress aiosmb error logs during interrupt
+            logging.getLogger("aiosmb").setLevel(logging.CRITICAL)
+            print(
+                "\n"
+                + Fore.YELLOW
+                + "[!] Interrupt received, finishing current operation..."
+                + Style.RESET_ALL
+            )
+
+        signal.signal(signal.SIGINT, _handle_sigint)
+
+    def _restore_signal_handler(self) -> None:
+        """Restore the original SIGINT handler."""
+        if self._original_sigint_handler is not None:
+            signal.signal(signal.SIGINT, self._original_sigint_handler)
+            self._original_sigint_handler = None
+        # Restore aiosmb log level
+        logging.getLogger("aiosmb").setLevel(logging.ERROR)
+
+    async def _reconnect(self, target: str) -> Any:
+        """
+        Re-establish SMB connection after interrupt cleanup.
+        Returns the new connection or None on failure.
+        """
+        try:
+            logging.debug(f"Reconnecting to {target}...")
+            connection = await self.init_smb_session(
+                self._auth_domain,
+                self.username,
+                self.password,
+                target,
+                self._auth_lmhash,
+                self._auth_nthash,
+            )
+            self.current_connection = connection
+            return connection
+        except Exception as e:
+            logging.warning(f"Failed to reconnect to {target}: {e}")
+            return None
 
     def expand_hosts(self, raw_hosts: List[str]) -> List[str]:
         """
@@ -2087,7 +2522,7 @@ class Shrawler:
 
         return self.expand_hosts(lines)
 
-    def main(self) -> None:
+    async def main(self) -> None:
         # Logging
         logger = logging.getLogger()
         handler = logging.StreamHandler()
@@ -2124,6 +2559,11 @@ class Shrawler:
         else:
             lmhash, nthash = "", ""
 
+        # Store auth parameters for reconnection after interrupts
+        self._auth_domain = domain
+        self._auth_lmhash = lmhash
+        self._auth_nthash = nthash
+
         if self.args.skip_share:
             shares = self.args.skip_share.split(",")
             for share in shares:
@@ -2156,7 +2596,7 @@ class Shrawler:
                 if self.check_port(mach_ip, 445):
                     # Start SMB session against the host in question
                     try:
-                        smbclient = self.init_smb_session(
+                        smbclient = await self.init_smb_session(
                             domain,
                             self.username,
                             self.password,
@@ -2165,21 +2605,29 @@ class Shrawler:
                             nthash,
                         )
 
-                        # get shares on host
-                        self.get_shares(
-                            mach_ip,
-                            mach_name,
-                            smbclient,
-                            self.normal_shares,
-                            self.args.spider,
-                            self.args.shares,
-                        )
+                        # Store connection for cleanup
+                        self.current_connection = smbclient
 
-                        # just for a new line
-                        print("")
+                        try:
+                            # get shares on host
+                            await self.get_shares(
+                                mach_ip,
+                                mach_name,
+                                smbclient,
+                                self.normal_shares,
+                                self.args.spider,
+                                self.args.shares,
+                            )
 
-                        # This is used to separate hosts. Will print a colored line after each host.
-                        print(success(""))
+                            # just for a new line
+                            print("")
+
+                            # This is used to separate hosts. Will print a colored line after each host.
+                            print(success(""))
+                        finally:
+                            # Always clean up the connection
+                            await self._cleanup_connection()
+
                     except Exception as e:
                         logging.debug(e)
                         continue
@@ -2191,8 +2639,26 @@ class Shrawler:
                 continue
 
             except KeyboardInterrupt:
-                input("Press enter to continue...")
-                continue
+                # Terminate connection FIRST to stop socket spam
+                await self._cleanup_connection()
+
+                print(
+                    "\n\n"
+                    + Fore.YELLOW
+                    + "[!] Scan interrupted at host level"
+                    + Style.RESET_ALL
+                )
+                print("Options: [c]ontinue to next host | [q]uit scan")
+                choice = input("Choice [c/q]: ").lower().strip()
+
+                if choice == "q":
+                    print(Fore.RED + "[!] Quitting scan..." + Style.RESET_ALL)
+                    break
+                else:
+                    print(
+                        Fore.CYAN + "[*] Continuing to next host..." + Style.RESET_ALL
+                    )
+                    continue
 
         print(success("Shrawler Scan Complete"))
         if self.args.spider:
@@ -2234,7 +2700,7 @@ def main() -> None:
     """Calling shrawler."""
     s = Shrawler()
     try:
-        s.main()
+        asyncio.run(s.main())
     except KeyboardInterrupt:
         print("\n\n" + error("User interrupted scan."))
         print(success("Summary of work done:"))
@@ -2265,7 +2731,7 @@ def main() -> None:
             else:
                 logging.info("No data to write to CSV files")
 
-        quit()
+        sys.exit(0)
 
 
 if __name__ == "__main__":
