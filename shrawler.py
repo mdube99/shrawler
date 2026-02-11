@@ -23,6 +23,7 @@ import requests
 import urllib3
 import ipaddress
 from typing import Any, Union, List, Dict, Tuple, Set
+from urllib.parse import quote
 from collections import defaultdict
 from datetime import datetime, timezone, timedelta
 from colorama import init, Fore, Style
@@ -2362,20 +2363,22 @@ class Shrawler:
         """
         try:
             # Build connection URL based on auth method
+            # URL-encode credentials to prevent special characters (especially ':' in passwords)
+            # from being misinterpreted as URL delimiters
             if self.args.k is True:
                 # Kerberos authentication
                 if self.args.aesKey:
                     # Kerberos with AES key
-                    url = f"smb+kerberos-aes://{domain}\\{username}:{self.args.aesKey}@{address}"
+                    url = f"smb+kerberos-aes://{quote(domain, safe='')}\\{quote(username, safe='')}:{quote(self.args.aesKey, safe='')}@{address}"
                 else:
                     # Kerberos with password
-                    url = f"smb+kerberos-password://{domain}\\{username}:{password}@{address}"
+                    url = f"smb+kerberos-password://{quote(domain, safe='')}\\{quote(username, safe='')}:{quote(password, safe='')}@{address}"
             elif nthash:
                 # NTLM hash authentication
-                url = f"smb+ntlm-nt://{domain}\\{username}:{nthash}@{address}"
+                url = f"smb+ntlm-nt://{quote(domain, safe='')}\\{quote(username, safe='')}:{quote(nthash, safe='')}@{address}"
             else:
                 # NTLM password authentication
-                url = f"smb+ntlm-password://{domain}\\{username}:{password}@{address}"
+                url = f"smb+ntlm-password://{quote(domain, safe='')}\\{quote(username, safe='')}:{quote(password, safe='')}@{address}"
 
             # Create connection factory and get connection
             factory = SMBConnectionFactory.from_url(url)
