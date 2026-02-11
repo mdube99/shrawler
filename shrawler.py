@@ -438,8 +438,10 @@ class Shrawler:
             dest="content_search",
             nargs="?",
             const="default",
-            help="Search file contents for sensitive patterns. Use 'default' for built-in patterns, "
-            "or provide comma-separated regex patterns (e.g., 'password,api_key,secret')",
+            help="Search file contents for sensitive patterns. "
+            "Reserved tokens: 'default' (secrets), 'pii' (PII/PHI markers). "
+            "Combine with commas: 'default,pii'. Mix with custom regex: 'default,pii,password\\s*='. "
+            "Without a value, uses 'default'.",
         )
         spider.add_argument(
             "--content-search-file",
@@ -533,6 +535,43 @@ class Shrawler:
             ("Net-NTLMv2 Hash", r"(?i)\w+::\w+:[a-fA-F0-9]+:[a-fA-F0-9]+:[a-fA-F0-9]+"),
         ]
 
+        # PII/PHI content patterns (opt-in via --content-search pii)
+        # All keyword-anchored to reduce false positives on file shares
+        self.pii_content_patterns = [
+            (
+                "SSN Identifier",
+                r"(?i)(ssn|social[\s_-]*security[\s_-]*(number|num|no|#)?)\s*[=:]\s*\S+",
+            ),
+            (
+                "Date of Birth",
+                r"(?i)(date[\s_-]*of[\s_-]*birth|d\.?o\.?b\.?)\s*[=:]\s*\S+",
+            ),
+            (
+                "Credit Card Number",
+                r"(?i)(cc[\s_-]*num|card[\s_-]*(number|num|no|#)|credit[\s_-]*card)\s*[=:]\s*\S+",
+            ),
+            ("Email Address", r"(?i)[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}"),
+            (
+                "Phone Number",
+                r"(?i)(phone|mobile|fax|tel)[\s_-]*(number|num|no|#)?\s*[=:]\s*[\d\s()+.-]{7,}",
+            ),
+            (
+                "Patient/Medical ID",
+                r"(?i)(patient[\s_-]*(id|identifier|number|num|no|#)|mrn|medical[\s_-]*record)\s*[=:]\s*\S+",
+            ),
+            ("Diagnosis/ICD Code", r"(?i)(diagnosis|icd[\s_-]?\d{1,2})\s*[=:]\s*\S+"),
+            (
+                "Health Insurance ID",
+                r"(?i)(insurance[\s_-]*(id|number|num|no|#)|policy[\s_-]*(number|num|no|#))\s*[=:]\s*\S+",
+            ),
+        ]
+
+        # Map of reserved built-in group tokens to their pattern lists
+        self._builtin_pattern_groups = {
+            "default": self.default_content_patterns,
+            "pii": self.pii_content_patterns,
+        }
+
         # Process counting arguments
         self._process_count_arguments()
         self._process_content_search_arguments()
@@ -612,14 +651,18 @@ class Shrawler:
 
         # Process --content-search argument
         if self.args.content_search is not None:
-            if self.args.content_search == "default":
-                patterns_to_compile.extend(self.default_content_patterns)
-            else:
-                # User-provided comma-separated patterns
-                user_patterns = [p.strip() for p in self.args.content_search.split(",")]
-                for pattern in user_patterns:
-                    if pattern:
-                        patterns_to_compile.append((pattern, pattern))
+            tokens = [t.strip() for t in self.args.content_search.split(",")]
+            for token in tokens:
+                if not token:
+                    continue
+                if token.lower() in self._builtin_pattern_groups:
+                    # Reserved built-in group token
+                    patterns_to_compile.extend(
+                        self._builtin_pattern_groups[token.lower()]
+                    )
+                else:
+                    # User-provided regex pattern
+                    patterns_to_compile.append((token, token))
 
         # Process --content-search-file argument
         if self.args.content_search_file is not None:
