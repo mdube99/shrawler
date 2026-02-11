@@ -520,7 +520,7 @@ class Shrawler:
             ("Secret/Token", r"(?i)(secret|token|auth[_-]?token)\s*[=:]\s*\S+"),
             (
                 "Connection String",
-                r"(?i)(connection[_-]?string|connstr|data\s*source|server=.*database=)",
+                r"(?i)((connection[_-]?string|connstr|data\s*source)\s*[=:]\s*\S+|server=[^;\s]+;.*database=[^;\s]+)",
             ),
             ("AWS Access Key", r"AKIA[0-9A-Z]{16}"),
             (
