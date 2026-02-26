@@ -60,6 +60,58 @@ def sanitize_filename(filename: str) -> str:
     return sanitized
 
 
+def convert_unc_to_nemesis_path(unc_path: str) -> str:
+    """
+    Convert UNC path to Nemesis-compatible format.
+
+    Nemesis expects paths in the format: /D:/Office/here/file.txt
+    UNC paths come in as: \\\\host\\C$\\path\\to\\file.txt
+
+    This function:
+    1. Removes the host prefix (already captured in 'source' field)
+    2. Converts admin shares (C$, D$) to drive notation (C:, D:)
+    3. Uses forward slashes throughout
+    4. Preserves named shares as-is
+
+    Examples:
+        \\\\192.168.1.100\\C$\\Users\\file.txt -> /C:/Users/file.txt
+        \\\\host\\D$\\Documents\\report.pdf -> /D:/Documents/report.pdf
+        \\\\host\\share\\path\\file.txt -> /share/path/file.txt
+
+    Args:
+        unc_path: Windows UNC path with backslashes
+
+    Returns:
+        Nemesis-compatible path with forward slashes and proper drive notation
+    """
+    import re
+
+    # Remove leading backslashes and split into components
+    parts = unc_path.lstrip("\\").split("\\")
+
+    if len(parts) < 2:
+        # Not a valid UNC path, just convert slashes
+        return unc_path.replace("\\", "/")
+
+    share = parts[1]  # e.g., "C$" or "share_name"
+    path_parts = parts[2:]  # e.g., ["Users", "Admin", "Documents", "file.txt"]
+
+    # Convert admin share notation (C$, D$, etc.) to drive letter (C:, D:, etc.)
+    if re.match(r"^[A-Za-z]\$$", share):
+        # This is an admin share like C$ or D$
+        drive_letter = share[0].upper() + ":"
+        share = drive_letter
+
+    # Build Nemesis path: /drive:/path/to/file or /share/path/to/file
+    if path_parts:
+        nemesis_path = "/" + share + "/" + "/".join(path_parts)
+    else:
+        # Root of share/drive
+        nemesis_path = "/" + share + "/"
+
+    return nemesis_path
+
+
 # custom log colors
 class Formatter(logging.Formatter):
     """Custom Formatter."""
@@ -681,6 +733,9 @@ class Shrawler:
             )
             return upload_result
 
+        # Convert UNC path to Nemesis format (removes host, converts C$ to C:, uses forward slashes)
+        nemesis_path = convert_unc_to_nemesis_path(unc_path)
+
         try:
             # Parse authentication
             if ":" not in self.args.nemesis_auth:
@@ -703,7 +758,8 @@ class Shrawler:
                 "project": self.args.nemesis_project,
                 "timestamp": current_time.isoformat(),
                 "expiration": expiration_time.isoformat(),
-                "path": unc_path,
+                "path": nemesis_path,
+                "modification_time": file_mtime.isoformat(),
             }
 
             # Prepare multipart form data
@@ -715,7 +771,7 @@ class Shrawler:
                         file_data,
                         "application/octet-stream",
                     ),
-                    "metadata": (None, json.dumps(metadata), "application/json")
+                    "metadata": (None, json.dumps(metadata), "application/json"),
                 }
 
                 # Submit with basic auth and SSL verification disabled (like curl -k)
@@ -729,10 +785,12 @@ class Shrawler:
 
                 if response.status_code not in [200, 201]:
                     logging.warning(
-                        f"Failed to submit file to Nemesis: {unc_path} (HTTP {response.status_code})"
+                        f"Failed to submit file to Nemesis: {nemesis_path} (HTTP {response.status_code})"
                     )
                 else:
-                    logging.debug(f"Successfully submitted file to Nemesis: {unc_path}")
+                    logging.debug(
+                        f"Successfully submitted file to Nemesis: {nemesis_path}"
+                    )
                     upload_result["success"] = True
 
                     # Try to extract response ID if present
@@ -742,7 +800,7 @@ class Shrawler:
                             upload_result["response_id"] = response_data["id"]
                     except (json.JSONDecodeError, KeyError) as e:
                         logging.debug(
-                            f"Failed to parse Nemesis response for {unc_path}: {e}"
+                            f"Failed to parse Nemesis response for {nemesis_path}: {e}"
                         )
 
         except (
@@ -751,10 +809,10 @@ class Shrawler:
             requests.exceptions.ConnectionError,
             FileNotFoundError,
         ) as e:
-            logging.debug(f"Nemesis submission error for {unc_path}: {str(e)}")
+            logging.debug(f"Nemesis submission error for {nemesis_path}: {str(e)}")
         except Exception as e:
             logging.debug(
-                f"Unexpected error in Nemesis submission for {unc_path}: {str(e)}"
+                f"Unexpected error in Nemesis submission for {nemesis_path}: {str(e)}"
             )
 
         return upload_result
