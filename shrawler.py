@@ -608,7 +608,7 @@ class Shrawler:
                 clean_remote_path = remote_path.lstrip("/").replace("/", "\\")
                 unc_path = f"\\\\{host}\\{share}\\{clean_remote_path}"
                 nemesis_result = self.submit_to_nemesis(
-                    local_path, unc_path, mtime_epoch
+                    local_path, unc_path, mtime_epoch, host
                 )
                 nemesis_success = nemesis_result["success"]
 
@@ -645,9 +645,15 @@ class Shrawler:
             return (False, False)
 
     def submit_to_nemesis(
-        self, local_file_path: str, unc_path: str, file_mtime_epoch: float
+        self, local_file_path: str, unc_path: str, file_mtime_epoch: float, host: str
     ) -> Dict[str, Any]:
         """Submit downloaded file to Nemesis API using multipart form data.
+
+        Args:
+            local_file_path: Path to the local file to upload
+            unc_path: UNC path of the original file
+            file_mtime_epoch: File modification time as epoch timestamp
+            host: Target host IP or hostname
 
         Returns:
             dict: Upload status with 'success' (bool), 'timestamp' (str), and optional 'response_id' (str)
@@ -693,6 +699,7 @@ class Shrawler:
 
             metadata = {
                 "agent_id": "shrawler",
+                "source": f"host://{host}",
                 "project": self.args.nemesis_project,
                 "timestamp": current_time.isoformat(),
                 "expiration": expiration_time.isoformat(),
@@ -701,20 +708,20 @@ class Shrawler:
 
             # Prepare multipart form data
             with open(local_file_path, "rb") as file_data:
+                # Both file and metadata must be in files dict to match curl -F behavior
                 files = {
                     "file": (
                         os.path.basename(local_file_path),
                         file_data,
                         "application/octet-stream",
-                    )
+                    ),
+                    "metadata": (None, json.dumps(metadata), "application/json")
                 }
-                data = {"metadata": json.dumps(metadata)}
 
                 # Submit with basic auth and SSL verification disabled (like curl -k)
                 response = requests.post(
                     endpoint,
                     files=files,
-                    data=data,
                     auth=(username, password),
                     verify=False,
                     timeout=30,
