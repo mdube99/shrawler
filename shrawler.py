@@ -1728,14 +1728,14 @@ class Shrawler:
         if self.args.download_ext is not None:
             logging.info(f"Total files downloaded: {self.download_count}")
 
-        # Write CSV or JSON output if any data was collected
+        # Write CSV and/or JSON output if any data was collected
         if self.csv_enabled:
             files_written = self.write_csv_outputs()
             if files_written:
                 logging.info(f"CSV files written: {', '.join(files_written)}")
             else:
                 logging.info("No data to write to CSV files")
-        elif self.json_enabled and self.scan_results:
+        if self.json_enabled and self.scan_results:
             try:
                 with open("shrawler_results.json", "w") as f:
                     json.dump(self.scan_results, f, indent=4)
@@ -1777,13 +1777,20 @@ def main() -> None:
             unique_results = find_unique_files_by_mtime(s.unique_files_data)
             display_unique_files(unique_results)
 
-        # Write CSV output before exiting
+        # Write CSV and/or JSON output before exiting
         if s.csv_enabled:
             files_written = s.write_csv_outputs()
             if files_written:
                 logging.info(f"CSV files written: {', '.join(files_written)}")
             else:
                 logging.info("No data to write to CSV files")
+        if s.json_enabled and s.scan_results:
+            try:
+                with open("shrawler_results.json", "w") as f:
+                    json.dump(s.scan_results, f, indent=4)
+                logging.info("Scan results written to shrawler_results.json")
+            except Exception as e:
+                logging.warning(f"Failed to write scan results file: {str(e)}")
 
         quit()
 
