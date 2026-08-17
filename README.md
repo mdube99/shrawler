@@ -61,48 +61,111 @@ If you prefer to run shrawler without installing it:
    python3 shrawler.py [[domain/]username[:password]@]<dc-ip> [options]
    ```
 
+### Development
+
+Development and test dependencies are managed with `uv`:
+
+```bash
+uv sync --extra dev
+uv run ruff check shrawler tests shrawler.py
+uv run pytest -q
+uv build
+```
+
 -----
 
 ## 🚀 Usage
 
-The basic syntax for running Shrawler is:
+Shrawler provides task-oriented operating modes:
 
 ```bash
-shrawler [[domain/]username[:password]@]<dc-ip> [options]
+shrawler shares [[domain/]username[:password]@]<host> [options]
+shrawler spider [[domain/]username[:password]@]<host> [options]
+shrawler snaffle [[domain/]username[:password]@]<host> --rules <path> [options]
+shrawler report <shrawler_results.json> [--retry-failed]
 ```
 
-### Command-Line Arguments
+- `shares` enumerates shares and configured permission checks without recursion.
+- `spider` inventories files recursively across readable shares.
+- `snaffle` spiders and applies Snaffler rules; a rules directory is required.
+- `report` summarizes saved results and can retry failed Nemesis uploads without rescanning SMB.
+
+The original `shrawler TARGET [options]` syntax remains available for compatibility.
+
+### Common Command-Line Arguments
 
 | Argument | Description |
 | :--- | :--- |
 | **`target`** | **Required**. Specifies the target and credentials. Format: `[[domain/]username[:password]@]<dc-ip>` |
-| `-v`, `--verbose` | Enable verbose output for debugging. |
-| `--read-only` | Skips the write permission check, only checking for read access. |
-| `--skip-share <shares>` | Comma-separated list of additional shares to skip (e.g., `data,backup`). |
-| `--add-share <shares>` | Comma-separated list of shares to remove from the default skip list (e.g., `C$,ADMIN$`). |
-| `--shares <shares>` | Only scan the shares specified in this comma-separated list. |
-| `--hosts-file <file>` | Path to a file containing a list of target IPs (one per line). |
-| `--host <ip>` | Specify a single target host IP. Overrides the IP in the main `target` argument. |
-| **Authentication** | |
-| `-H`, `--hashes <hash>` | Use NTLM hashes for authentication. Format: `LMHASH:NTHASH`. |
-| `-no-pass` | Do not prompt for a password when one is not provided. |
-| `-k` | Use Kerberos authentication (obtains TGT from ccache). |
-| `-aesKey <key>` | Use an AES key for Kerberos Pass-the-Key. |
-| **Spidering** | |
-| `--spider` | Enable spidering of all readable shares. |
-| `--download-ext [ext]` | Download files found during spidering. Use without args to download all, specify 'default' for common extensions, or provide comma-separated extensions (e.g., `.txt,.pdf,.config`). |
-| `--download-name <names>` | Download files if their name contains any of these comma-separated substrings (e.g., `backup,config,password`). |
-| `--max-depth <num>` | Set the maximum recursion depth for the spider (Default: 5). |
-| `--delay <seconds>` | Seconds to wait between file/directory requests (Default: 0). |
-| `--count-ext [ext]` | Count files by extension. Use without args for default extensions, or provide comma-separated extensions (e.g., `.txt,.log,.sh`). |
-| `--count-string <strings>` | Count files containing specific strings in their names. Provide comma-separated strings (e.g., `backup,config,password`). |
-| `--unique` | Identify and display files with unique modification times. |
-| `--csv-output` | Output results in CSV format (generates shrawler_shares.csv, shrawler_files.csv, shrawler_downloads.csv). |
-| **Nemesis Integration** | |
-| `--nemesis-url <url>` | Nemesis API URL (e.g., `https://nemesis:7443/api`). Can also be set via `NEMESIS_URL` environment variable. |
-| `--nemesis-auth <auth>` | Nemesis authentication in `username:password` format (e.g., `n:n`). Can also be set via `NEMESIS_AUTH` environment variable. |
-| `--nemesis-project <project>` | Project name for Nemesis file submissions. Can also be set via `NEMESIS_PROJECT` environment variable. |
-| `--nemesis-ingest` | Enable automatic upload of downloaded files to Nemesis API. |
+| `--profile <quiet|balanced|fast>` | Select a noise and concurrency preset. |
+| `--policy <audit|collect|aggressive>` | Select safe enumeration, selective collection, or comprehensive acquisition. |
+| `--share <name>` | Scan only this share. Repeat to select more shares. |
+| `--exclude-share <name>` | Skip this share. Repeat to exclude more shares. |
+| `-o`, `--output <path>` | Set the results directory. |
+| `--format <console|json|csv|all>` | Select saved result formats. |
+| `--view <summary|progress|matches|tree>` | Select terminal detail; interactive terminals default to a single updating progress line. `--output-mode` remains an alias. |
+| `--resume [path]` | Resume a scan from its output directory, skipping completed hosts, shares, and discovered paths. |
+| `--download [extensions]` | Download the default set or comma-separated extensions. |
+| `--limits <conservative|standard|unlimited>` | Select download size limits. |
+| `--max-file-size <size>` | Override the per-file limit with a readable size such as `20MB`. |
+| `--download-budget <size>` | Override the run limit with a readable size such as `2GB`. |
+| `--nemesis <url>` | Deliver downloads to Nemesis using environment credentials. |
+| `--rules <path>` | Load Snaffler rules recursively (required by `snaffle`). |
+| `--interest <0-3>` | Set the minimum Snaffler interest level. |
+
+Authentication, diagnostic, and individual tuning switches remain available for compatibility. Run `shrawler <mode> --help-advanced` to see them.
+
+### Progress, Checkpoints, and Resume
+
+Modern operating modes continuously append discoveries to `scan-events.jsonl` and publish an atomic `scan-state.json` checkpoint. This preserves useful work if a scan is interrupted. Interactive terminals use the low-noise progress view automatically; select it explicitly with:
+
+```bash
+shrawler spider TARGET --view progress -o ./results
+```
+
+Resume that scan with:
+
+```bash
+shrawler spider TARGET --resume ./results
+```
+
+Completed hosts and shares are skipped. Previously recorded file paths in an interrupted share are not processed twice.
+
+### Persistent Configuration
+
+Create and inspect `~/.config/shrawler/config.toml` with:
+
+```bash
+shrawler config init
+shrawler config show
+shrawler config path
+shrawler config options
+```
+
+Command-line arguments override configuration values. A configuration may contain:
+
+```toml
+profile = "quiet"
+policy = "audit"
+view = "progress"
+format = "json"
+output = "./results"
+
+[nemesis]
+url = "https://nemesis:7443/api"
+auth = "username:password"
+project = "assessment"
+mode = "downloads"
+upload_workers = 2
+retries = 2
+queue_size = 100
+
+[snaffle]
+rules = "./rules"
+interest = 1
+```
+
+The configuration file is created with permissions `0600` because `nemesis.auth` may contain credentials. You can omit it and use `NEMESIS_AUTH` instead if you do not want credentials stored in the file.
 
 ### Usage Examples
 
@@ -259,6 +322,34 @@ shrawler ludus.local/domainuser:Password123@192.168.1.100 --host 192.168.1.100 -
 #### **12. Nemesis Integration**
 
 Configure Nemesis settings via environment variables and upload downloaded files automatically.
+Nemesis uploads accept self-signed and otherwise untrusted TLS certificates automatically.
+
+Nemesis is a delivery policy layered over local acquisition:
+
+- `off` keeps all evidence local and makes no Nemesis requests.
+- `matches` queues only files downloaded because of a Snaffler match.
+- `downloads` queues every file Shrawler downloads, regardless of selection method.
+
+Uploads run through a bounded background queue, decoupling normal SMB traversal
+from Nemesis latency until the queue reaches its configured capacity. Shrawler
+then applies backpressure, retries failures with exponential backoff, preserves
+the local file on failure, and waits for the queue before writing final JSON/CSV
+reports. Each download contains its final `nemesis.status`, attempt count,
+response ID, and last error.
+
+```bash
+# Upload Snaffler-matched evidence only
+shrawler user@10.2.10.10 --spider \
+  --snaffler-rules-dir ./SnaffRules/DefaultRules \
+  --nemesis-mode matches
+
+# Upload every file selected by download criteria
+shrawler user@10.2.10.10 --spider --download-ext default \
+  --nemesis-mode downloads --nemesis-upload-workers 2
+
+# Retry failed uploads later without rescanning SMB
+shrawler report ./shrawler_results.json --retry-failed
+```
 
 ```bash
 Example .env file:
@@ -270,7 +361,8 @@ NEMESIS_PROJECT=assessment_2024
 
 ```
 # Run with automatic Nemesis upload
-shrawler user:Password123@192.168.1.100 --host 192.168.1.100 --spider --download-ext default --nemesis-ingest
+shrawler user:Password123@192.168.1.100 --host 192.168.1.100 --spider \
+  --download-ext default --nemesis-mode downloads
 ```
 
 #### **13. Comprehensive Analysis with All Features**
@@ -284,7 +376,7 @@ shrawler user:Password123@192.168.1.100 --host 192.168.1.100 --spider \
   --count-ext \
   --count-string "secret,admin,key" \
   --unique \
-  --nemesis-ingest \
+  --nemesis-mode downloads \
   --delay 0.2
 ```
 
@@ -300,6 +392,27 @@ This will generate three CSV files:
 - `shrawler_shares.csv` - Share enumeration data
 - `shrawler_files.csv` - All files discovered during spidering
 - `shrawler_downloads.csv` - Files that were downloaded
+- `shrawler_snaffler_matches.csv` - Snaffler rule matches (when Snaffler mode is enabled)
+
+#### **15. Snaffler Rule Engine**
+
+Run Shrawler with a directory of Snaffler TOML classifier rules:
+
+```bash
+shrawler user:Password123@192.168.1.100 --host 192.168.1.100 --spider \
+  --snaffler-rules-dir ./rules/snaffler/default \
+  --snaffler-interest-level 1 \
+  --snaffler-max-size-to-grep 1048576 \
+  --csv-output --json-output
+```
+
+Snaffler v1 support matrix in Shrawler:
+
+- Supported scopes: `ShareEnumeration`, `DirectoryEnumeration`, `FileEnumeration`, `ContentsEnumeration`, `PostMatch`
+- Supported actions: `Discard`, `Snaffle`, `Relay`
+- Supported word list types: `Exact`, `Contains`, `Regex`, `StartsWith`, `EndsWith`
+- Supported locations: `ShareName`, `FilePath`, `FileName`, `FileExtension`, `FileContentAsString`, `FileLength`
+- Deferred in v1 (warn+skip, or fail with `--snaffler-strict`): `CheckForKeys`, `EnterArchive`, `SendToNextScope`, `FileContentAsBytes`, `FileMD5`
 
 **Example shrawler_shares.csv:**
 ```csv
@@ -316,8 +429,8 @@ host,share_name,remote_path,unc_path,file_name,size_bytes,readable_size,mtime_ut
 
 **Example shrawler_downloads.csv:**
 ```csv
-host,share_name,remote_path,unc_path,local_filename,size_bytes,mtime_utc,nemesis_success,nemesis_response_id,download_success,timestamp_utc
-192.168.1.100,backup,/Documents/creds.txt,\\192.168.1.100\backup\Documents\creds.txt,192.168.1.100__backup__Documents_creds.txt,1024,2025-08-06T08:30:15+00:00,True,file_12345,True,2025-08-16T14:30:16+00:00
+host,share_name,remote_path,unc_path,local_filename,local_path,size_bytes,actual_size_bytes,sha256,mtime_utc,timestamp_utc,nemesis_status,nemesis_attempts,nemesis_response_id,nemesis_last_error
+192.168.1.100,backup,/Documents/creds.txt,\\192.168.1.100\backup\Documents\creds.txt,creds.txt,downloads/creds.txt,1024,1024,<sha256>,2025-08-06T08:30:15+00:00,2025-08-16T14:30:16+00:00,uploaded,1,file_12345,
 ```
 
 -----
@@ -366,7 +479,7 @@ The enhanced spider output shows advanced status indicators for downloads, Nemes
         - 2025-08-16 14:30 └── Users
         - 2025-08-15 09:15 ├── administrator
         - 2025-08-15 09:15 │   └── Documents
-    1.2KB 2025-08-06 08:30 │       ├── creds.txt [DOWNLOADED] [UPLOADED TO NEMESIS]
+    1.2KB 2025-08-06 08:30 │       ├── creds.txt [DOWNLOADED] [NEMESIS QUEUED]
     4.5MB 2025-07-15 11:22 │       └── report.docx
         - 2025-02-10 16:05 └── public
      856B 2025-02-10 16:05     └── notes.txt [DOWNLOADED] [UNIQUE]
@@ -475,12 +588,23 @@ When using `--download-ext default` or `--count-ext` without arguments, Shrawler
 
 | File | Description |
 | :--- | :--- |
-| `shrawler_results.json` | Consolidated scan results with share enumeration and download metadata (default output) |
+| `shrawler_results.json` | Consolidated scan results generated with `--json-output`. |
 | `shrawler_shares.csv` | Share enumeration data in CSV format (generated with --csv-output) |
 | `shrawler_files.csv` | All discovered files during spidering in CSV format (generated with --csv-output) |
 | `shrawler_downloads.csv` | Downloaded files metadata in CSV format (generated with --csv-output) |
+| `shrawler_snaffler_matches.csv` | Snaffler match records (generated when `--csv-output` and `--snaffler-rules-dir` are used) |
 | `downloads/` | Directory containing all downloaded files with sanitized names |
 | `.env` | Optional environment configuration file |
+
+JSON output uses schema version 2. It includes `_schema` and `_summary` metadata,
+per-host `status` and `error` fields, discovered-file records for each share, and
+download records containing the actual size and SHA-256 digest.
+
+### Exit Codes
+
+- `0`: every requested host completed successfully
+- `1`: one or more hosts failed, rejected authentication, or had port 445 closed
+- `130`: the scan was interrupted by the user
 
 -----
 
@@ -500,8 +624,7 @@ Shrawler uses a structured table format for spider output with the following spe
 Shrawler provides real-time visual feedback during operations:
 
 - **[DOWNLOADED]** - File successfully downloaded to local system
-- **[UPLOADED TO NEMESIS]** - File successfully uploaded to Nemesis API  
-- **[NEMESIS FAILED]** - Nemesis upload failed (file still downloaded locally)
+- **[NEMESIS QUEUED]** - File was added to the background Nemesis upload queue
 - **[DOWNLOAD FAILED]** - File download failed
 - **[UNIQUE]** - File has unique modification time within its directory
 
@@ -519,6 +642,19 @@ Downloaded files are automatically sanitized for cross-platform compatibility:
 - **Depth Control**: Use `--max-depth` to limit recursion depth
 - **Selective Downloads**: Combine extension and name-based filtering
 - **Batch Analysis**: File counting and unique analysis run during traversal
+- **Relay-Gated Content Inspection**: The default reads file content only when a metadata rule relays to a content rule
+- **Read Reuse**: Content fetched for Snaffler is reused when that file is downloaded
+- **Bounded Host Concurrency**: Independent hosts are scanned concurrently without parallelizing a single share tree
+
+| Profile | Workers | Permission checks | Terminal output | Content mode |
+| :--- | ---: | :--- | :--- | :--- |
+| `quiet` | 1 | Read | Matches | Relayed |
+| `balanced` | 4 | Read | Matches | Relayed |
+| `fast` | 8 | Read | Summary | Relayed |
+
+Use `--permission-check read-write` only when an explicit write/delete probe is
+needed. `--snaffler-content-mode all` restores exhaustive content-rule scanning
+but can generate substantially more SMB traffic.
 
 -----
 

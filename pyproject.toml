@@ -11,32 +11,19 @@ extend-exclude = '''
 )
 '''
 [tool.ruff.lint]
-extend-select = ["Q", "RUF100", "C90", "UP", "I", "D"]
+select = ["E", "F", "I", "UP", "B", "C4", "RUF"]
 isort = { combine-as-imports = true, known-first-party = ["pydantic_ai"] }
 mccabe = { max-complexity = 15 }
 ignore = [
-    "D100", # ignore missing docstring in module
-    "D102", # ignore missing docstring in public method
-    "D104", # ignore missing docstring in public package
-    "D105", # ignore missing docstring in magic methods
-    "D107", # ignore missing docstring in __init__ methods
+    "E501", # formatting is handled separately
+    "B904", # preserve existing CLI exception behavior during package migration
 ]
-
-[tool.ruff.lint.pydocstyle]
-convention = "google"
-
-[tool.ruff.lint.per-file-ignores]
-"tests/**/*.py" = ["D"]
 
 [tool.pyright]
 typeCheckingMode = "strict"
 reportUnnecessaryTypeIgnoreComment = true
 reportMissingTypeStubs = false
 venvPath = ".venv"
-
-[tool.pytest.ini_options]
-asyncio_mode = "strict"
-asyncio_default_fixture_loop_scope = "function"
 
 [tool.mypy]
 plugins = ['pydantic.mypy']
@@ -46,19 +33,27 @@ requires = ["setuptools"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "shrawler.py"
+name = "shrawler"
 version = "1.0.0"
-description = "A simple SMB share enumeration and spidering tool."
+description = "SMB share enumeration, spidering, and evidence collection tool."
 dependencies = [
     "impacket",
     "colorama",
     "python-dotenv",
     "requests",
+    "tomli; python_version < '3.11'",
 ]
 requires-python = ">=3.8"
 
-[project.scripts]
-shrawler = "shrawler:main"
+[project.optional-dependencies]
+dev = [
+    "pytest>=8",
+    "ruff>=0.6",
+    "pyright>=1.1",
+]
 
-[tool.setuptools]
-py-modules = ["shrawler"]
+[project.scripts]
+shrawler = "shrawler.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["shrawler*"]
