@@ -1,69 +1,67 @@
+import tempfile
 import unittest
+from pathlib import Path
 
-from shrawler.cli import _compact_arguments, _parse_size, _scan_parser
+from shrawler.cli import _parse_size, _scan_parser, parse_scan_options
 
 
-class CompactCliTests(unittest.TestCase):
+class CanonicalCliTests(unittest.TestCase):
     def test_human_readable_sizes(self):
         self.assertEqual(_parse_size("20MB"), 20_000_000)
         self.assertEqual(_parse_size("2 GiB"), 2 * 1024**3)
 
-    def test_shares_compact_options_translate_to_legacy_interface(self):
-        arguments = _compact_arguments(
-            "shares",
-            [
-                "user@host",
-                "--profile", "quiet",
-                "--share", "Finance",
-                "--share", "HR",
-                "--exclude-share", "Archive",
-                "--format", "all",
-                "--view", "tree",
-                "-o", "results",
-            ],
-        )
-        self.assertIn("--scan-profile", arguments)
-        self.assertIn("Finance,HR", arguments)
-        self.assertIn("Archive", arguments)
-        self.assertIn("--csv-output", arguments)
-        self.assertIn("--json-output", arguments)
-        self.assertIn("--output-mode", arguments)
-        self.assertIn("tree", arguments)
-        self.assertIn("results", arguments)
-
-    def test_spider_limits_and_nemesis_translate(self):
-        arguments = _compact_arguments(
+    def test_host_composes_with_modern_and_advanced_options(self):
+        options = parse_scan_options(
             "spider",
-            [
-                "user@host",
-                "--download", ".docx,.xlsx",
-                "--max-file-size", "20MB",
-                "--download-budget", "1GiB",
-                "--nemesis", "https://nemesis/api",
-            ],
+            ["user@embedded", "--host", "explicit", "--view", "summary",
+             "--profile", "quiet", "--workers", "12", "--format", "all",
+             "--output", "results", "--download", ".docx", "--download-budget", "1GiB"],
+            {},
         )
-        self.assertIn("20000000", arguments)
-        self.assertIn(str(1024**3), arguments)
-        self.assertIn("--nemesis-mode", arguments)
-        self.assertIn("downloads", arguments)
+        self.assertEqual(options.host, "explicit")
+        self.assertEqual(options.output_mode, "summary")
+        self.assertEqual(options.workers, 12)
+        self.assertTrue(options.csv_output)
+        self.assertTrue(options.json_output)
+        self.assertEqual(options.max_total_download, 1024**3)
 
-    def test_snaffle_uses_short_rule_options(self):
-        arguments = _compact_arguments(
-            "snaffle", ["user@host", "--rules", "rules", "--interest", "2"]
-        )
-        self.assertIn("--snaffler-rules-dir", arguments)
-        self.assertIn("rules", arguments)
-        self.assertIn("--snaffler-interest-level", arguments)
-        self.assertIn("2", arguments)
+    def test_hosts_file_composes_with_view(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            hosts = Path(tmp) / "hosts.txt"
+            hosts.write_text("# comment\nserver1\n\nserver2 # note\n")
+            options = parse_scan_options("spider", ["user", "--hosts-file", str(hosts), "--view", "progress"], {})
+        self.assertEqual(options.output_mode, "progress")
 
-    def test_legacy_options_bypass_translation(self):
-        self.assertIsNone(
-            _compact_arguments("spider", ["user@host", "--workers", "12"])
-        )
-
-    def test_snaffle_requires_rules_in_compact_interface(self):
+    def test_host_sources_are_mutually_exclusive(self):
         with self.assertRaises(SystemExit):
-            _scan_parser("snaffle").parse_args(["user@host"])
+            _scan_parser("spider").parse_args(["user@host", "--host", "one", "--hosts-file", "hosts"])
+
+    def test_empty_hosts_file_fails_before_scanning(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            hosts = Path(tmp) / "hosts.txt"
+            hosts.write_text("# only comments\n")
+            with self.assertRaises(SystemExit):
+                parse_scan_options("spider", ["user", "--hosts-file", str(hosts)], {})
+
+    def test_config_precedence_cli_then_toml_then_environment(self):
+        options = parse_scan_options("spider", ["user@host", "--profile", "fast", "--nemesis", "cli"], {"profile": "quiet", "nemesis": {"url": "toml"}})
+        self.assertEqual(options.scan_profile, "fast")
+        self.assertEqual(options.nemesis_url, "cli")
+
+    def test_compatibility_aliases_normalize(self):
+        options = parse_scan_options("snaffle", ["user@host", "--scan-profile", "quiet", "--output-mode", "matches", "--shares", "A,B", "--skip-share", "C", "--snaffler-rules-dir", "rules", "--snaffler-interest-level", "2"], {})
+        self.assertEqual(options.scan_profile, "quiet")
+        self.assertEqual(options.shares, "A,B")
+        self.assertEqual(options.skip_share, "C")
+        self.assertEqual(options.snaffler_rules_dir, "rules")
+
+    def test_help_is_complete_and_has_no_advanced_help(self):
+        help_text = _scan_parser("snaffle").format_help()
+        self.assertIn("target selection", help_text)
+        self.assertIn("downloads and content analysis", help_text)
+        self.assertIn("Snaffler", help_text)
+        self.assertIn("--workers", help_text)
+        self.assertNotIn("help-advanced", help_text)
 
 
 if __name__ == "__main__":

@@ -113,7 +113,12 @@ The original `shrawler TARGET [options]` syntax remains available for compatibil
 | `--rules <path>` | Load Snaffler rules recursively (required by `snaffle`). |
 | `--interest <0-3>` | Set the minimum Snaffler interest level. |
 
-Authentication, diagnostic, and individual tuning switches remain available for compatibility. Run `shrawler <mode> --help-advanced` to see them.
+Standard `shrawler <mode> --help` is authoritative and includes authentication,
+diagnostic, target-selection, and tuning controls relevant to that mode.
+
+`--host` overrides only the host embedded in `target`; credentials remain unchanged.
+Use `--hosts-file` for multiple targets (one host per non-empty line, with `#`
+comments supported). `--host` and `--hosts-file` are mutually exclusive.
 
 ### Progress, Checkpoints, and Resume
 
@@ -142,7 +147,8 @@ shrawler config path
 shrawler config options
 ```
 
-Command-line arguments override configuration values. A configuration may contain:
+Precedence is: explicit command line, TOML configuration, Nemesis environment
+variables, then mode/profile defaults. A configuration may contain:
 
 ```toml
 profile = "quiet"

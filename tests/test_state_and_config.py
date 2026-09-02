@@ -6,7 +6,6 @@ from pathlib import Path
 from shrawler.config import (
     CONFIG_OPTIONS,
     DEFAULT_CONFIG,
-    compact_config_arguments,
     load_config,
 )
 from shrawler.state import ScanStateStore
@@ -24,7 +23,7 @@ class ConfigTests(unittest.TestCase):
         self.assertIn('"off", "matches", "downloads"', DEFAULT_CONFIG)
         self.assertIn("off | matches | downloads", CONFIG_OPTIONS)
 
-    def test_loads_toml_and_translates_mode_defaults(self):
+    def test_loads_structured_toml(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "config.toml"
             path.write_text(
@@ -33,16 +32,12 @@ class ConfigTests(unittest.TestCase):
                 'auth = "user:password"\nproject = "demo"\n'
                 'mode = "matches"\nupload_workers = 4\nretries = 5\n'
             )
-            arguments = compact_config_arguments("spider", load_config(path))
+            config = load_config(path)
 
-        self.assertIn("quiet", arguments)
-        self.assertIn("progress", arguments)
-        self.assertIn("https://nemesis/api", arguments)
-        self.assertIn("demo", arguments)
-        self.assertIn("user:password", arguments)
-        self.assertIn("matches", arguments)
-        self.assertIn("4", arguments)
-        self.assertIn("5", arguments)
+        self.assertEqual(config["profile"], "quiet")
+        self.assertEqual(config["view"], "progress")
+        self.assertEqual(config["nemesis"]["url"], "https://nemesis/api")
+        self.assertEqual(config["nemesis"]["upload_workers"], 4)
 
     def test_missing_config_is_empty(self):
         with tempfile.TemporaryDirectory() as tmp:

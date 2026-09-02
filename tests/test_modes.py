@@ -1,6 +1,5 @@
 import io
 import json
-import sys
 import tempfile
 import unittest
 from contextlib import redirect_stdout
@@ -48,20 +47,17 @@ class OperatingModeTests(unittest.TestCase):
         with mock.patch.object(cli, "scan_main") as scan_main:
             cli.main(["spider", "user@host", "--output-mode", "summary"])
 
-        scan_main.assert_called_once_with()
-        self.assertEqual(sys.argv[1], "user@host")
-        self.assertEqual(
-            sys.argv[sys.argv.index("--output-mode") + 1], "summary"
-        )
-        self.assertEqual(
-            sys.argv[sys.argv.index("--operating-mode") + 1], "spider"
-        )
+        scan_main.assert_called_once()
+        options = scan_main.call_args.args[0]
+        self.assertEqual(options.target, "user@host")
+        self.assertEqual(options.output_mode, "summary")
+        self.assertEqual(options.operating_mode, "spider")
 
     def test_legacy_syntax_still_dispatches_to_scanner(self):
         with mock.patch.object(cli, "scan_main") as scan_main:
             cli.main(["user@host", "--spider"])
 
-        scan_main.assert_called_once_with()
+        scan_main.assert_called_once()
 
     def test_report_retries_failed_upload_and_updates_results(self):
         with tempfile.TemporaryDirectory() as tmp:

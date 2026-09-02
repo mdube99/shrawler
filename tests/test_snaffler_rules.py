@@ -4,7 +4,6 @@ import tempfile
 import types
 import unittest
 from pathlib import Path
-from unittest import mock
 
 
 def _install_import_stubs() -> None:
@@ -119,8 +118,7 @@ def _make_args(**overrides):
 
 def _build_shrawler(**kwargs):
     args = _make_args(**kwargs)
-    with mock.patch.object(argparse.ArgumentParser, "parse_args", return_value=args):
-        return shrawler.Shrawler()
+    return shrawler.Shrawler(args)
 
 
 class _FakeSMBClient:

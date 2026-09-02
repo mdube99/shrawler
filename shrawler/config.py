@@ -2,7 +2,7 @@
 
 import os
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Optional
 
 try:
     import tomllib
@@ -72,46 +72,3 @@ def load_config(path: Optional[Path] = None) -> Dict[str, Any]:
         raise ValueError(f"Configuration root must be a table: {selected}")
     return data
 
-
-def compact_config_arguments(mode: str, data: Dict[str, Any]) -> List[str]:
-    """Translate supported TOML defaults into compact CLI arguments."""
-    arguments: List[str] = []
-    for key in ("profile", "policy", "view", "format"):
-        value = data.get(key)
-        if value is not None:
-            arguments.extend([f"--{key}", str(value)])
-    output = data.get("output")
-    if output:
-        arguments.extend(["--output", str(output)])
-    for share in data.get("shares", []):
-        arguments.extend(["--share", str(share)])
-    for share in data.get("exclude_shares", []):
-        arguments.extend(["--exclude-share", str(share)])
-    if mode in {"spider", "snaffle"}:
-        for key in ("limits", "download"):
-            value = data.get(key)
-            if value is not None:
-                arguments.extend([f"--{key}", str(value)])
-        nemesis = data.get("nemesis", {})
-        if isinstance(nemesis, dict):
-            if nemesis.get("url"):
-                arguments.extend(["--nemesis", str(nemesis["url"])])
-            option_names = {
-                "auth": "--nemesis-auth",
-                "project": "--nemesis-project",
-                "mode": "--nemesis-mode",
-                "upload_workers": "--nemesis-upload-workers",
-                "retries": "--nemesis-retries",
-                "queue_size": "--nemesis-queue-size",
-            }
-            for key, option in option_names.items():
-                if nemesis.get(key) is not None:
-                    arguments.extend([option, str(nemesis[key])])
-    if mode == "snaffle":
-        snaffle = data.get("snaffle", {})
-        if isinstance(snaffle, dict):
-            if snaffle.get("rules"):
-                arguments.extend(["--rules", str(snaffle["rules"])])
-            if snaffle.get("interest") is not None:
-                arguments.extend(["--interest", str(snaffle["interest"])])
-    return arguments

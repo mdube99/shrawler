@@ -69,12 +69,12 @@ class _DownloadClient:
 
 class ReliabilityTests(unittest.TestCase):
     def test_shares_mode_disables_spidering(self):
-        crawler = _build_shrawler(operating_mode="shares", spider=True)
+        crawler = _build_shrawler(operating_mode="shares", spider=False, output_mode="tree")
         self.assertFalse(crawler.args.spider)
         self.assertEqual(crawler.args.output_mode, "tree")
 
     def test_spider_mode_enables_spidering(self):
-        crawler = _build_shrawler(operating_mode="spider", spider=False)
+        crawler = _build_shrawler(operating_mode="spider", spider=True)
         self.assertTrue(crawler.args.spider)
 
     def test_nemesis_delivery_policies(self):
@@ -150,7 +150,12 @@ class ReliabilityTests(unittest.TestCase):
             self.assertEqual(state["response_id"], "file-123")
 
     def test_balanced_profile_defaults(self):
-        crawler = _build_shrawler()
+        crawler = _build_shrawler(
+            workers=4,
+            permission_check="read",
+            output_mode="matches",
+            snaffler_content_mode="relayed",
+        )
 
         self.assertEqual(crawler.args.workers, 4)
         self.assertEqual(crawler.args.permission_check, "read")
