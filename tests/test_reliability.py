@@ -134,10 +134,33 @@ class ReliabilityTests(unittest.TestCase):
 
         rendered = output.getvalue()
         self.assertTrue(b_finished.is_set())
-        self.assertLess(rendered.index("Host: host-b"), rendered.index("Host: host-a"))
-        a_block = rendered.split("Host: host-a", 1)[1]
+        self.assertLess(rendered.index("host-b"), rendered.index("host-a"))
+        a_block = rendered.split("host-a", 1)[1]
         self.assertIn("host-a-share", a_block)
         self.assertNotIn("host-b-share", a_block)
+
+    def test_host_blocks_use_styled_headers_and_clean_errors(self):
+        from shrawler.core import HostRenderResult, Shrawler
+
+        success_block = Shrawler.render_host_block(
+            HostRenderResult("10.0.0.1", "fileserver", "complete")
+        )
+        failure_block = Shrawler.render_host_block(
+            HostRenderResult(
+                "10.0.0.2",
+                "10.0.0.2",
+                "connection_failed",
+                "connection timed out",
+            )
+        )
+
+        self.assertIn("[+]", success_block)
+        self.assertIn("fileserver (10.0.0.1)", success_block)
+        self.assertNotIn("Host:", success_block)
+        self.assertIn("[-]", failure_block)
+        self.assertIn("10.0.0.2", failure_block)
+        self.assertIn("Connection failed:", failure_block)
+        self.assertIn("connection timed out", failure_block)
 
     def test_recursive_tree_uses_one_effective_worker(self):
         crawler = _build_shrawler(

@@ -2284,16 +2284,14 @@ class Shrawler(SnafflerEngineMixin):
                 logging.debug("USER Session Granted")
         except SessionError as e:
             self._record_operation("smb_connect", time.perf_counter() - started)
-            logging.warning(f"Invalid login attempt on '{address}'\n")
             logging.debug(f"Full error: {e}")
-            print(error(""))
             return None
         except Exception:
             self._record_operation("smb_connect", time.perf_counter() - started)
             raise
 
         self._record_operation("smb_connect", time.perf_counter() - started)
-        logging.info(f"Connected to {address}")
+        logging.debug(f"Connected to {address}")
         return smbClient
 
     def get_ip_addrs(self, file: str) -> List[str]:
@@ -2367,12 +2365,10 @@ class Shrawler(SnafflerEngineMixin):
         except OSError as exc:
             self.scan_results[mach_ip]["status"] = "connection_failed"
             self.scan_results[mach_ip]["error"] = str(exc)
-            logging.warning(f"Could not connect to SMB on '{mach_ip}': {exc}")
             return HostRenderResult(mach_ip, mach_name, "connection_failed", str(exc))
         except Exception as exc:
             self.scan_results[mach_ip]["status"] = "scan_failed"
             self.scan_results[mach_ip]["error"] = str(exc)
-            logging.warning(f"Scan failed for '{mach_ip}': {exc}")
             return HostRenderResult(mach_ip, mach_name, "scan_failed", str(exc))
         finally:
             if smbclient is not None:
@@ -2404,9 +2400,23 @@ class Shrawler(SnafflerEngineMixin):
 
     @staticmethod
     def render_host_block(result: HostRenderResult) -> str:
-        lines = [f"Host: {result.display_name}"]
+        host_label = result.display_name
+        if result.host != result.display_name:
+            host_label = f"{result.display_name} ({result.host})"
+        if result.status == "complete":
+            marker = f"{Fore.GREEN}[+]{Style.RESET_ALL}"
+        elif result.status in {
+            "authentication_failed",
+            "connection_failed",
+            "scan_failed",
+        }:
+            marker = f"{Fore.RED}[-]{Style.RESET_ALL}"
+        else:
+            marker = f"{Fore.YELLOW}[!]{Style.RESET_ALL}"
+        lines = [f"{marker} {host_label}"]
         if result.error:
-            lines.append(f"  Status: {result.status} | Error: {result.error}")
+            status = result.status.replace("_", " ").capitalize()
+            lines.append(f"     {Fore.RED}{status}:{Style.RESET_ALL} {result.error}")
         elif result.shares:
             width = max(len(share.name) for share in result.shares)
             lines.extend(
@@ -2420,7 +2430,7 @@ class Shrawler(SnafflerEngineMixin):
                 for share in result.shares
             )
         else:
-            lines.append(f"  Status: {result.status} | No shares displayed")
+            lines.append(f"     {Fore.YELLOW}No shares displayed{Style.RESET_ALL}")
         return "\n".join(lines)
 
     def _render_host_result(self, result: HostRenderResult) -> None:
