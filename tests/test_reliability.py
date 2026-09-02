@@ -3,6 +3,8 @@ import stat
 import tempfile
 import unittest
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import redirect_stdout
+from io import StringIO
 from pathlib import Path
 from unittest import mock
 
@@ -68,8 +70,91 @@ class _DownloadClient:
 
 
 class ReliabilityTests(unittest.TestCase):
+    def test_share_formatter_returns_row_without_printing(self):
+        from shrawler.core import format_share_info
+
+        output = StringIO()
+        with redirect_stdout(output):
+            row = format_share_info(
+                "DATA", "Department data", {"read": True, "write": False}, 6
+            )
+
+        self.assertEqual(output.getvalue(), "")
+        self.assertIn("DATA", row)
+        self.assertIn("Read: Yes", row)
+        self.assertIn("Write: No", row)
+
+    def test_concurrent_share_tree_blocks_render_in_completion_order(self):
+        import threading
+
+        from shrawler.core import HostRenderResult, ShareDisplay
+
+        crawler = _build_shrawler(
+            operating_mode="shares",
+            spider=False,
+            output_mode="tree",
+            workers=2,
+        )
+        crawler.args.hosts_file = "hosts.txt"
+        crawler.args.host = None
+        crawler.get_ip_addrs = lambda _: ["host-a", "host-b"]
+        crawler.banner = lambda: ""
+        crawler.finalize = lambda *args, **kwargs: None
+        crawler._checkpoint_state = lambda: None
+        crawler._build_scan_summary = lambda: {
+            "host_statuses": ["complete", "complete"]
+        }
+        release_a = threading.Event()
+        b_finished = threading.Event()
+
+        def scan_host(_domain, _lmhash, _nthash, host, _name):
+            if host == "host-a":
+                release_a.wait(timeout=2)
+            else:
+                b_finished.set()
+                release_a.set()
+            return HostRenderResult(
+                host=host,
+                display_name=host,
+                status="complete",
+                shares=[
+                    ShareDisplay(
+                        name=f"{host}-share",
+                        comment="",
+                        permissions={"read": True, "write": False},
+                    )
+                ],
+            )
+
+        crawler._scan_host = scan_host
+        output = StringIO()
+        with mock.patch("shrawler.core.parse_target", return_value=("", "", "", "")):
+            with redirect_stdout(output):
+                self.assertEqual(crawler.main(), 0)
+
+        rendered = output.getvalue()
+        self.assertTrue(b_finished.is_set())
+        self.assertLess(rendered.index("Host: host-b"), rendered.index("Host: host-a"))
+        a_block = rendered.split("Host: host-a", 1)[1]
+        self.assertIn("host-a-share", a_block)
+        self.assertNotIn("host-b-share", a_block)
+
+    def test_recursive_tree_uses_one_effective_worker(self):
+        crawler = _build_shrawler(
+            operating_mode="spider", spider=True, output_mode="tree", workers=4
+        )
+        self.assertEqual(crawler._effective_worker_count(8), 1)
+
+    def test_non_tree_recursive_view_keeps_concurrency(self):
+        crawler = _build_shrawler(
+            operating_mode="spider", spider=True, output_mode="progress", workers=4
+        )
+        self.assertEqual(crawler._effective_worker_count(8), 4)
+
     def test_shares_mode_disables_spidering(self):
-        crawler = _build_shrawler(operating_mode="shares", spider=False, output_mode="tree")
+        crawler = _build_shrawler(
+            operating_mode="shares", spider=False, output_mode="tree"
+        )
         self.assertFalse(crawler.args.spider)
         self.assertEqual(crawler.args.output_mode, "tree")
 
@@ -142,9 +227,9 @@ class ReliabilityTests(unittest.TestCase):
                 crawler._finish_nemesis_uploads()
 
             self.assertEqual(result, (True, True))
-            state = crawler.scan_results["host"]["shares"]["DATA"][
-                "downloaded_files"
-            ][0]["nemesis"]
+            state = crawler.scan_results["host"]["shares"]["DATA"]["downloaded_files"][
+                0
+            ]["nemesis"]
             self.assertEqual(state["status"], "uploaded")
             self.assertEqual(state["attempts"], 2)
             self.assertEqual(state["response_id"], "file-123")
@@ -175,6 +260,7 @@ class ReliabilityTests(unittest.TestCase):
 
         def get_shares(target, *args, **kwargs):
             seen[target] = crawler.current_host
+            return []
 
         crawler.get_shares = get_shares
         with ThreadPoolExecutor(max_workers=2) as executor:
@@ -190,8 +276,8 @@ class ReliabilityTests(unittest.TestCase):
     def test_files_are_processed_at_maximum_depth(self):
         crawler = _build_shrawler(max_depth=1)
         seen = []
-        crawler._process_and_display_file = lambda file_info, *args, **kwargs: seen.append(
-            file_info.get_longname()
+        crawler._process_and_display_file = lambda file_info, *args, **kwargs: (
+            seen.append(file_info.get_longname())
         )
 
         crawler.build_tree_structure(
@@ -204,10 +290,8 @@ class ReliabilityTests(unittest.TestCase):
         crawler = _build_shrawler(max_depth=0)
         root_files = []
         directories = []
-        crawler._process_and_display_file_root = (
-            lambda file_info, *args, **kwargs: root_files.append(
-                file_info.get_longname()
-            )
+        crawler._process_and_display_file_root = lambda file_info, *args, **kwargs: (
+            root_files.append(file_info.get_longname())
         )
         crawler.build_tree_structure = lambda *args, **kwargs: directories.append(args)
 
@@ -231,9 +315,9 @@ class ReliabilityTests(unittest.TestCase):
             self.assertEqual(result, (True, False))
             downloaded = Path(output_dir, "downloads", "file.txt")
             self.assertEqual(downloaded.read_bytes(), b"payload")
-            entry = crawler.scan_results["host"]["shares"]["DATA"][
-                "downloaded_files"
-            ][0]
+            entry = crawler.scan_results["host"]["shares"]["DATA"]["downloaded_files"][
+                0
+            ]
             self.assertEqual(len(entry["sha256"]), 64)
 
     def test_download_reuses_prefetched_snaffler_content(self):
@@ -325,7 +409,7 @@ class ReliabilityTests(unittest.TestCase):
             output_path = crawler.write_json_output()
             payload = json.loads(output_path.read_text())
 
-            self.assertEqual(payload["_schema"]["version"], 2)
+            self.assertEqual(payload["_schema"]["version"], 3)
             self.assertEqual(payload["_summary"]["hosts_attempted"], 1)
             self.assertEqual(stat.S_IMODE(output_path.stat().st_mode), 0o600)
 

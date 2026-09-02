@@ -11,15 +11,35 @@ import time
 import uuid
 from collections import Counter, defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Set, Tuple, Union
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 import requests
 import urllib3
 from colorama import Fore, Style, init
 from dotenv import load_dotenv
+from impacket.dcerpc.v5.srvs import STYPE_DISKTREE, STYPE_MASK
 from impacket.examples.utils import parse_target
+from impacket.nt_errors import STATUS_ACCESS_DENIED, STATUS_PRIVILEGE_NOT_HELD
+from impacket.smb3structs import (
+    DELETE,
+    FILE_ADD_FILE,
+    FILE_ADD_SUBDIRECTORY,
+    FILE_ATTRIBUTE_NORMAL,
+    FILE_DIRECTORY_FILE,
+    FILE_NON_DIRECTORY_FILE,
+    FILE_OPEN,
+    FILE_OVERWRITE_IF,
+    FILE_SHARE_DELETE,
+    FILE_SHARE_READ,
+    FILE_SHARE_WRITE,
+    FILE_SYNCHRONOUS_IO_NONALERT,
+    GENERIC_WRITE,
+    WRITE_DAC,
+    WRITE_OWNER,
+)
 from impacket.smbconnection import (
     SMB2_DIALECT_002,
     SMB2_DIALECT_21,
@@ -34,6 +54,7 @@ from .state import ScanStateStore
 
 # Load .env file if it exists
 load_dotenv()
+
 
 def sanitize_filename(filename: str) -> str:
     """
@@ -149,14 +170,31 @@ def success(msg: str) -> str:
     return Fore.GREEN + this + Style.RESET_ALL + "\n"
 
 
-def print_share_info(
+@dataclass(frozen=True)
+class ShareDisplay:
+    name: str
+    comment: str
+    permissions: Dict[str, Any]
+    snaffler_marker: str = ""
+
+
+@dataclass(frozen=True)
+class HostRenderResult:
+    host: str
+    display_name: str
+    status: str
+    error: Optional[str] = None
+    shares: List[ShareDisplay] = field(default_factory=list)
+
+
+def format_share_info(
     share_name: str,
     share_comment: str,
-    share_perms: Dict[str, Union[str, bool]],
+    share_perms: Dict[str, Any],
     largest_share_name: int,
     snaffler_marker: str = "",
-) -> None:
-    """Custom print message."""
+) -> str:
+    """Format one share row without writing to process-global stdout."""
     if share_perms["read"] and share_perms["write"]:
         prefix = Fore.GREEN + "[+]" + Style.RESET_ALL
     elif share_perms["read"] and not share_perms["write"]:
@@ -169,7 +207,21 @@ def print_share_info(
     else:
         read = "No"
 
-    if share_perms["write"] == "N/A":
+    rights = share_perms.get("write_rights", {})
+    labels: List[str] = []
+    if rights.get("generic_write") or rights.get("add_file"):
+        labels.append("Files")
+    if rights.get("add_subdirectory"):
+        labels.append("Subdirs")
+    if rights.get("write_dac") or rights.get("write_owner"):
+        labels.append("ACL")
+    if share_perms.get("write_status") == "verified":
+        labels.append("Verified")
+    if labels:
+        write = ", ".join(labels)
+    elif share_perms.get("write_status") == "unknown":
+        write = "Unknown"
+    elif share_perms["write"] == "N/A":
         write = "N/A"
     elif share_perms["write"]:
         write = "Yes"
@@ -177,7 +229,26 @@ def print_share_info(
         write = "No"
 
     # fmt: off
-    print(f"     {prefix} {share_name.ljust(largest_share_name + 20)} | Read: {read.ljust(3)} | Write: {write.ljust(3)} | Comment: {share_comment if share_comment else 'N/A'}{snaffler_marker}")
+    return f"     {prefix} {share_name.ljust(largest_share_name + 20)} | Read: {read.ljust(3)} | Write: {write.ljust(3)} | Comment: {share_comment if share_comment else 'N/A'}{snaffler_marker}"
+
+
+def print_share_info(
+    share_name: str,
+    share_comment: str,
+    share_perms: Dict[str, Any],
+    largest_share_name: int,
+    snaffler_marker: str = "",
+) -> None:
+    """Compatibility wrapper for callers that still need immediate output."""
+    print(
+        format_share_info(
+            share_name,
+            share_comment,
+            share_perms,
+            largest_share_name,
+            snaffler_marker,
+        )
+    )
 
 
 def find_unique_files_by_mtime(
@@ -399,9 +470,7 @@ class Shrawler(SnafflerEngineMixin):
     def current_host(self, value: Optional[str]) -> None:
         self._thread_context.current_host = value
 
-    def _record_operation(
-        self, name: str, elapsed: float, byte_count: int = 0
-    ) -> None:
+    def _record_operation(self, name: str, elapsed: float, byte_count: int = 0) -> None:
         """Record an operation without exposing mutable counters to workers."""
         with self._state_lock:
             self.operation_counts[name] += 1
@@ -509,9 +578,7 @@ class Shrawler(SnafflerEngineMixin):
                 return f" {Fore.YELLOW}[DOWNLOAD SKIPPED: FILE SIZE LIMIT]{Style.RESET_ALL}"
             if (
                 self.args.max_total_download is not None
-                and self.downloaded_bytes
-                + self._reserved_download_bytes
-                + file_size
+                and self.downloaded_bytes + self._reserved_download_bytes + file_size
                 > self.args.max_total_download
             ):
                 self._prefetched_content.pop(unc_key, None)
@@ -802,8 +869,8 @@ class Shrawler(SnafflerEngineMixin):
     ) -> None:
         """Upload one file with bounded exponential-backoff retries."""
         state = file_entry["nemesis"]
-        clean_remote_path = str(file_entry["remote_path"]).lstrip("/").replace(
-            "/", "\\"
+        clean_remote_path = (
+            str(file_entry["remote_path"]).lstrip("/").replace("/", "\\")
         )
         unc_path = (
             f"\\\\{file_entry['host']}\\{file_entry['share']}\\{clean_remote_path}"
@@ -904,9 +971,7 @@ class Shrawler(SnafflerEngineMixin):
             or not self.args.nemesis_auth
             or not self.args.nemesis_project
         ):
-            upload_result["last_error"] = (
-                "Nemesis URL, auth, and project are required"
-            )
+            upload_result["last_error"] = "Nemesis URL, auth, and project are required"
             return upload_result
 
         if not os.path.exists(local_file_path):
@@ -1018,6 +1083,14 @@ class Shrawler(SnafflerEngineMixin):
                 "comment",
                 "read_permission",
                 "write_permission",
+                "write_status",
+                "write_check",
+                "can_add_file",
+                "can_add_subdirectory",
+                "can_write_dac",
+                "can_write_owner",
+                "write_verified",
+                "cleanup_succeeded",
                 "unc_path",
                 "scan_timestamp_utc",
             ]
@@ -1107,7 +1180,7 @@ class Shrawler(SnafflerEngineMixin):
         """Write consolidated JSON results with private permissions."""
         self.scan_results["_schema"] = {
             "name": "shrawler-results",
-            "version": 2,
+            "version": 3,
         }
         self.scan_results["_summary"] = self._build_scan_summary()
         self.output_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -1147,6 +1220,27 @@ class Shrawler(SnafflerEngineMixin):
             ),
             "writable_shares": sum(
                 share.get("permissions", {}).get("write") is True for share in shares
+            ),
+            "write_status_unknown": sum(
+                share.get("permissions", {}).get("write_status") == "unknown"
+                for share in shares
+            ),
+            "acl_control_shares": sum(
+                bool(
+                    share.get("permissions", {})
+                    .get("write_rights", {})
+                    .get("write_dac")
+                )
+                or bool(
+                    share.get("permissions", {})
+                    .get("write_rights", {})
+                    .get("write_owner")
+                )
+                for share in shares
+            ),
+            "write_verified_shares": sum(
+                share.get("permissions", {}).get("write_status") == "verified"
+                for share in shares
             ),
             "files_seen": self.files_seen_count,
             "files_downloaded": self.download_count,
@@ -1229,13 +1323,13 @@ class Shrawler(SnafflerEngineMixin):
         default_shares: List[str],
         spider: bool = False,
         desired_share: str = "",
-    ) -> None:
+    ) -> List[ShareDisplay]:
+        display_shares: List[ShareDisplay] = []
         started = time.perf_counter()
         shares = smbclient.listShares()
         self._record_operation("list_shares", time.perf_counter() - started)
 
-        share_names = [share["shi1_netname"][:-1] for share in shares]
-        largest_share_name = max([len(name) for name in share_names], default=0)
+        share_names = [str(share["shi1_netname"]).rstrip("\x00") for share in shares]
 
         excluded_shares = set(default_shares)
         if desired_share:
@@ -1245,20 +1339,23 @@ class Shrawler(SnafflerEngineMixin):
             missing_requested = sorted(requested.difference(set(share_names)))
             if missing_requested:
                 logging.warning(
-                    f"Requested shares not found: {', '.join(missing_requested)}"
+                    f"Requested shares not found on {target}: {', '.join(missing_requested)}"
                 )
             excluded_shares = set(share_names).difference(requested)
 
         for share in shares:
-            share_name = share["shi1_netname"][:-1]
-            share_comment = share["shi1_remark"][:-1]
+            share_name = str(share["shi1_netname"]).rstrip("\x00")
+            share_comment = str(share["shi1_remark"]).rstrip("\x00")
+            share_type = int(share["shi1_type"]) & STYPE_MASK
             if share_name in excluded_shares:
                 continue
-            existing_share = self.scan_results.get(target, {}).get("shares", {}).get(
-                share_name, {}
+            existing_share = (
+                self.scan_results.get(target, {}).get("shares", {}).get(share_name, {})
             )
             if existing_share.get("status") == "complete":
-                logging.info(f"Skipping completed share from resume state: {share_name}")
+                logging.info(
+                    f"Skipping completed share from resume state: {target}\\{share_name}"
+                )
                 continue
 
             try:
@@ -1275,7 +1372,10 @@ class Shrawler(SnafflerEngineMixin):
                         continue
 
                 share_perms, root_results = self.check_share_perm(
-                    share_name, smbclient, require_listing=spider
+                    share_name,
+                    smbclient,
+                    require_listing=spider,
+                    share_type=share_type,
                 )
 
                 if target not in self.scan_results:
@@ -1287,6 +1387,7 @@ class Shrawler(SnafflerEngineMixin):
                 self.scan_results[target]["shares"][share_name] = {
                     "comment": share_comment,
                     "permissions": share_perms,
+                    "share_type": share_type,
                     "unc_path": f"\\\\{target}\\{share_name}",
                     "status": "scanning",
                     "discovered_files": existing_share.get("discovered_files", []),
@@ -1330,6 +1431,25 @@ class Shrawler(SnafflerEngineMixin):
                             "comment": share_comment,
                             "read_permission": share_perms["read"],
                             "write_permission": share_perms["write"],
+                            "write_status": share_perms.get("write_status"),
+                            "write_check": share_perms.get("write_check"),
+                            "can_add_file": share_perms.get("write_rights", {}).get(
+                                "add_file"
+                            ),
+                            "can_add_subdirectory": share_perms.get(
+                                "write_rights", {}
+                            ).get("add_subdirectory"),
+                            "can_write_dac": share_perms.get("write_rights", {}).get(
+                                "write_dac"
+                            ),
+                            "can_write_owner": share_perms.get("write_rights", {}).get(
+                                "write_owner"
+                            ),
+                            "write_verified": share_perms.get("write_status")
+                            == "verified",
+                            "cleanup_succeeded": self._cleanup_succeeded(
+                                share_perms.get("write_probe")
+                            ),
                             "unc_path": f"\\\\{target}\\{share_name}",
                             "scan_timestamp_utc": datetime.now(
                                 timezone.utc
@@ -1353,12 +1473,13 @@ class Shrawler(SnafflerEngineMixin):
                     )
                 else:
                     if self.args.output_mode == "tree" or share_snaffle_rules:
-                        print_share_info(
-                            share_name,
-                            share_comment,
-                            share_perms,
-                            largest_share_name,
-                            snaffler_share_marker,
+                        display_shares.append(
+                            ShareDisplay(
+                                name=share_name,
+                                comment=share_comment,
+                                permissions=share_perms,
+                                snaffler_marker=snaffler_share_marker,
+                            )
                         )
                 self.scan_results[target]["shares"][share_name]["status"] = "complete"
                 self.state_store.append(
@@ -1368,11 +1489,185 @@ class Shrawler(SnafflerEngineMixin):
 
             except KeyboardInterrupt:
                 raise
+        return display_shares
+
+    @staticmethod
+    def _cleanup_succeeded(probe: Optional[Dict[str, Any]]) -> Optional[bool]:
+        if not probe:
+            return None
+        cleanup = [
+            probe.get("file_deleted") if probe.get("file_created") else None,
+            probe.get("directory_deleted") if probe.get("directory_created") else None,
+        ]
+        attempted = [value for value in cleanup if value is not None]
+        return all(attempted) if attempted else None
+
+    def _check_share_write_access_masks(
+        self, share: str, smbclient: Any
+    ) -> Dict[str, Any]:
+        probes = (
+            ("generic_write", GENERIC_WRITE),
+            ("add_file", FILE_ADD_FILE),
+            ("add_subdirectory", FILE_ADD_SUBDIRECTORY),
+            ("write_dac", WRITE_DAC),
+            ("write_owner", WRITE_OWNER),
+        )
+        rights = {label: False for label, _ in probes}
+        errors: Dict[str, str] = {}
+        denied = 0
+        for label, access_mask in probes:
+            tree_id = None
+            file_id = None
+            started = time.perf_counter()
+            try:
+                tree_id = smbclient.connectTree(share)
+                file_id = smbclient.openFile(
+                    tree_id,
+                    "\\",
+                    desiredAccess=access_mask,
+                    shareMode=FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                    creationOption=FILE_DIRECTORY_FILE | FILE_SYNCHRONOUS_IO_NONALERT,
+                    creationDisposition=FILE_OPEN,
+                )
+                rights[label] = True
+            except SessionError as exc:
+                code = exc.getErrorCode()
+                if code in {STATUS_ACCESS_DENIED, STATUS_PRIVILEGE_NOT_HELD}:
+                    denied += 1
+                    logging.debug(f"{share} denied {label}: 0x{code:08x}")
+                else:
+                    errors[label] = f"0x{code:08x}"
+            except Exception as exc:
+                errors[label] = str(exc)
+            finally:
+                if file_id is not None and tree_id is not None:
+                    try:
+                        smbclient.closeFile(tree_id, file_id)
+                    except Exception as exc:
+                        errors[f"{label}_close"] = str(exc)
+                if tree_id is not None:
+                    try:
+                        smbclient.disconnectTree(tree_id)
+                    except Exception as exc:
+                        errors[f"{label}_disconnect"] = str(exc)
+                self._record_operation(
+                    "write_access_probe", time.perf_counter() - started
+                )
+        granted = any(rights.values())
+        status = (
+            "allowed" if granted else "denied" if denied == len(probes) else "unknown"
+        )
+        result: Dict[str, Any] = {
+            "write": True if granted else False if status == "denied" else "N/A",
+            "write_check": "access-mask",
+            "write_rights": rights,
+            "write_status": status,
+        }
+        if errors:
+            result["write_errors"] = errors
+        return result
+
+    def _check_share_write_empirically(
+        self, share: str, smbclient: Any
+    ) -> Dict[str, Any]:
+        file_name = f"shrawler_write_test_{uuid.uuid4().hex}.tmp"
+        directory_name = f"shrawler_write_test_{uuid.uuid4().hex}"
+        result: Dict[str, Any] = {
+            "file_created": False,
+            "file_deleted": None,
+            "directory_created": False,
+            "directory_deleted": None,
+            "residual_artifacts": [],
+        }
+
+        tree_id = None
+        file_id = None
+        try:
+            started = time.perf_counter()
+            tree_id = smbclient.connectTree(share)
+            file_id = smbclient.createFile(
+                tree_id,
+                file_name,
+                desiredAccess=GENERIC_WRITE | DELETE,
+                shareMode=FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                creationOption=FILE_NON_DIRECTORY_FILE,
+                creationDisposition=FILE_OVERWRITE_IF,
+                fileAttributes=FILE_ATTRIBUTE_NORMAL,
+            )
+            result["file_created"] = True
+            self._record_operation(
+                "write_probe_create_file", time.perf_counter() - started
+            )
+        except Exception as exc:
+            result["file_error"] = str(exc)
+        finally:
+            if file_id is not None and tree_id is not None:
+                try:
+                    smbclient.closeFile(tree_id, file_id)
+                except Exception as exc:
+                    result["file_close_error"] = str(exc)
+            if tree_id is not None:
+                try:
+                    smbclient.disconnectTree(tree_id)
+                except Exception as exc:
+                    result["file_disconnect_error"] = str(exc)
+        if result["file_created"]:
+            try:
+                started = time.perf_counter()
+                smbclient.deleteFile(share, file_name)
+                result["file_deleted"] = True
+                self._record_operation(
+                    "write_probe_delete_file", time.perf_counter() - started
+                )
+            except Exception as exc:
+                result["file_deleted"] = False
+                result["file_delete_error"] = str(exc)
+                self._record_residual_artifact(share, file_name, result)
+
+        try:
+            started = time.perf_counter()
+            smbclient.createDirectory(share, directory_name)
+            result["directory_created"] = True
+            self._record_operation(
+                "write_probe_create_directory", time.perf_counter() - started
+            )
+        except Exception as exc:
+            result["directory_error"] = str(exc)
+        if result["directory_created"]:
+            try:
+                started = time.perf_counter()
+                smbclient.deleteDirectory(share, directory_name)
+                result["directory_deleted"] = True
+                self._record_operation(
+                    "write_probe_delete_directory", time.perf_counter() - started
+                )
+            except Exception as exc:
+                result["directory_deleted"] = False
+                result["directory_delete_error"] = str(exc)
+                self._record_residual_artifact(share, directory_name, result)
+        return result
+
+    def _record_residual_artifact(
+        self, share: str, name: str, result: Dict[str, Any]
+    ) -> None:
+        path = f"\\\\{self.current_host or 'unknown-host'}\\{share}\\{name}"
+        result["residual_artifacts"].append(path)
+        logging.warning(f"Created but could not remove remote artifact: {path}")
 
     def check_share_perm(
-        self, share: str, smbclient: Any, require_listing: bool = False
-    ) -> Tuple[Dict[str, Union[str, bool]], Optional[List[Any]]]:
-        read_write = {"read": False, "write": "N/A"}
+        self,
+        share: str,
+        smbclient: Any,
+        require_listing: bool = False,
+        share_type: int = STYPE_DISKTREE,
+    ) -> Tuple[Dict[str, Any], Optional[List[Any]]]:
+        read_write: Dict[str, Any] = {
+            "read": False,
+            "write": "N/A",
+            "write_check": "none",
+            "write_rights": {},
+            "write_status": "not_checked",
+        }
         root_results: Optional[List[Any]] = None
 
         if self.args.permission_check != "none" or require_listing:
@@ -1385,39 +1680,20 @@ class Shrawler(SnafflerEngineMixin):
             finally:
                 self._record_operation("list_path", time.perf_counter() - started)
 
-        # check for write rights
         if self.args.permission_check == "read-write":
-            try:
-                # pretty much all tools that crawl shares have to attempt to write to disk.
-                # If it does not allow, you've got your write perms
-                # Downside, its possible to allow write but not delete perms.
-                # In this case, I like to specify the folder name incase this happens - you can let clients know
-                directory = f"shrawler_write_test_{uuid.uuid4().hex}"
-                created = False
-                try:
-                    started = time.perf_counter()
-                    smbclient.createDirectory(share, directory)
-                    self._record_operation(
-                        "write_probe_create", time.perf_counter() - started
-                    )
-                    created = True
-                    read_write["write"] = True
-                finally:
-                    if created:
-                        try:
-                            started = time.perf_counter()
-                            smbclient.deleteDirectory(share, directory)
-                            self._record_operation(
-                                "write_probe_delete", time.perf_counter() - started
-                            )
-                        except SessionError as cleanup_error:
-                            logging.warning(
-                                f"Created but could not remove {share}\\{directory}: "
-                                f"{cleanup_error}"
-                            )
-            except SessionError as e:
-                logging.debug(f"Full error: {e}")
-                read_write["write"] = False
+            if (share_type & STYPE_MASK) != STYPE_DISKTREE:
+                read_write["write_status"] = "not_applicable"
+            else:
+                read_write.update(
+                    self._check_share_write_access_masks(share, smbclient)
+                )
+                if getattr(self.args, "file_write_check", False):
+                    probe = self._check_share_write_empirically(share, smbclient)
+                    read_write["write_check"] = "file-write"
+                    read_write["write_probe"] = probe
+                    if probe["file_created"] or probe["directory_created"]:
+                        read_write["write"] = True
+                        read_write["write_status"] = "verified"
         return read_write, root_results
 
     def build_tree_structure(
@@ -1609,7 +1885,9 @@ class Shrawler(SnafflerEngineMixin):
                 csv_entry = dict(file_entry)
                 csv_entry.update({"can_read": None, "can_write": None})
                 self.file_rows.append(csv_entry)
-        self.state_store.append("file_discovered", host=host, share=share, file=file_entry)
+        self.state_store.append(
+            "file_discovered", host=host, share=share, file=file_entry
+        )
         return file_entry
 
     def _checkpoint_state(self) -> None:
@@ -1735,9 +2013,7 @@ class Shrawler(SnafflerEngineMixin):
             # List all items in the base directory
             if initial_results is None:
                 started = time.perf_counter()
-                results = list(
-                    smbclient.listPath(share, base_dir + "*", password=None)
-                )
+                results = list(smbclient.listPath(share, base_dir + "*", password=None))
                 self._record_operation("list_path", time.perf_counter() - started)
             else:
                 results = initial_results
@@ -2037,13 +2313,13 @@ class Shrawler(SnafflerEngineMixin):
         nthash: str,
         mach_ip: str,
         mach_name: str,
-    ) -> None:
+    ) -> HostRenderResult:
         """Scan one host using worker-local SMB state."""
         self.current_host = mach_ip
         existing = self.scan_results.get(mach_ip, {})
         if existing.get("status") == "complete":
             logging.info(f"Skipping completed host from resume state: {mach_ip}")
-            return
+            return HostRenderResult(mach_ip, mach_name, "complete")
         with self._state_lock:
             host_state = self.scan_results.setdefault(mach_ip, {"shares": {}})
             host_state.update(
@@ -2056,6 +2332,7 @@ class Shrawler(SnafflerEngineMixin):
             host_state.setdefault("shares", {})
 
         smbclient: Any = None
+        display_shares: List[ShareDisplay] = []
         try:
             smbclient = self.init_smb_session(
                 domain,
@@ -2068,9 +2345,14 @@ class Shrawler(SnafflerEngineMixin):
             if smbclient is None:
                 self.scan_results[mach_ip]["status"] = "authentication_failed"
                 self.scan_results[mach_ip]["error"] = "SMB authentication failed"
-                return
+                return HostRenderResult(
+                    mach_ip,
+                    mach_name,
+                    "authentication_failed",
+                    "SMB authentication failed",
+                )
 
-            self.get_shares(
+            display_shares = self.get_shares(
                 mach_ip,
                 mach_name,
                 smbclient,
@@ -2079,17 +2361,19 @@ class Shrawler(SnafflerEngineMixin):
                 self.args.shares,
             )
             self.scan_results[mach_ip]["status"] = "complete"
-            if self.args.output_mode == "tree":
-                print()
-                print(success(""))
+            return HostRenderResult(
+                mach_ip, mach_name, "complete", shares=display_shares
+            )
         except OSError as exc:
             self.scan_results[mach_ip]["status"] = "connection_failed"
             self.scan_results[mach_ip]["error"] = str(exc)
             logging.warning(f"Could not connect to SMB on '{mach_ip}': {exc}")
+            return HostRenderResult(mach_ip, mach_name, "connection_failed", str(exc))
         except Exception as exc:
             self.scan_results[mach_ip]["status"] = "scan_failed"
             self.scan_results[mach_ip]["error"] = str(exc)
             logging.warning(f"Scan failed for '{mach_ip}': {exc}")
+            return HostRenderResult(mach_ip, mach_name, "scan_failed", str(exc))
         finally:
             if smbclient is not None:
                 try:
@@ -2102,6 +2386,46 @@ class Shrawler(SnafflerEngineMixin):
                 status=self.scan_results.get(mach_ip, {}).get("status", "unknown"),
             )
             self._checkpoint_state()
+
+    def _effective_worker_count(self, host_count: int) -> int:
+        worker_count = min(self.args.workers, max(1, host_count))
+        if (
+            self.args.output_mode == "tree"
+            and getattr(self.args, "operating_mode", "") in {"spider", "snaffle"}
+            and worker_count > 1
+        ):
+            logging.info(
+                "Recursive tree output is serialized for readability; "
+                f"using 1 effective host worker (requested {self.args.workers}). "
+                "Use progress, matches, or summary for concurrent recursive scans."
+            )
+            return 1
+        return worker_count
+
+    @staticmethod
+    def render_host_block(result: HostRenderResult) -> str:
+        lines = [f"Host: {result.display_name}"]
+        if result.error:
+            lines.append(f"  Status: {result.status} | Error: {result.error}")
+        elif result.shares:
+            width = max(len(share.name) for share in result.shares)
+            lines.extend(
+                format_share_info(
+                    share.name,
+                    share.comment,
+                    share.permissions,
+                    width,
+                    share.snaffler_marker,
+                )
+                for share in result.shares
+            )
+        else:
+            lines.append(f"  Status: {result.status} | No shares displayed")
+        return "\n".join(lines)
+
+    def _render_host_result(self, result: HostRenderResult) -> None:
+        if self.args.output_mode == "tree" and not self.args.spider:
+            print(self.render_host_block(result), end="\n\n")
 
     def main(self) -> int:
         # Logging
@@ -2118,6 +2442,11 @@ class Shrawler(SnafflerEngineMixin):
 
         if self.args.output_mode != "progress":
             print(self.banner())
+        if getattr(self.args, "file_write_check", False):
+            logging.warning(
+                "--file-write-check will create and delete remote test objects; "
+                "cleanup failures or interruption may leave artifacts"
+            )
         # parses the argument 'target' to get the values needed
         domain, self.username, self.password, self.domain_controller = parse_target(
             self.args.target
@@ -2171,14 +2500,17 @@ class Shrawler(SnafflerEngineMixin):
             machine_names = machine_ip
 
         hosts = list(zip(machine_ip, machine_names))
-        worker_count = min(self.args.workers, max(1, len(hosts)))
-        progress = ProgressReporter(self) if self.args.output_mode == "progress" else None
+        worker_count = self._effective_worker_count(len(hosts))
+        progress = (
+            ProgressReporter(self) if self.args.output_mode == "progress" else None
+        )
         if progress:
             progress.start()
         try:
             if worker_count == 1:
                 for mach_ip, mach_name in hosts:
-                    self._scan_host(domain, lmhash, nthash, mach_ip, mach_name)
+                    result = self._scan_host(domain, lmhash, nthash, mach_ip, mach_name)
+                    self._render_host_result(result)
             else:
                 with ThreadPoolExecutor(
                     max_workers=worker_count, thread_name_prefix="shrawler-host"
@@ -2195,7 +2527,7 @@ class Shrawler(SnafflerEngineMixin):
                         for mach_ip, mach_name in hosts
                     ]
                     for future in as_completed(futures):
-                        future.result()
+                        self._render_host_result(future.result())
         finally:
             if progress:
                 progress.stop()

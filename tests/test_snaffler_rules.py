@@ -71,6 +71,7 @@ def _make_args(**overrides):
         "scan_profile": "balanced",
         "workers": None,
         "permission_check": None,
+        "file_write_check": False,
         "output_mode": None,
         "metrics": False,
         "read_only": True,
@@ -148,9 +149,7 @@ WordList = ["password"]
 Triage = "Red"
                 """.strip()
             )
-            s = _build_shrawler(
-                snaffler_rules_dir=tmp, snaffler_content_mode="relayed"
-            )
+            s = _build_shrawler(snaffler_rules_dir=tmp, snaffler_content_mode="relayed")
             client = _FakeSMBClient(b"password")
             context = {
                 "host": "host",
@@ -181,9 +180,7 @@ WordList = ["password"]
 Triage = "Red"
                 """.strip()
             )
-            s = _build_shrawler(
-                snaffler_rules_dir=tmp, snaffler_content_mode="all"
-            )
+            s = _build_shrawler(snaffler_rules_dir=tmp, snaffler_content_mode="all")
             client = _FakeSMBClient(b"password")
             context = {
                 "host": "host",

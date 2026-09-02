@@ -37,7 +37,9 @@ _LIMITS: Dict[str, Tuple[int, int]] = {
 def _parse_size(value: str) -> int:
     match = re.fullmatch(r"\s*(\d+(?:\.\d+)?)\s*([kmgt]?i?b)?\s*", value.lower())
     if not match or match.group(2) not in _SIZE_UNITS:
-        raise argparse.ArgumentTypeError("use bytes or a size such as 20MB, 2GB, or 512MiB")
+        raise argparse.ArgumentTypeError(
+            "use bytes or a size such as 20MB, 2GB, or 512MiB"
+        )
     return int(float(match.group(1)) * _SIZE_UNITS[match.group(2)])
 
 
@@ -60,8 +62,25 @@ def _scan_parser(mode: str) -> argparse.ArgumentParser:
     scan.add_argument("--profile", "--scan-profile", dest="profile", choices=PROFILES)
     scan.add_argument("--policy", choices=POLICIES)
     scan.add_argument("-v", "--verbose", action="store_true", default=None)
-    scan.add_argument("--workers", type=int)
-    scan.add_argument("--permission-check", choices=("none", "read", "read-write"))
+    scan.add_argument(
+        "--workers",
+        type=int,
+        help=(
+            "concurrent hosts (shares within each host remain sequential; "
+            "recursive tree views use one effective worker)"
+        ),
+    )
+    scan.add_argument(
+        "--permission-check",
+        choices=("none", "read", "read-write"),
+        help="permission assessment; read-write uses non-invasive server access checks",
+    )
+    scan.add_argument(
+        "--file-write-check",
+        action="store_true",
+        default=None,
+        help="create/delete verification; modifies the target and may leave artifacts",
+    )
     scan.add_argument("--metrics", action="store_true", default=None)
     scan.add_argument("--read-only", action="store_true", default=None)
     shares = parser.add_argument_group("share selection")
@@ -83,13 +102,24 @@ def _scan_parser(mode: str) -> argparse.ArgumentParser:
         if mode == "shares"
         else ("summary", "progress", "matches", "tree")
     )
-    output.add_argument("--view", "--output-mode", dest="view", choices=views)
+    output.add_argument(
+        "--view",
+        "--output-mode",
+        dest="view",
+        choices=views,
+        help=(
+            "terminal rendering; shares tree blocks are grouped by host in "
+            "completion order, while recursive tree output is serialized"
+        ),
+    )
     output.add_argument("--resume", nargs="?", const=".")
     output.add_argument("--csv-output", action="store_true", default=None)
     output.add_argument("--json-output", action="store_true", default=None)
     if mode in {"spider", "snaffle"}:
         spider = parser.add_argument_group("downloads and content analysis")
-        spider.add_argument("--download", "--download-ext", dest="download", nargs="?", const=" ")
+        spider.add_argument(
+            "--download", "--download-ext", dest="download", nargs="?", const=" "
+        )
         spider.add_argument("--limits", choices=tuple(_LIMITS))
         spider.add_argument("--max-file-size", type=_parse_size)
         spider.add_argument(
@@ -117,40 +147,76 @@ def _scan_parser(mode: str) -> argparse.ArgumentParser:
     if mode == "snaffle":
         snaffle = parser.add_argument_group("Snaffler")
         snaffle.add_argument("--rules", "--snaffler-rules-dir", dest="rules")
-        snaffle.add_argument("--interest", "--snaffler-interest-level", dest="interest", type=int, choices=range(4))
+        snaffle.add_argument(
+            "--interest",
+            "--snaffler-interest-level",
+            dest="interest",
+            type=int,
+            choices=range(4),
+        )
         snaffle.add_argument("--snaffler-max-size-to-grep", type=_parse_size)
         snaffle.add_argument("--snaffler-strict", action="store_true", default=None)
-        snaffle.add_argument("--snaffler-no-auto-download", action="store_true", default=None)
+        snaffle.add_argument(
+            "--snaffler-no-auto-download", action="store_true", default=None
+        )
         snaffle.add_argument("--snaffler-content-mode", choices=("relayed", "all"))
     return parser
 
 
-def _config_value(data: Dict[str, Any], name: str, section: Optional[str] = None) -> Any:
+def _config_value(
+    data: Dict[str, Any], name: str, section: Optional[str] = None
+) -> Any:
     source = data.get(section, {}) if section else data
     if section and not isinstance(source, dict):
         raise ValueError(f"configuration field [{section}] must be a table")
     return source.get(name) if isinstance(source, dict) else None
 
 
-def _normalize(mode: str, parsed: argparse.Namespace, config: Dict[str, Any]) -> argparse.Namespace:
-    def pick(name: str, default: Any = None, config_name: Optional[str] = None, section: Optional[str] = None, env: Optional[str] = None) -> Any:
+def _normalize(
+    mode: str, parsed: argparse.Namespace, config: Dict[str, Any]
+) -> argparse.Namespace:
+    def pick(
+        name: str,
+        default: Any = None,
+        config_name: Optional[str] = None,
+        section: Optional[str] = None,
+        env: Optional[str] = None,
+    ) -> Any:
         cli = getattr(parsed, name, None)
         configured = _config_value(config, config_name or name, section)
-        return cli if cli is not None else configured if configured is not None else os.getenv(env) if env and os.getenv(env) is not None else default
+        return (
+            cli
+            if cli is not None
+            else configured
+            if configured is not None
+            else os.getenv(env)
+            if env and os.getenv(env) is not None
+            else default
+        )
 
     profile = pick("profile", "balanced")
     if profile not in PROFILES:
-        raise ValueError(f"configuration field profile must be one of {', '.join(PROFILES)}")
+        raise ValueError(
+            f"configuration field profile must be one of {', '.join(PROFILES)}"
+        )
     policy = pick("policy", "audit" if mode == "shares" else "collect")
     if policy not in POLICIES:
-        raise ValueError(f"configuration field policy must be one of {', '.join(POLICIES)}")
-    defaults = {"quiet": (1, "matches"), "balanced": (4, "matches"), "fast": (8, "summary")}[profile]
+        raise ValueError(
+            f"configuration field policy must be one of {', '.join(POLICIES)}"
+        )
+    defaults = {
+        "quiet": (1, "matches"),
+        "balanced": (4, "matches"),
+        "fast": (8, "summary"),
+    }[profile]
     parsed.operating_mode = mode
     parsed.scan_profile = profile
     parsed.policy = policy
     parsed.spider = mode != "shares"
     parsed.workers = pick("workers", defaults[0])
-    parsed.permission_check = pick("permission_check", "read")
+    explicit_permission_check = parsed.permission_check is not None
+    parsed.permission_check = pick("permission_check", "read-write")
+    parsed.file_write_check = bool(parsed.file_write_check)
     parsed.output_mode = pick("view", "tree" if mode == "shares" else defaults[1])
     parsed.output_dir = pick("output", ".")
     if parsed.resume and parsed.output is None:
@@ -165,14 +231,22 @@ def _normalize(mode: str, parsed: argparse.Namespace, config: Dict[str, Any]) ->
     if parsed.shares:
         included.extend(x.strip() for x in parsed.shares.split(",") if x.strip())
     parsed.shares = ",".join(included) if included else None
-    excluded = list(parsed.exclude_share or (_config_value(config, "exclude_shares") or []))
+    excluded = list(
+        parsed.exclude_share or (_config_value(config, "exclude_shares") or [])
+    )
     parsed.skip_share = ",".join(excluded) if excluded else None
     parsed.no_pass = bool(parsed.no_pass)
     parsed.k = bool(parsed.k)
     parsed.verbose = bool(parsed.verbose)
     parsed.metrics = bool(parsed.metrics)
-    parsed.read_only = bool(parsed.read_only) or policy == "audit"
-    if policy == "aggressive":
+    parsed.read_only = bool(parsed.read_only)
+    if parsed.file_write_check and parsed.read_only:
+        raise ValueError("--read-only cannot be combined with --file-write-check")
+    if parsed.file_write_check and parsed.permission_check in {"none", "read"}:
+        if explicit_permission_check or parsed.read_only:
+            raise ValueError(
+                "--file-write-check requires --permission-check read-write"
+            )
         parsed.permission_check = "read-write"
     if parsed.read_only:
         parsed.permission_check = "read"
@@ -186,37 +260,59 @@ def _normalize(mode: str, parsed: argparse.Namespace, config: Dict[str, Any]) ->
     parsed.download_name = getattr(parsed, "download_name", None)
     parsed.max_content_reads = getattr(parsed, "max_content_reads", None)
     parsed.content_read_budget = getattr(parsed, "content_read_budget", None)
-    parsed.snaffler_rules_dir = pick("rules", None, section="snaffle") if mode == "snaffle" else None
-    parsed.snaffler_interest_level = pick("interest", 0, section="snaffle") if mode == "snaffle" else None
+    parsed.snaffler_rules_dir = (
+        pick("rules", None, section="snaffle") if mode == "snaffle" else None
+    )
+    parsed.snaffler_interest_level = (
+        pick("interest", 0, section="snaffle") if mode == "snaffle" else None
+    )
     parsed.snaffler_max_size_to_grep = pick("snaffler_max_size_to_grep", 1024**2)
     parsed.snaffler_strict = bool(getattr(parsed, "snaffler_strict", False))
-    parsed.snaffler_no_auto_download = bool(getattr(parsed, "snaffler_no_auto_download", False))
+    parsed.snaffler_no_auto_download = bool(
+        getattr(parsed, "snaffler_no_auto_download", False)
+    )
     parsed.snaffler_content_mode = pick("snaffler_content_mode", "relayed")
     parsed.nemesis_url = pick("nemesis_url", None, "url", "nemesis", "NEMESIS_URL")
     parsed.nemesis_auth = pick("nemesis_auth", None, "auth", "nemesis", "NEMESIS_AUTH")
-    parsed.nemesis_project = pick("nemesis_project", None, "project", "nemesis", "NEMESIS_PROJECT")
+    parsed.nemesis_project = pick(
+        "nemesis_project", None, "project", "nemesis", "NEMESIS_PROJECT"
+    )
     parsed.nemesis_mode = pick("nemesis_mode", "off", "mode", "nemesis")
-    parsed.nemesis_upload_workers = pick("nemesis_upload_workers", 2, "upload_workers", "nemesis")
+    parsed.nemesis_upload_workers = pick(
+        "nemesis_upload_workers", 2, "upload_workers", "nemesis"
+    )
     parsed.nemesis_retries = pick("nemesis_retries", 2, "retries", "nemesis")
     parsed.nemesis_queue_size = pick("nemesis_queue_size", 100, "queue_size", "nemesis")
     limits = pick("limits", "standard")
     if mode != "shares":
         file_limit, total_limit = _LIMITS[limits]
-        parsed.max_file_size = parsed.max_file_size if parsed.max_file_size is not None else (file_limit or None)
-        parsed.max_total_download = parsed.max_total_download if parsed.max_total_download is not None else (total_limit or None)
+        parsed.max_file_size = (
+            parsed.max_file_size
+            if parsed.max_file_size is not None
+            else (file_limit or None)
+        )
+        parsed.max_total_download = (
+            parsed.max_total_download
+            if parsed.max_total_download is not None
+            else (total_limit or None)
+        )
     else:
         parsed.max_file_size = parsed.max_total_download = None
     _, _, _, embedded_host = parse_target(parsed.target)
     if parsed.hosts_file:
         path = Path(parsed.hosts_file)
         try:
-            hosts = [line.split("#", 1)[0].strip() for line in path.read_text().splitlines()]
+            hosts = [
+                line.split("#", 1)[0].strip() for line in path.read_text().splitlines()
+            ]
         except OSError as exc:
             raise ValueError(f"cannot read --hosts-file {path}: {exc}") from exc
         if not any(hosts):
             raise ValueError(f"--hosts-file {path} contains no hosts")
     elif not parsed.host and not embedded_host:
-        raise ValueError("no target host provided; embed one in TARGET or use --host/--hosts-file")
+        raise ValueError(
+            "no target host provided; embed one in TARGET or use --host/--hosts-file"
+        )
     for name, minimum in (
         ("workers", 1),
         ("max_depth", 0),
@@ -257,7 +353,9 @@ def _normalize(mode: str, parsed: argparse.Namespace, config: Dict[str, Any]) ->
     return parsed
 
 
-def parse_scan_options(mode: str, arguments: List[str], config: Optional[Dict[str, Any]] = None) -> argparse.Namespace:
+def parse_scan_options(
+    mode: str, arguments: List[str], config: Optional[Dict[str, Any]] = None
+) -> argparse.Namespace:
     parser = _scan_parser(mode)
     parsed = parser.parse_args(arguments)
     try:
@@ -267,7 +365,9 @@ def parse_scan_options(mode: str, arguments: List[str], config: Optional[Dict[st
 
 
 def _print_top_level_help() -> None:
-    print("""usage: shrawler <command> [options]\n\ncommands:\n  shares\n  spider\n  snaffle\n  report\n  config\n\nRun 'shrawler <command> --help' for all command options.""")
+    print(
+        """usage: shrawler <command> [options]\n\ncommands:\n  shares\n  spider\n  snaffle\n  report\n  config\n\nRun 'shrawler <command> --help' for all command options."""
+    )
 
 
 def main(argv: Optional[List[str]] = None) -> None:

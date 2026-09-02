@@ -99,6 +99,9 @@ The original `shrawler TARGET [options]` syntax remains available for compatibil
 | **`target`** | **Required**. Specifies the target and credentials. Format: `[[domain/]username[:password]@]<dc-ip>` |
 | `--profile <quiet|balanced|fast>` | Select a noise and concurrency preset. |
 | `--policy <audit|collect|aggressive>` | Select safe enumeration, selective collection, or comprehensive acquisition. |
+| `--permission-check <none|read|read-write>` | Select permission checks. The default `read-write` mode lists the root and performs non-invasive server access-mask probes without creating files. |
+| `--file-write-check` | Explicitly create/delete temporary file and directory objects to verify writes. This modifies the target briefly and may leave artifacts if cleanup is denied or interrupted. |
+| `--read-only` | Compatibility alias for `--permission-check read`. |
 | `--share <name>` | Scan only this share. Repeat to select more shares. |
 | `--exclude-share <name>` | Skip this share. Repeat to exclude more shares. |
 | `-o`, `--output <path>` | Set the results directory. |
@@ -119,6 +122,42 @@ diagnostic, target-selection, and tuning controls relevant to that mode.
 `--host` overrides only the host embedded in `target`; credentials remain unchanged.
 Use `--hosts-file` for multiple targets (one host per non-empty line, with `#`
 comments supported). `--host` and `--hosts-file` are mutually exclusive.
+
+### Share Permission Checks and OPSEC
+
+By default, every profile and policy uses `--permission-check read-write`. Shrawler
+checks read access once with `listPath` and reuses that listing for spidering. For
+disk-tree shares, it then opens the existing share root with `FILE_OPEN` and asks
+the SMB server independently for `GENERIC_WRITE`, file creation, subdirectory
+creation, ACL modification, and ownership-control rights. These checks do not
+create, modify, rename, or delete remote objects. IPC, printer, device, and other
+non-filesystem shares are not write-probed.
+
+The result reports direct file rights (`generic_write` or `add_file`), directory
+creation (`add_subdirectory`), ACL control (`write_dac`), and ownership control
+(`write_owner`) separately. A granted mask means the SMB server authorized that
+right on the share root; it does not guarantee a completed write. AV/EDR, quotas,
+application policy, or deeper-directory ACLs can produce different effective
+behavior, and writable subdirectories can exist beneath a non-writable root.
+
+Use empirical verification only with direct intent:
+
+```bash
+# Default: root listing plus non-invasive write-rights assessment
+shrawler shares TARGET
+
+# Read check only
+shrawler shares TARGET --permission-check read
+
+# Mutating create/delete verification
+shrawler shares TARGET --file-write-check
+```
+
+`--file-write-check` independently creates/deletes recognizable randomized file
+and directory names beginning with `shrawler_write_test_`. Cleanup results and
+residual UNC paths are saved. Cleanup can fail or interruption can leave artifacts.
+It never runs as a fallback from an inconclusive access-mask probe, and no profile
+or policy enables it implicitly. `--read-only --file-write-check` is rejected.
 
 ### Progress, Checkpoints, and Resume
 
@@ -422,9 +461,8 @@ Snaffler v1 support matrix in Shrawler:
 
 **Example shrawler_shares.csv:**
 ```csv
-host,share_name,comment,read_permission,write_permission,unc_path,scan_timestamp_utc
-192.168.1.100,backup,Backup files,True,True,\\192.168.1.100\backup,2025-08-16T14:30:15+00:00
-192.168.1.100,data,Company Data,True,False,\\192.168.1.100\data,2025-08-16T14:30:15+00:00
+host,share_name,comment,read_permission,write_permission,write_status,write_check,can_add_file,can_add_subdirectory,can_write_dac,can_write_owner,write_verified,cleanup_succeeded,unc_path,scan_timestamp_utc
+192.168.1.100,backup,Backup files,True,True,allowed,access-mask,True,False,False,False,False,,\\192.168.1.100\backup,2025-08-16T14:30:15+00:00
 ```
 
 **Example shrawler_files.csv:**
@@ -534,7 +572,19 @@ All scan data including share enumeration and downloaded files are tracked in `s
     "shares": {
       "backup": {
         "comment": "Backup files",
-        "permissions": {"read": true, "write": true},
+        "permissions": {
+          "read": true,
+          "write": true,
+          "write_check": "access-mask",
+          "write_status": "allowed",
+          "write_rights": {
+            "generic_write": false,
+            "add_file": true,
+            "add_subdirectory": false,
+            "write_dac": false,
+            "write_owner": false
+          }
+        },
         "unc_path": "\\\\192.168.1.100\\backup",
         "downloaded_files": [
           {
@@ -602,9 +652,14 @@ When using `--download-ext default` or `--count-ext` without arguments, Shrawler
 | `downloads/` | Directory containing all downloaded files with sanitized names |
 | `.env` | Optional environment configuration file |
 
-JSON output uses schema version 2. It includes `_schema` and `_summary` metadata,
+JSON output uses schema version 3. It includes `_schema` and `_summary` metadata,
 per-host `status` and `error` fields, discovered-file records for each share, and
-download records containing the actual size and SHA-256 digest.
+download records containing the actual size and SHA-256 digest. Version 3 retains
+the aggregate `permissions.read` and `permissions.write` fields while adding
+`write_status`, `write_check`, `write_rights`, and optional empirical `write_probe`
+evidence. Version 2 resume state remains loadable; legacy shares keep their old
+aggregate values without synthesized granular rights. Share CSV adds stable scalar
+columns for granular rights, empirical verification, and cleanup outcomes.
 
 ### Exit Codes
 
@@ -652,14 +707,34 @@ Downloaded files are automatically sanitized for cross-platform compatibility:
 - **Read Reuse**: Content fetched for Snaffler is reused when that file is downloaded
 - **Bounded Host Concurrency**: Independent hosts are scanned concurrently without parallelizing a single share tree
 
+### Concurrent output
+
+`--workers` controls concurrent hosts; shares on each host are always processed
+sequentially. In `shares --view tree`, each completed host is printed as one
+contiguous block. With multiple workers these blocks appear in host-completion
+order, which may differ from hosts-file order.
+
+Recursive `spider --view tree` and `snaffle --view tree` scans use one effective
+host worker to prevent file-tree output from interleaving, and print a message
+when a larger worker count was requested. Use `progress`, `matches`, or `summary`
+to retain host concurrency for recursive scans.
+
+```bash
+# Four hosts scan concurrently; each share list prints as one host block.
+shrawler shares TARGET --hosts-file hosts.txt --workers 4 --view tree
+
+# Concurrent recursive scan with compact terminal rendering.
+shrawler spider TARGET --hosts-file hosts.txt --workers 8 --view progress
+```
+
 | Profile | Workers | Permission checks | Terminal output | Content mode |
 | :--- | ---: | :--- | :--- | :--- |
-| `quiet` | 1 | Read | Matches | Relayed |
-| `balanced` | 4 | Read | Matches | Relayed |
-| `fast` | 8 | Read | Summary | Relayed |
+| `quiet` | 1 | Non-invasive read/write | Matches | Relayed |
+| `balanced` | 4 | Non-invasive read/write | Matches | Relayed |
+| `fast` | 8 | Non-invasive read/write | Summary | Relayed |
 
-Use `--permission-check read-write` only when an explicit write/delete probe is
-needed. `--snaffler-content-mode all` restores exhaustive content-rule scanning
+Use `--file-write-check` only when explicit create/delete verification is needed.
+`--snaffler-content-mode all` restores exhaustive content-rule scanning
 but can generate substantially more SMB traffic.
 
 -----
