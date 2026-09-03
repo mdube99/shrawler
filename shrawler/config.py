@@ -13,7 +13,6 @@ except ModuleNotFoundError:
 DEFAULT_CONFIG = """# Shrawler defaults. Command-line options override these values.
 # Run `shrawler config options` to see valid values and environment alternatives.
 profile = "balanced"
-policy = "audit"
 view = "progress"
 format = "console"
 
@@ -30,10 +29,9 @@ queue_size = 100
 CONFIG_OPTIONS = """Shrawler configuration options
 
 Top level:
-  profile   quiet | balanced | fast
-  policy    audit | collect | aggressive
-  view      summary | progress | matches | tree
-  format    console | json | csv | all
+  profile   quiet | balanced | fast (default: balanced)
+  view      summary | progress | matches | tree (mode/profile dependent)
+  format    console | csv (default: console; JSON is always saved)
   output    results directory path
   shares    list of included share names
   exclude_shares  list of excluded share names
@@ -48,17 +46,20 @@ Top level:
   queue_size      positive integer
 
 [snaffle]:
-  rules     Snaffler rules directory
-  interest  0 | 1 | 2 | 3
+  rules     Snaffler rules directory (required by snaffle mode)
+  interest  0 | 1 | 2 | 3 (default: 0)
 
 Command-line arguments override values from the configuration file.
+Run `shrawler COMMAND --help` for scan and integration controls.
 """
 
 
 def config_path() -> Path:
     root = os.getenv("XDG_CONFIG_HOME")
-    return Path(root).expanduser() / "shrawler" / "config.toml" if root else (
-        Path.home() / ".config" / "shrawler" / "config.toml"
+    return (
+        Path(root).expanduser() / "shrawler" / "config.toml"
+        if root
+        else (Path.home() / ".config" / "shrawler" / "config.toml")
     )
 
 
@@ -71,4 +72,3 @@ def load_config(path: Optional[Path] = None) -> Dict[str, Any]:
     if not isinstance(data, dict):
         raise ValueError(f"Configuration root must be a table: {selected}")
     return data
-

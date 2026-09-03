@@ -19,21 +19,20 @@ class OperatingModeTests(unittest.TestCase):
     def test_shares_help_only_shows_share_relevant_options(self):
         help_text = self._mode_help("shares")
 
-        self.assertIn("--policy", help_text)
         self.assertIn("--format", help_text)
         self.assertIn("--view", help_text)
         self.assertIn("--output-mode", help_text)
-        self.assertNotIn("--download", help_text)
-        self.assertNotIn("--nemesis", help_text)
+        self.assertNotIn("--download-ext", help_text)
+        self.assertNotIn("--nemesis-url", help_text)
         self.assertNotIn("--rules", help_text)
 
     def test_spider_help_includes_acquisition_but_not_snaffler(self):
         help_text = self._mode_help("spider")
 
-        self.assertIn("--download", help_text)
+        self.assertIn("--download-ext", help_text)
         self.assertIn("--limits", help_text)
         self.assertIn("--view", help_text)
-        self.assertIn("--nemesis", help_text)
+        self.assertIn("--nemesis-url", help_text)
         self.assertNotIn("--rules", help_text)
 
     def test_snaffle_help_includes_rules_and_content_controls(self):
@@ -41,7 +40,23 @@ class OperatingModeTests(unittest.TestCase):
 
         self.assertIn("--rules", help_text)
         self.assertIn("--interest", help_text)
-        self.assertIn("--nemesis", help_text)
+        self.assertIn("--nemesis-url", help_text)
+
+    def test_top_level_help_describes_commands(self):
+        output = io.StringIO()
+        with redirect_stdout(output):
+            cli.main(["--help"])
+        help_text = output.getvalue()
+        self.assertIn("shares    Enumerate shares", help_text)
+        self.assertIn("examples:", help_text)
+
+    def test_config_help_exits_successfully(self):
+        for option in ("--help", "-h"):
+            output = io.StringIO()
+            with redirect_stdout(output), self.assertRaises(SystemExit) as context:
+                cli.main(["config", option])
+            self.assertEqual(context.exception.code, 0)
+            self.assertIn("persistent TOML configuration", output.getvalue())
 
     def test_spider_command_translates_to_operating_mode(self):
         with mock.patch.object(cli, "scan_main") as scan_main:
@@ -121,9 +136,7 @@ class OperatingModeTests(unittest.TestCase):
                 )
 
             updated = json.loads(results_path.read_text())
-            state = updated["host"]["shares"]["DATA"]["downloaded_files"][0][
-                "nemesis"
-            ]
+            state = updated["host"]["shares"]["DATA"]["downloaded_files"][0]["nemesis"]
             self.assertEqual(exit_code, 0)
             self.assertEqual(state["status"], "uploaded")
             self.assertEqual(state["response_id"], "file-123")

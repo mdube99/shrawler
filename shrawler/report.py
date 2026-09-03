@@ -69,7 +69,11 @@ def _upload_file(
                 timeout=30,
             )
         if response.status_code not in {200, 201}:
-            return {"success": False, "response_id": None, "error": f"HTTP {response.status_code}"}
+            return {
+                "success": False,
+                "response_id": None,
+                "error": f"HTTP {response.status_code}",
+            }
         try:
             response_id = response.json().get("id")
         except (json.JSONDecodeError, AttributeError):
@@ -141,24 +145,59 @@ def _print_summary(results: Dict[str, Any]) -> None:
     print(f"Files seen: {summary.get('files_seen', 'unknown')}")
     print(f"Files downloaded: {len(downloads)}")
     if statuses:
-        formatted = ", ".join(f"{key}={value}" for key, value in sorted(statuses.items()))
+        formatted = ", ".join(
+            f"{key}={value}" for key, value in sorted(statuses.items())
+        )
         print(f"Nemesis: {formatted}")
 
 
 def main(argv: Optional[List[str]] = None) -> int:
     """Run the saved-result report workflow."""
-    parser = argparse.ArgumentParser(prog="shrawler report")
-    parser.add_argument("results", type=Path, help="Path to shrawler_results.json")
+    parser = argparse.ArgumentParser(
+        prog="shrawler report",
+        description="Summarize a saved scan without reconnecting to SMB.",
+        epilog="Example: shrawler report ./results/shrawler_results.json --retry-failed",
+    )
+    parser.add_argument(
+        "results", type=Path, metavar="RESULTS", help="path to shrawler_results.json"
+    )
     parser.add_argument(
         "--retry-failed",
         action="store_true",
-        help="Retry failed or interrupted Nemesis uploads",
+        help="retry failed or interrupted Nemesis uploads and update RESULTS",
     )
-    parser.add_argument("--nemesis-url", default=os.getenv("NEMESIS_URL"))
-    parser.add_argument("--nemesis-auth", default=os.getenv("NEMESIS_AUTH"))
-    parser.add_argument("--nemesis-project", default=os.getenv("NEMESIS_PROJECT"))
-    parser.add_argument("--nemesis-upload-workers", type=int, default=2)
-    parser.add_argument("--nemesis-retries", type=int, default=2)
+    parser.add_argument(
+        "--nemesis-url",
+        metavar="URL",
+        default=os.getenv("NEMESIS_URL"),
+        help="Nemesis API base URL (or NEMESIS_URL)",
+    )
+    parser.add_argument(
+        "--nemesis-auth",
+        metavar="USER:PASSWORD",
+        default=os.getenv("NEMESIS_AUTH"),
+        help="Nemesis API authentication (or NEMESIS_AUTH)",
+    )
+    parser.add_argument(
+        "--nemesis-project",
+        metavar="PROJECT",
+        default=os.getenv("NEMESIS_PROJECT"),
+        help="Nemesis project name (or NEMESIS_PROJECT)",
+    )
+    parser.add_argument(
+        "--nemesis-upload-workers",
+        type=int,
+        default=2,
+        metavar="N",
+        help="concurrent uploads (default: 2)",
+    )
+    parser.add_argument(
+        "--nemesis-retries",
+        type=int,
+        default=2,
+        metavar="N",
+        help="retries after an upload failure (default: 2)",
+    )
     args = parser.parse_args(argv)
 
     if not args.results.is_file():
@@ -207,9 +246,7 @@ def main(argv: Optional[List[str]] = None) -> int:
                 for entry in retryable
             ]
             completed = [future.result() for future in as_completed(futures)]
-        nemesis_summary = results.setdefault("_summary", {}).setdefault(
-            "nemesis", {}
-        )
+        nemesis_summary = results.setdefault("_summary", {}).setdefault("nemesis", {})
         all_downloads = list(_iter_downloads(results))
         nemesis_summary.update(
             {

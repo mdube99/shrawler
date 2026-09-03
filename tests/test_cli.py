@@ -2,7 +2,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from shrawler.cli import _parse_size, _scan_parser, parse_scan_options
+from shrawler.cli import _config_parser, _parse_size, _scan_parser, parse_scan_options
 
 
 class CanonicalCliTests(unittest.TestCase):
@@ -20,12 +20,6 @@ class CanonicalCliTests(unittest.TestCase):
             options = parse_scan_options(mode, arguments, {})
             self.assertTrue(options.file_write_check)
             self.assertEqual(options.permission_check, "read-write")
-
-    def test_read_only_conflicts_with_file_write_check(self):
-        with self.assertRaises(SystemExit):
-            parse_scan_options(
-                "shares", ["user@host", "--read-only", "--file-write-check"], {}
-            )
 
     def test_configured_read_is_upgraded_by_explicit_file_write_check(self):
         options = parse_scan_options(
@@ -49,16 +43,13 @@ class CanonicalCliTests(unittest.TestCase):
                     {},
                 )
 
-    def test_profiles_and_policies_never_enable_file_write_check(self):
+    def test_profiles_never_enable_file_write_check(self):
         for profile in ("quiet", "balanced", "fast"):
-            for policy in ("audit", "collect", "aggressive"):
-                options = parse_scan_options(
-                    "shares",
-                    ["user@host", "--profile", profile, "--policy", policy],
-                    {},
-                )
-                self.assertFalse(options.file_write_check)
-                self.assertEqual(options.permission_check, "read-write")
+            options = parse_scan_options(
+                "shares", ["user@host", "--profile", profile], {}
+            )
+            self.assertFalse(options.file_write_check)
+            self.assertEqual(options.permission_check, "read-write")
 
     def test_human_readable_sizes(self):
         self.assertEqual(_parse_size("20MB"), 20_000_000)
@@ -78,10 +69,10 @@ class CanonicalCliTests(unittest.TestCase):
                 "--workers",
                 "12",
                 "--format",
-                "all",
+                "csv",
                 "--output",
                 "results",
-                "--download",
+                "--download-ext",
                 ".docx",
                 "--download-budget",
                 "1GiB",
@@ -94,6 +85,29 @@ class CanonicalCliTests(unittest.TestCase):
         self.assertTrue(options.csv_output)
         self.assertTrue(options.json_output)
         self.assertEqual(options.max_total_download, 1024**3)
+
+    def test_format_controls_only_additional_csv_output(self):
+        console = parse_scan_options("shares", ["user@host"], {})
+        csv = parse_scan_options("shares", ["user@host", "--format", "csv"], {})
+        self.assertFalse(console.csv_output)
+        self.assertTrue(console.json_output)
+        self.assertTrue(csv.csv_output)
+        self.assertTrue(csv.json_output)
+
+    def test_removed_flags_are_rejected(self):
+        removed = (
+            "--json-output",
+            "--csv-output",
+            "--skip-share",
+            "--read-only",
+            "--output-dir",
+            "--download",
+            "--max-total-download",
+            "--nemesis",
+        )
+        for option in removed:
+            with self.subTest(option=option), self.assertRaises(SystemExit):
+                _scan_parser("spider").parse_args(["user@host", option])
 
     def test_hosts_file_composes_with_view(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -120,7 +134,7 @@ class CanonicalCliTests(unittest.TestCase):
     def test_config_precedence_cli_then_toml_then_environment(self):
         options = parse_scan_options(
             "spider",
-            ["user@host", "--profile", "fast", "--nemesis", "cli"],
+            ["user@host", "--profile", "fast", "--nemesis-url", "cli"],
             {"profile": "quiet", "nemesis": {"url": "toml"}},
         )
         self.assertEqual(options.scan_profile, "fast")
@@ -137,7 +151,7 @@ class CanonicalCliTests(unittest.TestCase):
                 "matches",
                 "--shares",
                 "A,B",
-                "--skip-share",
+                "--exclude-share",
                 "C",
                 "--snaffler-rules-dir",
                 "rules",
@@ -160,6 +174,20 @@ class CanonicalCliTests(unittest.TestCase):
         self.assertNotIn("help-advanced", help_text)
         self.assertIn("non-invasive", help_text)
         self.assertIn("may leave artifacts", help_text)
+
+    def test_help_explains_authentication_defaults_and_optional_values(self):
+        help_text = _scan_parser("spider").format_help()
+        normalized_help = " ".join(help_text.split())
+        self.assertIn("Kerberos authentication", help_text)
+        self.assertIn("default: balanced", normalized_help)
+        self.assertIn("default: standard", normalized_help)
+        self.assertIn("omit EXTENSIONS for all files", normalized_help)
+        self.assertIn("if omitted, use the current directory", normalized_help)
+
+    def test_config_help_describes_each_action(self):
+        help_text = _config_parser().format_help()
+        for action in ("init", "show", "path", "options"):
+            self.assertIn(action, help_text)
 
 
 if __name__ == "__main__":

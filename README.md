@@ -98,21 +98,19 @@ The original `shrawler TARGET [options]` syntax remains available for compatibil
 | :--- | :--- |
 | **`target`** | **Required**. Specifies the target and credentials. Format: `[[domain/]username[:password]@]<dc-ip>` |
 | `--profile <quiet|balanced|fast>` | Select a noise and concurrency preset. |
-| `--policy <audit|collect|aggressive>` | Select safe enumeration, selective collection, or comprehensive acquisition. |
 | `--permission-check <none|read|read-write>` | Select permission checks. The default `read-write` mode lists the root and performs non-invasive server access-mask probes without creating files. |
 | `--file-write-check` | Explicitly create/delete temporary file and directory objects to verify writes. This modifies the target briefly and may leave artifacts if cleanup is denied or interrupted. |
-| `--read-only` | Compatibility alias for `--permission-check read`. |
 | `--share <name>` | Scan only this share. Repeat to select more shares. |
 | `--exclude-share <name>` | Skip this share. Repeat to exclude more shares. |
 | `-o`, `--output <path>` | Set the results directory. |
-| `--format <console|json|csv|all>` | Select saved result formats. |
+| `--format <console|csv>` | Add CSV reports when selected; JSON results are always saved. |
 | `--view <summary|progress|matches|tree>` | Select terminal detail; interactive terminals default to a single updating progress line. `--output-mode` remains an alias. |
 | `--resume [path]` | Resume a scan from its output directory, skipping completed hosts, shares, and discovered paths. |
-| `--download [extensions]` | Download the default set or comma-separated extensions. |
+| `--download-ext [extensions]` | Download all files when no value is supplied, the default set, or comma-separated extensions. |
 | `--limits <conservative|standard|unlimited>` | Select download size limits. |
 | `--max-file-size <size>` | Override the per-file limit with a readable size such as `20MB`. |
 | `--download-budget <size>` | Override the run limit with a readable size such as `2GB`. |
-| `--nemesis <url>` | Deliver downloads to Nemesis using environment credentials. |
+| `--nemesis-url <url>` | Set the Nemesis API URL. |
 | `--rules <path>` | Load Snaffler rules recursively (required by `snaffle`). |
 | `--interest <0-3>` | Set the minimum Snaffler interest level. |
 
@@ -125,7 +123,7 @@ comments supported). `--host` and `--hosts-file` are mutually exclusive.
 
 ### Share Permission Checks and OPSEC
 
-By default, every profile and policy uses `--permission-check read-write`. Shrawler
+By default, every profile uses `--permission-check read-write`. Shrawler
 checks read access once with `listPath` and reuses that listing for spidering. For
 disk-tree shares, it then opens the existing share root with `FILE_OPEN` and asks
 the SMB server independently for `GENERIC_WRITE`, file creation, subdirectory
@@ -157,7 +155,7 @@ shrawler shares TARGET --file-write-check
 and directory names beginning with `shrawler_write_test_`. Cleanup results and
 residual UNC paths are saved. Cleanup can fail or interruption can leave artifacts.
 It never runs as a fallback from an inconclusive access-mask probe, and no profile
-or policy enables it implicitly. `--read-only --file-write-check` is rejected.
+enables it implicitly. `--permission-check read --file-write-check` is rejected.
 
 ### Progress, Checkpoints, and Resume
 
@@ -191,7 +189,6 @@ variables, then mode/profile defaults. A configuration may contain:
 
 ```toml
 profile = "quiet"
-policy = "audit"
 view = "progress"
 format = "json"
 output = "./results"
@@ -430,7 +427,7 @@ shrawler user:Password123@192.168.1.100 --host 192.168.1.100 --spider \
 Output scan results in CSV format instead of JSON:
 
 ```bash
-shrawler user:Password123@192.168.1.100 --host 192.168.1.100 --spider --csv-output
+shrawler user:Password123@192.168.1.100 --host 192.168.1.100 --spider --format csv
 ```
 
 This will generate three CSV files:
@@ -448,7 +445,7 @@ shrawler user:Password123@192.168.1.100 --host 192.168.1.100 --spider \
   --snaffler-rules-dir ./rules/snaffler/default \
   --snaffler-interest-level 1 \
   --snaffler-max-size-to-grep 1048576 \
-  --csv-output --json-output
+  --format csv
 ```
 
 Snaffler v1 support matrix in Shrawler:
@@ -644,11 +641,11 @@ When using `--download-ext default` or `--count-ext` without arguments, Shrawler
 
 | File | Description |
 | :--- | :--- |
-| `shrawler_results.json` | Consolidated scan results generated with `--json-output`. |
-| `shrawler_shares.csv` | Share enumeration data in CSV format (generated with --csv-output) |
-| `shrawler_files.csv` | All discovered files during spidering in CSV format (generated with --csv-output) |
-| `shrawler_downloads.csv` | Downloaded files metadata in CSV format (generated with --csv-output) |
-| `shrawler_snaffler_matches.csv` | Snaffler match records (generated when `--csv-output` and `--snaffler-rules-dir` are used) |
+| `shrawler_results.json` | Consolidated scan results generated automatically. |
+| `shrawler_shares.csv` | Share enumeration data in CSV format (generated with `--format csv`) |
+| `shrawler_files.csv` | All discovered files during spidering in CSV format (generated with `--format csv`) |
+| `shrawler_downloads.csv` | Downloaded files metadata in CSV format (generated with `--format csv`) |
+| `shrawler_snaffler_matches.csv` | Snaffler match records (generated with `--format csv` in Snaffler mode) |
 | `downloads/` | Directory containing all downloaded files with sanitized names |
 | `.env` | Optional environment configuration file |
 
@@ -742,7 +739,7 @@ but can generate substantially more SMB traffic.
 ## 🔍 Tips and Best Practices
 
 1. **Start with enumeration only** before enabling spider mode to understand share structure
-2. **Use `--read-only`** for faster scanning when write permissions aren't needed
+2. **Use `--permission-check read`** when write permissions aren't needed
 3. **Combine analysis features** (`--count-ext`, `--unique`, `--count-string`) for comprehensive reconnaissance
 4. **Set appropriate delays** (`--delay 0.2-0.5`) when scanning production systems
 5. **Use environment variables** for Nemesis configuration to avoid exposing credentials in command line

@@ -15,8 +15,7 @@ from .report import main as report_main
 
 SCAN_MODES = {"shares", "spider", "snaffle"}
 PROFILES = ("quiet", "balanced", "fast")
-POLICIES = ("audit", "collect", "aggressive")
-FORMATS = ("console", "json", "csv", "all")
+FORMATS = ("console", "csv")
 _SIZE_UNITS = {
     "": 1,
     "b": 1,
@@ -44,24 +43,68 @@ def _parse_size(value: str) -> int:
 
 
 def _scan_parser(mode: str) -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog=f"shrawler {mode}")
-    parser.add_argument("target", help="[[domain/]username[:password]@]<host>")
+    descriptions = {
+        "shares": "Enumerate SMB shares and assess their permissions.",
+        "spider": "Recursively inventory files on readable SMB shares.",
+        "snaffle": "Spider SMB shares and classify files with Snaffler rules.",
+    }
+    parser = argparse.ArgumentParser(
+        prog=f"shrawler {mode}",
+        description=descriptions[mode],
+        epilog=f"Example: shrawler {mode} DOMAIN/user@server"
+        + (" --rules ./SnafflerRules" if mode == "snaffle" else ""),
+    )
+    parser.add_argument(
+        "target",
+        metavar="TARGET",
+        help="credentials and optional host: [[domain/]username[:password]@]<host>",
+    )
     targets = parser.add_argument_group("target selection")
     target_source = targets.add_mutually_exclusive_group()
-    target_source.add_argument("--host", help="scan one explicit host")
+    target_source.add_argument(
+        "--host", metavar="HOST", help="scan this host instead of the host in TARGET"
+    )
     target_source.add_argument(
         "--hosts-file",
         help="file containing hosts, blank lines and # comments allowed",
     )
     auth = parser.add_argument_group("authentication")
-    auth.add_argument("-H", "--hashes", metavar="LMHASH:NTHASH")
-    auth.add_argument("-no-pass", action="store_true", default=None)
-    auth.add_argument("-k", action="store_true", default=None)
-    auth.add_argument("-aesKey", metavar="HEX_KEY")
+    auth.add_argument(
+        "-H",
+        "--hashes",
+        metavar="LMHASH:NTHASH",
+        help="authenticate with NTLM hashes; use :NTHASH when no LM hash is available",
+    )
+    auth.add_argument(
+        "-no-pass",
+        action="store_true",
+        default=None,
+        help="do not prompt for a password (for null sessions or other auth material)",
+    )
+    auth.add_argument(
+        "-k",
+        action="store_true",
+        default=None,
+        help="use Kerberos authentication from the credential cache",
+    )
+    auth.add_argument(
+        "-aesKey", metavar="HEX_KEY", help="Kerberos AES key (implies -k)"
+    )
     scan = parser.add_argument_group("scan behavior")
-    scan.add_argument("--profile", "--scan-profile", dest="profile", choices=PROFILES)
-    scan.add_argument("--policy", choices=POLICIES)
-    scan.add_argument("-v", "--verbose", action="store_true", default=None)
+    scan.add_argument(
+        "--profile",
+        "--scan-profile",
+        dest="profile",
+        choices=PROFILES,
+        help="host concurrency and terminal-noise preset (default: balanced)",
+    )
+    scan.add_argument(
+        "-v",
+        "--verbose",
+        action="store_true",
+        default=None,
+        help="enable debug logging",
+    )
     scan.add_argument(
         "--workers",
         type=int,
@@ -81,22 +124,41 @@ def _scan_parser(mode: str) -> argparse.ArgumentParser:
         default=None,
         help="create/delete verification; modifies the target and may leave artifacts",
     )
-    scan.add_argument("--metrics", action="store_true", default=None)
-    scan.add_argument("--read-only", action="store_true", default=None)
+    scan.add_argument(
+        "--metrics",
+        action="store_true",
+        default=None,
+        help="print operation counts and timing after the scan",
+    )
     shares = parser.add_argument_group("share selection")
-    shares.add_argument("--share", action="append", metavar="NAME")
+    shares.add_argument(
+        "--share",
+        action="append",
+        metavar="NAME",
+        help="scan only this share; repeat to include multiple shares",
+    )
     shares.add_argument("--shares", help="comma-separated compatibility form")
     shares.add_argument(
         "--exclude-share",
-        "--skip-share",
         dest="exclude_share",
         action="append",
         metavar="NAME",
+        help="skip this share; repeat to exclude multiple shares",
     )
     shares.add_argument("--add-share", help="comma-separated shares normally skipped")
     output = parser.add_argument_group("output")
-    output.add_argument("-o", "--output", "--output-dir", dest="output")
-    output.add_argument("--format", choices=FORMATS)
+    output.add_argument(
+        "-o",
+        "--output",
+        dest="output",
+        metavar="DIR",
+        help="results directory (default: current directory)",
+    )
+    output.add_argument(
+        "--format",
+        choices=FORMATS,
+        help="write CSV reports in addition to the always-saved JSON result (default: console)",
+    )
     views = (
         ("summary", "progress", "tree")
         if mode == "shares"
@@ -112,54 +174,164 @@ def _scan_parser(mode: str) -> argparse.ArgumentParser:
             "completion order, while recursive tree output is serialized"
         ),
     )
-    output.add_argument("--resume", nargs="?", const=".")
-    output.add_argument("--csv-output", action="store_true", default=None)
-    output.add_argument("--json-output", action="store_true", default=None)
+    output.add_argument(
+        "--resume",
+        nargs="?",
+        const=".",
+        metavar="DIR",
+        help="resume from DIR; if omitted, use the current directory",
+    )
     if mode in {"spider", "snaffle"}:
         spider = parser.add_argument_group("downloads and content analysis")
         spider.add_argument(
-            "--download", "--download-ext", dest="download", nargs="?", const=" "
+            "--download-ext",
+            dest="download",
+            nargs="?",
+            const=" ",
+            metavar="EXTENSIONS",
+            help="download files; omit EXTENSIONS for all files, use 'default', or a comma-separated list",
         )
-        spider.add_argument("--limits", choices=tuple(_LIMITS))
-        spider.add_argument("--max-file-size", type=_parse_size)
+        spider.add_argument(
+            "--limits",
+            choices=tuple(_LIMITS),
+            help="per-file and total download limit preset (default: standard)",
+        )
+        spider.add_argument(
+            "--max-file-size",
+            type=_parse_size,
+            metavar="SIZE",
+            help="maximum individual download size, for example 20MB or 512MiB",
+        )
         spider.add_argument(
             "--download-budget",
-            "--max-total-download",
             dest="download_budget",
             type=_parse_size,
+            metavar="SIZE",
+            help="maximum total bytes downloaded, for example 2GB",
         )
-        spider.add_argument("--download-name")
-        spider.add_argument("--max-depth", type=int)
-        spider.add_argument("--delay", type=float)
-        spider.add_argument("--count-ext", nargs="?", const="default")
-        spider.add_argument("--count-string")
-        spider.add_argument("--unique", action="store_true", default=None)
-        spider.add_argument("--max-content-reads", type=int)
-        spider.add_argument("--content-read-budget", type=_parse_size)
+        spider.add_argument(
+            "--download-name",
+            metavar="TERMS",
+            help="download filenames containing comma-separated terms",
+        )
+        spider.add_argument(
+            "--max-depth",
+            type=int,
+            metavar="N",
+            help="maximum recursion depth (default: 5)",
+        )
+        spider.add_argument(
+            "--delay",
+            type=float,
+            metavar="SECONDS",
+            help="delay between directory requests (default: 0)",
+        )
+        spider.add_argument(
+            "--count-ext",
+            nargs="?",
+            const="default",
+            metavar="EXTENSIONS",
+            help="count comma-separated extensions; omit the value for the default set",
+        )
+        spider.add_argument(
+            "--count-string",
+            metavar="TERMS",
+            help="count filenames containing comma-separated terms",
+        )
+        spider.add_argument(
+            "--unique",
+            action="store_true",
+            default=None,
+            help="identify files with unique modification timestamps",
+        )
+        spider.add_argument(
+            "--max-content-reads",
+            type=int,
+            metavar="N",
+            help="maximum files read for content analysis",
+        )
+        spider.add_argument(
+            "--content-read-budget",
+            type=_parse_size,
+            metavar="SIZE",
+            help="maximum bytes read for content analysis",
+        )
         nemesis = parser.add_argument_group("Nemesis")
-        nemesis.add_argument("--nemesis", "--nemesis-url", dest="nemesis_url")
-        nemesis.add_argument("--nemesis-auth")
-        nemesis.add_argument("--nemesis-project")
-        nemesis.add_argument("--nemesis-mode", choices=("off", "matches", "downloads"))
-        nemesis.add_argument("--nemesis-upload-workers", type=int)
-        nemesis.add_argument("--nemesis-retries", type=int)
-        nemesis.add_argument("--nemesis-queue-size", type=int)
+        nemesis.add_argument(
+            "--nemesis-url",
+            dest="nemesis_url",
+            metavar="URL",
+            help="Nemesis API base URL",
+        )
+        nemesis.add_argument(
+            "--nemesis-auth", metavar="USER:PASSWORD", help="Nemesis API authentication"
+        )
+        nemesis.add_argument(
+            "--nemesis-project", metavar="PROJECT", help="Nemesis project name"
+        )
+        nemesis.add_argument(
+            "--nemesis-mode",
+            choices=("off", "matches", "downloads"),
+            help="upload nothing, Snaffler matches, or all downloads (default: off)",
+        )
+        nemesis.add_argument(
+            "--nemesis-upload-workers",
+            type=int,
+            metavar="N",
+            help="concurrent uploads (default: 2)",
+        )
+        nemesis.add_argument(
+            "--nemesis-retries",
+            type=int,
+            metavar="N",
+            help="retries after an upload failure (default: 2)",
+        )
+        nemesis.add_argument(
+            "--nemesis-queue-size",
+            type=int,
+            metavar="N",
+            help="maximum queued uploads (default: 100)",
+        )
     if mode == "snaffle":
         snaffle = parser.add_argument_group("Snaffler")
-        snaffle.add_argument("--rules", "--snaffler-rules-dir", dest="rules")
+        snaffle.add_argument(
+            "--rules",
+            "--snaffler-rules-dir",
+            dest="rules",
+            metavar="DIR",
+            help="Snaffler rules directory (required)",
+        )
         snaffle.add_argument(
             "--interest",
             "--snaffler-interest-level",
             dest="interest",
             type=int,
             choices=range(4),
+            help="minimum Snaffler interest level, 0 includes all matches (default: 0)",
         )
-        snaffle.add_argument("--snaffler-max-size-to-grep", type=_parse_size)
-        snaffle.add_argument("--snaffler-strict", action="store_true", default=None)
         snaffle.add_argument(
-            "--snaffler-no-auto-download", action="store_true", default=None
+            "--snaffler-max-size-to-grep",
+            type=_parse_size,
+            metavar="SIZE",
+            help="largest file inspected for content matches (default: 1MiB)",
         )
-        snaffle.add_argument("--snaffler-content-mode", choices=("relayed", "all"))
+        snaffle.add_argument(
+            "--snaffler-strict",
+            action="store_true",
+            default=None,
+            help="fail instead of skipping invalid or unsupported rules",
+        )
+        snaffle.add_argument(
+            "--snaffler-no-auto-download",
+            action="store_true",
+            default=None,
+            help="do not automatically download matched files",
+        )
+        snaffle.add_argument(
+            "--snaffler-content-mode",
+            choices=("relayed", "all"),
+            help="inspect content only when relayed by rules, or inspect all eligible files (default: relayed)",
+        )
     return parser
 
 
@@ -199,11 +371,6 @@ def _normalize(
         raise ValueError(
             f"configuration field profile must be one of {', '.join(PROFILES)}"
         )
-    policy = pick("policy", "audit" if mode == "shares" else "collect")
-    if policy not in POLICIES:
-        raise ValueError(
-            f"configuration field policy must be one of {', '.join(POLICIES)}"
-        )
     defaults = {
         "quiet": (1, "matches"),
         "balanced": (4, "matches"),
@@ -211,7 +378,6 @@ def _normalize(
     }[profile]
     parsed.operating_mode = mode
     parsed.scan_profile = profile
-    parsed.policy = policy
     parsed.spider = mode != "shares"
     parsed.workers = pick("workers", defaults[0])
     explicit_permission_check = parsed.permission_check is not None
@@ -222,8 +388,8 @@ def _normalize(
     if parsed.resume and parsed.output is None:
         parsed.output_dir = parsed.resume
     fmt = pick("format", "console")
-    parsed.csv_output = bool(parsed.csv_output) or fmt in {"csv", "all"}
-    parsed.json_output = bool(parsed.json_output) or fmt in {"json", "all"}
+    parsed.csv_output = fmt == "csv"
+    parsed.json_output = True
     included = list(parsed.share or [])
     configured_shares = _config_value(config, "shares") or []
     if not parsed.share and not parsed.shares:
@@ -239,17 +405,12 @@ def _normalize(
     parsed.k = bool(parsed.k)
     parsed.verbose = bool(parsed.verbose)
     parsed.metrics = bool(parsed.metrics)
-    parsed.read_only = bool(parsed.read_only)
-    if parsed.file_write_check and parsed.read_only:
-        raise ValueError("--read-only cannot be combined with --file-write-check")
     if parsed.file_write_check and parsed.permission_check in {"none", "read"}:
-        if explicit_permission_check or parsed.read_only:
+        if explicit_permission_check:
             raise ValueError(
                 "--file-write-check requires --permission-check read-write"
             )
         parsed.permission_check = "read-write"
-    if parsed.read_only:
-        parsed.permission_check = "read"
     parsed.max_depth = pick("max_depth", 5)
     parsed.delay = pick("delay", 0)
     parsed.download_ext = getattr(parsed, "download", None)
@@ -336,7 +497,7 @@ def _normalize(
         missing = [
             option
             for option, value in (
-                ("--nemesis", parsed.nemesis_url),
+                ("--nemesis-url", parsed.nemesis_url),
                 ("--nemesis-auth", parsed.nemesis_auth),
                 ("--nemesis-project", parsed.nemesis_project),
             )
@@ -366,8 +527,40 @@ def parse_scan_options(
 
 def _print_top_level_help() -> None:
     print(
-        """usage: shrawler <command> [options]\n\ncommands:\n  shares\n  spider\n  snaffle\n  report\n  config\n\nRun 'shrawler <command> --help' for all command options."""
+        """usage: shrawler <command> [options]
+
+Enumerate, inventory, and classify files on SMB shares.
+
+commands:
+  shares    Enumerate shares and assess permissions
+  spider    Recursively inventory files on readable shares
+  snaffle   Classify files using Snaffler rules
+  report    Summarize saved results or retry Nemesis uploads
+  config    Create and inspect persistent configuration
+
+examples:
+  shrawler shares DOMAIN/user@server
+  shrawler spider DOMAIN/user@server --output ./results
+  shrawler snaffle DOMAIN/user@server --rules ./SnafflerRules
+
+Run 'shrawler <command> --help' for command-specific options.
+Compatibility syntax 'shrawler TARGET [options]' remains supported."""
     )
+
+
+def _config_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="shrawler config",
+        description="Create and inspect Shrawler's persistent TOML configuration.",
+    )
+    parser.add_argument(
+        "action",
+        nargs="?",
+        default="show",
+        choices=("init", "show", "path", "options"),
+        help="init creates the file; show prints it; path prints its location; options lists supported settings (default: show)",
+    )
+    return parser
 
 
 def main(argv: Optional[List[str]] = None) -> None:
@@ -377,7 +570,7 @@ def main(argv: Optional[List[str]] = None) -> None:
         return
     command = arguments[0]
     if command == "config":
-        action = arguments[1] if len(arguments) > 1 else "show"
+        action = _config_parser().parse_args(arguments[1:]).action
         path = config_path()
         if action == "path":
             print(path)
@@ -396,7 +589,6 @@ def main(argv: Optional[List[str]] = None) -> None:
         if action == "options":
             print(CONFIG_OPTIONS)
             return
-        raise SystemExit("usage: shrawler config {init|show|path|options}")
     if command == "report":
         raise SystemExit(report_main(arguments[1:]))
     if command in SCAN_MODES:
