@@ -21,7 +21,6 @@ import urllib3
 from colorama import Fore, Style, init
 from dotenv import load_dotenv
 from impacket.dcerpc.v5.srvs import STYPE_DISKTREE, STYPE_MASK
-from impacket.examples.utils import parse_target
 from impacket.nt_errors import STATUS_ACCESS_DENIED, STATUS_PRIVILEGE_NOT_HELD
 from impacket.smb3structs import (
     DELETE,
@@ -45,10 +44,10 @@ from impacket.smbconnection import (
     SMB2_DIALECT_21,
     SMB_DIALECT,
     SessionError,
-    SMBConnection,
 )
 
 from .progress import ProgressReporter
+from .smb import SMBAuth, connect_smb, create_smb_auth
 from .snaffler import SnafflerEngineMixin, SnafflerRule
 from .state import ScanStateStore
 
@@ -331,9 +330,10 @@ def display_unique_files(unique_files_data: List[Tuple[float, str]]) -> None:
 class Shrawler(SnafflerEngineMixin):
     """SMB Share Crawling Tool."""
 
-    def __init__(self, options: Any) -> None:
+    def __init__(self, options: Any, auth: Optional[SMBAuth] = None) -> None:
         init()  # for Colorama
         self.args = options
+        self.auth = auth
         self.download_count = 0
         self.downloaded_bytes = 0
         self._reserved_download_bytes = 0
@@ -469,6 +469,18 @@ class Shrawler(SnafflerEngineMixin):
     @current_host.setter
     def current_host(self, value: Optional[str]) -> None:
         self._thread_context.current_host = value
+
+    def _get_auth(self) -> SMBAuth:
+        """Return injected authentication or build it for API compatibility."""
+        if self.auth is None:
+            self.auth = create_smb_auth(
+                self.args.target,
+                hashes=self.args.hashes,
+                no_pass=bool(self.args.no_pass),
+                kerberos=bool(self.args.k),
+                aes_key=self.args.aesKey,
+            )
+        return self.auth
 
     def _record_operation(self, name: str, elapsed: float, byte_count: int = 0) -> None:
         """Record an operation without exposing mutable counters to workers."""
@@ -2234,22 +2246,13 @@ class Shrawler(SnafflerEngineMixin):
         }
         return results
 
-    def init_smb_session(
-        self,
-        domain: str,
-        username: str,
-        password: str,
-        address: str,
-        lmhash: str,
-        nthash: str,
-    ):
+    def init_smb_session(self, address: str):
         """
         Initiate SMB Session with host using impacket libraries.
         """
         started = time.perf_counter()
         try:
-            smbClient = SMBConnection(address, address, sess_port=445)
-            smbClient.enableDFSSupport = True
+            smbClient = connect_smb(address, self._get_auth())
 
             dialect = smbClient.getDialect()
 
@@ -2265,19 +2268,6 @@ class Shrawler(SnafflerEngineMixin):
             else:
                 logging.debug("SMBv3.0 dialect used")
 
-            if self.args.k is True:
-                smbClient.kerberosLogin(
-                    username,
-                    password,
-                    domain,
-                    lmhash,
-                    nthash,
-                    self.args.aesKey,
-                    domain,
-                )
-
-            else:
-                smbClient.login(username, password, domain, lmhash, nthash)
             if smbClient.isGuestSession() > 0:
                 logging.debug("GUEST Session Granted")
             else:
@@ -2306,9 +2296,6 @@ class Shrawler(SnafflerEngineMixin):
 
     def _scan_host(
         self,
-        domain: str,
-        lmhash: str,
-        nthash: str,
         mach_ip: str,
         mach_name: str,
     ) -> HostRenderResult:
@@ -2332,14 +2319,7 @@ class Shrawler(SnafflerEngineMixin):
         smbclient: Any = None
         display_shares: List[ShareDisplay] = []
         try:
-            smbclient = self.init_smb_session(
-                domain,
-                self.username,
-                self.password,
-                mach_ip,
-                lmhash,
-                nthash,
-            )
+            smbclient = self.init_smb_session(mach_ip)
             if smbclient is None:
                 self.scan_results[mach_ip]["status"] = "authentication_failed"
                 self.scan_results[mach_ip]["error"] = "SMB authentication failed"
@@ -2457,31 +2437,7 @@ class Shrawler(SnafflerEngineMixin):
                 "--file-write-check will create and delete remote test objects; "
                 "cleanup failures or interruption may leave artifacts"
             )
-        # parses the argument 'target' to get the values needed
-        domain, self.username, self.password, self.domain_controller = parse_target(
-            self.args.target
-        )
-        if (
-            len(self.password) == 0
-            and len(self.username) != 0
-            and self.args.hashes is None
-            and self.args.no_pass is False
-            and self.args.aesKey is None
-        ):
-            from getpass import getpass
-
-            self.password = getpass("Password:")
-
-        if self.args.aesKey is not None:
-            self.args.k = True
-
-        if self.args.hashes is not None:
-            try:
-                lmhash, nthash = self.args.hashes.split(":", 1)
-            except ValueError as exc:
-                raise ValueError("--hashes must use LMHASH:NTHASH format") from exc
-        else:
-            lmhash, nthash = "", ""
+        auth = self._get_auth()
 
         if self.args.skip_share:
             shares = self.args.skip_share.split(",")
@@ -2504,9 +2460,9 @@ class Shrawler(SnafflerEngineMixin):
             machine_names = machine_ip
 
         else:
-            if not self.domain_controller:
+            if not auth.target_host:
                 raise ValueError("No target host was provided")
-            machine_ip = [self.domain_controller]
+            machine_ip = [auth.target_host]
             machine_names = machine_ip
 
         hosts = list(zip(machine_ip, machine_names))
@@ -2519,7 +2475,7 @@ class Shrawler(SnafflerEngineMixin):
         try:
             if worker_count == 1:
                 for mach_ip, mach_name in hosts:
-                    result = self._scan_host(domain, lmhash, nthash, mach_ip, mach_name)
+                    result = self._scan_host(mach_ip, mach_name)
                     self._render_host_result(result)
             else:
                 with ThreadPoolExecutor(
@@ -2528,9 +2484,6 @@ class Shrawler(SnafflerEngineMixin):
                     futures = [
                         executor.submit(
                             self._scan_host,
-                            domain,
-                            lmhash,
-                            nthash,
                             mach_ip,
                             mach_name,
                         )
@@ -2548,9 +2501,9 @@ class Shrawler(SnafflerEngineMixin):
         return 0 if statuses and set(statuses) == {"complete"} else 1
 
 
-def main(options: Any) -> None:
+def main(options: Any, auth: Optional[SMBAuth] = None) -> None:
     """Calling shrawler."""
-    s = Shrawler(options)
+    s = Shrawler(options, auth)
     try:
         raise SystemExit(s.main())
     except KeyboardInterrupt:

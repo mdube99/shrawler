@@ -2,7 +2,13 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from shrawler.cli import _config_parser, _parse_size, _scan_parser, parse_scan_options
+from shrawler.cli import (
+    _config_parser,
+    _parse_size,
+    _scan_parser,
+    _web_parser,
+    parse_scan_options,
+)
 
 
 class CanonicalCliTests(unittest.TestCase):
@@ -183,6 +189,25 @@ class CanonicalCliTests(unittest.TestCase):
         self.assertIn("default: standard", normalized_help)
         self.assertIn("omit EXTENSIONS for all files", normalized_help)
         self.assertIn("if omitted, use the current directory", normalized_help)
+
+    def test_scan_and_web_commands_share_authentication_options(self):
+        expected = {"hashes", "no_pass", "k", "aesKey"}
+
+        def authentication_destinations(parser):
+            return {
+                action.dest
+                for group in parser._action_groups
+                if group.title == "authentication"
+                for action in group._group_actions
+            }
+
+        self.assertEqual(authentication_destinations(_scan_parser("spider")), expected)
+        self.assertEqual(authentication_destinations(_web_parser()), expected)
+
+    def test_web_help_describes_authentication_as_auth_not_target(self):
+        help_text = _web_parser().format_help()
+        self.assertIn("RESULTS AUTH", " ".join(help_text.split()))
+        self.assertIn("authentication", help_text)
 
     def test_config_help_describes_each_action(self):
         help_text = _config_parser().format_help()

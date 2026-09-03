@@ -1,0 +1,14 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Shrawler WebUI</title><link rel="stylesheet" href="/assets/app.css"></head>
+<body>
+<header><div><strong>SHRAWLER</strong><span id="status">Connecting…</span></div><button id="stop" type="button">Stop server</button></header>
+<main>
+  <section class="search"><label for="query">Search saved file inventory</label><input id="query" type="search" placeholder="Filename, path, host, share…" autofocus><div class="filters"><select id="host" aria-label="Host"><option value="">All hosts</option></select><select id="share" aria-label="Share"><option value="">All shares</option></select><select id="extension" aria-label="Extension"><option value="">All extensions</option></select><button id="clear" type="button">Clear</button></div></section>
+  <p id="summary"></p><div class="table"><table><thead><tr><th>Filename</th><th>Host</th><th>Share</th><th>Size</th><th>Modified</th><th>Path</th></tr></thead><tbody id="results"></tbody></table></div>
+  <nav><button id="previous" type="button">Previous</button><span id="page"></span><button id="next" type="button">Next</button></nav>
+</main>
+<aside id="details" hidden><button id="close-details" type="button">Close</button><h2 id="detail-name"></h2><dl id="metadata"></dl><div><button id="preview" type="button">Preview</button><button id="download" type="button">Download</button></div></aside>
+<dialog id="preview-dialog"><button id="close-preview" type="button">Close</button><h2>Safe preview</h2><p id="preview-message"></p><pre id="preview-text"></pre><img id="preview-image" alt="File preview" hidden><iframe id="preview-pdf" title="PDF preview" sandbox hidden></iframe></dialog>
+<script src="/assets/app.js"></script>
+</body></html>

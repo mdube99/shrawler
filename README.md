@@ -83,12 +83,41 @@ shrawler shares [[domain/]username[:password]@]<host> [options]
 shrawler spider [[domain/]username[:password]@]<host> [options]
 shrawler snaffle [[domain/]username[:password]@]<host> --rules <path> [options]
 shrawler report <shrawler_results.json> [--retry-failed]
+shrawler web <shrawler_results.json> '[[domain/]username[:password]@]<kdc-host>'
 ```
 
 - `shares` enumerates shares and configured permission checks without recursion.
 - `spider` inventories files recursively across readable shares.
 - `snaffle` spiders and applies Snaffler rules; a rules directory is required.
 - `report` summarizes saved results and can retry failed Nemesis uploads without rescanning SMB.
+- `web` opens a localhost-only search UI for schema-v3 `discovered_files` and retrieves selected files live over SMB.
+
+### Local WebUI
+
+```bash
+shrawler web ./results/shrawler_results.json 'DOMAIN/user@fileserver'
+shrawler web ./results/shrawler_results.json 'DOMAIN/user@fileserver' -H ':NTHASH' --no-browser
+shrawler web ./results/shrawler_results.json 'DOMAIN/user@fileserver' -k -no-pass
+```
+
+The server binds only to `127.0.0.1` and prints a one-time URL containing a
+random token in its fragment. The browser keeps that token in memory and sends
+it as a bearer credential; credentials are never sent to the browser. Do not
+forward or publish the local port. Browser requests can select only opaque IDs
+from the loaded inventory, never arbitrary SMB coordinates.
+
+Text previews are UTF-8 only and conservatively validated. PNG, JPEG, GIF,
+WebP, and PDF previews require matching magic bytes. HTML and SVG are never
+rendered. Defaults are 1MiB per preview and 50MiB per download; change them at
+startup with `--preview-max-size` and `--download-max-size`. Downloads use
+private temporary files that are removed after transfer or disconnect.
+
+Files are fetched live and may have changed or disappeared since the crawl.
+One credential context is tried against each host recorded in the results. The
+optional host in `AUTH` is authentication/Kerberos context; indexed JSON records
+supply the actual SMB destination for each file.
+Passwords are prompted in the terminal when omitted; embedding one in `AUTH`
+can expose it through shell history and process listings.
 
 The original `shrawler TARGET [options]` syntax remains available for compatibility.
 

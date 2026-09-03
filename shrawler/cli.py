@@ -2,44 +2,29 @@
 
 import argparse
 import os
-import re
 import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from impacket.examples.utils import parse_target
 
+from .arguments import add_smb_auth_arguments, parse_size
 from .config import CONFIG_OPTIONS, DEFAULT_CONFIG, config_path, load_config
 from .core import main as scan_main
 from .report import main as report_main
+from .smb import SMBAuth, create_smb_auth
 
 SCAN_MODES = {"shares", "spider", "snaffle"}
 PROFILES = ("quiet", "balanced", "fast")
 FORMATS = ("console", "csv")
-_SIZE_UNITS = {
-    "": 1,
-    "b": 1,
-    "kb": 1000,
-    "mb": 1000**2,
-    "gb": 1000**3,
-    "kib": 1024,
-    "mib": 1024**2,
-    "gib": 1024**3,
-}
 _LIMITS: Dict[str, Tuple[int, int]] = {
     "conservative": (10 * 1024**2, 250 * 1024**2),
     "standard": (50 * 1024**2, 2 * 1024**3),
     "unlimited": (0, 0),
 }
 
-
-def _parse_size(value: str) -> int:
-    match = re.fullmatch(r"\s*(\d+(?:\.\d+)?)\s*([kmgt]?i?b)?\s*", value.lower())
-    if not match or match.group(2) not in _SIZE_UNITS:
-        raise argparse.ArgumentTypeError(
-            "use bytes or a size such as 20MB, 2GB, or 512MiB"
-        )
-    return int(float(match.group(1)) * _SIZE_UNITS[match.group(2)])
+# Retain the private name for callers that imported it before argument sharing.
+_parse_size = parse_size
 
 
 def _scan_parser(mode: str) -> argparse.ArgumentParser:
@@ -68,28 +53,7 @@ def _scan_parser(mode: str) -> argparse.ArgumentParser:
         "--hosts-file",
         help="file containing hosts, blank lines and # comments allowed",
     )
-    auth = parser.add_argument_group("authentication")
-    auth.add_argument(
-        "-H",
-        "--hashes",
-        metavar="LMHASH:NTHASH",
-        help="authenticate with NTLM hashes; use :NTHASH when no LM hash is available",
-    )
-    auth.add_argument(
-        "-no-pass",
-        action="store_true",
-        default=None,
-        help="do not prompt for a password (for null sessions or other auth material)",
-    )
-    auth.add_argument(
-        "-k",
-        action="store_true",
-        default=None,
-        help="use Kerberos authentication from the credential cache",
-    )
-    auth.add_argument(
-        "-aesKey", metavar="HEX_KEY", help="Kerberos AES key (implies -k)"
-    )
+    add_smb_auth_arguments(parser)
     scan = parser.add_argument_group("scan behavior")
     scan.add_argument(
         "--profile",
@@ -198,14 +162,14 @@ def _scan_parser(mode: str) -> argparse.ArgumentParser:
         )
         spider.add_argument(
             "--max-file-size",
-            type=_parse_size,
+            type=parse_size,
             metavar="SIZE",
             help="maximum individual download size, for example 20MB or 512MiB",
         )
         spider.add_argument(
             "--download-budget",
             dest="download_budget",
-            type=_parse_size,
+            type=parse_size,
             metavar="SIZE",
             help="maximum total bytes downloaded, for example 2GB",
         )
@@ -252,7 +216,7 @@ def _scan_parser(mode: str) -> argparse.ArgumentParser:
         )
         spider.add_argument(
             "--content-read-budget",
-            type=_parse_size,
+            type=parse_size,
             metavar="SIZE",
             help="maximum bytes read for content analysis",
         )
@@ -311,7 +275,7 @@ def _scan_parser(mode: str) -> argparse.ArgumentParser:
         )
         snaffle.add_argument(
             "--snaffler-max-size-to-grep",
-            type=_parse_size,
+            type=parse_size,
             metavar="SIZE",
             help="largest file inspected for content matches (default: 1MiB)",
         )
@@ -525,6 +489,42 @@ def parse_scan_options(
         parser.error(str(exc))
 
 
+def _web_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="shrawler web",
+        description="Search and retrieve files from a saved Shrawler inventory.",
+    )
+    parser.add_argument("results", type=Path, metavar="RESULTS")
+    parser.add_argument(
+        "auth",
+        metavar="AUTH",
+        help="SMB credentials and optional KDC: [[domain/]username[:password]@]<host>",
+    )
+    add_smb_auth_arguments(parser)
+    web = parser.add_argument_group("web server")
+    web.add_argument("--port", type=int, default=8765)
+    web.add_argument("--no-browser", action="store_true")
+    web.add_argument("--preview-max-size", type=parse_size, default=1024**2)
+    web.add_argument("--download-max-size", type=parse_size, default=50 * 1024**2)
+    web.add_argument("--page-size", type=int, default=100)
+    return parser
+
+
+def _create_auth(options: argparse.Namespace, auth_spec: str) -> SMBAuth:
+    return create_smb_auth(
+        auth_spec,
+        hashes=options.hashes,
+        no_pass=bool(options.no_pass),
+        kerberos=bool(options.k),
+        aes_key=options.aesKey,
+    )
+
+
+def _warn_plaintext_password(auth_spec: str) -> None:
+    if ":" in auth_spec.partition("@")[0]:
+        print("Warning: plaintext password in AUTH may be visible in shell history.")
+
+
 def _print_top_level_help() -> None:
     print(
         """usage: shrawler <command> [options]
@@ -536,6 +536,7 @@ commands:
   spider    Recursively inventory files on readable shares
   snaffle   Classify files using Snaffler rules
   report    Summarize saved results or retry Nemesis uploads
+  web       Search saved results and retrieve indexed files locally
   config    Create and inspect persistent configuration
 
 examples:
@@ -591,6 +592,32 @@ def main(argv: Optional[List[str]] = None) -> None:
             return
     if command == "report":
         raise SystemExit(report_main(arguments[1:]))
+    if command == "web":
+        from .web import WebConfig, run
+
+        parser = _web_parser()
+        options = parser.parse_args(arguments[1:])
+        if (
+            not 0 <= options.port <= 65535
+            or not 1 <= options.page_size <= 500
+            or options.preview_max_size < 1
+            or options.download_max_size < 1
+        ):
+            parser.error("invalid WebUI limits or port")
+        _warn_plaintext_password(options.auth)
+        try:
+            auth = _create_auth(options, options.auth)
+        except ValueError as exc:
+            parser.error(str(exc))
+        config = WebConfig(
+            results_path=options.results,
+            port=options.port,
+            open_browser=not options.no_browser,
+            preview_max_bytes=options.preview_max_size,
+            download_max_bytes=options.download_max_size,
+            page_size=options.page_size,
+        )
+        raise SystemExit(run(config, auth))
     if command in SCAN_MODES:
         if any(item in {"-h", "--help"} for item in arguments[1:]):
             _scan_parser(command).print_help()
@@ -600,7 +627,8 @@ def main(argv: Optional[List[str]] = None) -> None:
         mode = "spider" if "--spider" in arguments else "shares"
         arguments = [item for item in arguments if item != "--spider"]
         options = parse_scan_options(mode, arguments)
-    scan_main(options)
+    auth = _create_auth(options, options.target)
+    scan_main(options, auth)
 
 
 __all__ = ["main", "parse_scan_options"]

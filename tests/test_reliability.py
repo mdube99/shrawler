@@ -107,7 +107,7 @@ class ReliabilityTests(unittest.TestCase):
         release_a = threading.Event()
         b_finished = threading.Event()
 
-        def scan_host(_domain, _lmhash, _nthash, host, _name):
+        def scan_host(host, _name):
             if host == "host-a":
                 release_a.wait(timeout=2)
             else:
@@ -128,9 +128,8 @@ class ReliabilityTests(unittest.TestCase):
 
         crawler._scan_host = scan_host
         output = StringIO()
-        with mock.patch("shrawler.core.parse_target", return_value=("", "", "", "")):
-            with redirect_stdout(output):
-                self.assertEqual(crawler.main(), 0)
+        with redirect_stdout(output):
+            self.assertEqual(crawler.main(), 0)
 
         rendered = output.getvalue()
         self.assertTrue(b_finished.is_set())
@@ -276,8 +275,6 @@ class ReliabilityTests(unittest.TestCase):
                 return None
 
         crawler = _build_shrawler(workers=2)
-        crawler.username = "user"
-        crawler.password = "password"
         crawler.init_smb_session = lambda *args, **kwargs: Client()
         seen = {}
 
@@ -288,7 +285,7 @@ class ReliabilityTests(unittest.TestCase):
         crawler.get_shares = get_shares
         with ThreadPoolExecutor(max_workers=2) as executor:
             futures = [
-                executor.submit(crawler._scan_host, "", "", "", host, host)
+                executor.submit(crawler._scan_host, host, host)
                 for host in ("host-a", "host-b")
             ]
             for future in futures:

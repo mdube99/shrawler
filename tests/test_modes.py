@@ -7,6 +7,7 @@ from pathlib import Path
 from unittest import mock
 
 from shrawler import cli, report
+from shrawler.smb import SMBAuth
 
 
 class OperatingModeTests(unittest.TestCase):
@@ -60,19 +61,43 @@ class OperatingModeTests(unittest.TestCase):
 
     def test_spider_command_translates_to_operating_mode(self):
         with mock.patch.object(cli, "scan_main") as scan_main:
-            cli.main(["spider", "user@host", "--output-mode", "summary"])
+            cli.main(["spider", "user@host", "-no-pass", "--output-mode", "summary"])
 
         scan_main.assert_called_once()
         options = scan_main.call_args.args[0]
         self.assertEqual(options.target, "user@host")
         self.assertEqual(options.output_mode, "summary")
         self.assertEqual(options.operating_mode, "spider")
+        self.assertIsInstance(scan_main.call_args.args[1], SMBAuth)
 
     def test_legacy_syntax_still_dispatches_to_scanner(self):
         with mock.patch.object(cli, "scan_main") as scan_main:
-            cli.main(["user@host", "--spider"])
+            cli.main(["user@host", "--spider", "-no-pass"])
 
         scan_main.assert_called_once()
+
+    def test_web_command_passes_normalized_config_and_auth(self):
+        with mock.patch("shrawler.web.run", return_value=0) as run:
+            with self.assertRaises(SystemExit) as context:
+                cli.main(
+                    [
+                        "web",
+                        "results.json",
+                        "DOMAIN/user@dc",
+                        "-no-pass",
+                        "--no-browser",
+                        "--preview-max-size",
+                        "2MiB",
+                    ]
+                )
+
+        self.assertEqual(context.exception.code, 0)
+        config, auth = run.call_args.args
+        self.assertEqual(config.results_path, Path("results.json"))
+        self.assertEqual(config.preview_max_bytes, 2 * 1024**2)
+        self.assertFalse(config.open_browser)
+        self.assertEqual(auth.domain, "DOMAIN")
+        self.assertEqual(auth.target_host, "dc")
 
     def test_report_retries_failed_upload_and_updates_results(self):
         with tempfile.TemporaryDirectory() as tmp:
