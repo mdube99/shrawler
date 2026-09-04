@@ -85,7 +85,6 @@ class OperatingModeTests(unittest.TestCase):
                         "results.json",
                         "DOMAIN/user@dc",
                         "-no-pass",
-                        "--no-browser",
                         "--preview-max-size",
                         "2MiB",
                     ]
@@ -95,7 +94,7 @@ class OperatingModeTests(unittest.TestCase):
         config, auth = run.call_args.args
         self.assertEqual(config.results_path, Path("results.json"))
         self.assertEqual(config.preview_max_bytes, 2 * 1024**2)
-        self.assertFalse(config.open_browser)
+        self.assertFalse(config.token_auth)
         self.assertEqual(auth.domain, "DOMAIN")
         self.assertEqual(auth.target_host, "dc")
 

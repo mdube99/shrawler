@@ -9,7 +9,6 @@ import shutil
 import tempfile
 import threading
 import urllib.parse
-import webbrowser
 from dataclasses import asdict, dataclass
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -174,18 +173,23 @@ class FileIndex:
             "extensions": sorted({r.extension for r in self.records}),
         }
 
+    def _matching(
+        self, q: str, host: str, share: str, extension: str
+    ) -> List[FileRecord]:
+        terms = q.casefold().split()
+        return [
+            record
+            for record in self.records
+            if (not host or record.host == host)
+            and (not share or record.share == share)
+            and (not extension or record.extension == extension)
+            and all(term in record.search_text for term in terms)
+        ]
+
     def search(
         self, q: str, host: str, share: str, extension: str, page: int, per_page: int
     ) -> Dict[str, Any]:
-        terms = q.casefold().split()
-        matches = [
-            r
-            for r in self.records
-            if (not host or r.host == host)
-            and (not share or r.share == share)
-            and (not extension or r.extension == extension)
-            and all(term in r.search_text for term in terms)
-        ]
+        matches = self._matching(q, host, share, extension)
         per_page = min(max(per_page, 1), self.page_size, 500)
         page = max(page, 1)
         start = (page - 1) * per_page
@@ -196,6 +200,89 @@ class FileIndex:
             "total": len(matches),
             "has_next": start + per_page < len(matches),
         }
+
+    def tree(self, q: str, host: str, share: str, extension: str) -> Dict[str, Any]:
+        """Build a complete host/share/folder hierarchy for matching records."""
+        matches = self._matching(q, host, share, extension)
+        hosts: Dict[str, Dict[str, Any]] = {}
+
+        def branch(name: str) -> Dict[str, Any]:
+            return {
+                "name": name,
+                "file_count": 0,
+                "size_bytes": 0,
+                "folders": {},
+                "files": [],
+            }
+
+        for record in matches:
+            host_node = hosts.setdefault(
+                record.host,
+                {
+                    "name": record.host,
+                    "file_count": 0,
+                    "size_bytes": 0,
+                    "shares": {},
+                },
+            )
+            share_node = host_node["shares"].setdefault(
+                record.share, branch(record.share)
+            )
+            host_node["file_count"] += 1
+            host_node["size_bytes"] += record.size_bytes
+            share_node["file_count"] += 1
+            share_node["size_bytes"] += record.size_bytes
+
+            parts = [
+                part
+                for part in record.remote_path.replace("\\", "/").split("/")
+                if part
+            ]
+            if parts and parts[-1].casefold() == record.file_name.casefold():
+                parts.pop()
+            parent = share_node
+            for part in parts:
+                parent = parent["folders"].setdefault(part, branch(part))
+                parent["file_count"] += 1
+                parent["size_bytes"] += record.size_bytes
+            parent["files"].append(record.public())
+
+        def serialize_branch(node: Dict[str, Any]) -> Dict[str, Any]:
+            return {
+                "name": node["name"],
+                "file_count": node["file_count"],
+                "size_bytes": node["size_bytes"],
+                "folders": [
+                    serialize_branch(folder)
+                    for folder in sorted(
+                        node["folders"].values(),
+                        key=lambda value: value["name"].casefold(),
+                    )
+                ],
+                "files": sorted(
+                    node["files"], key=lambda value: value["file_name"].casefold()
+                ),
+            }
+
+        public_hosts = []
+        for host_node in sorted(
+            hosts.values(), key=lambda value: value["name"].casefold()
+        ):
+            public_hosts.append(
+                {
+                    "name": host_node["name"],
+                    "file_count": host_node["file_count"],
+                    "size_bytes": host_node["size_bytes"],
+                    "shares": [
+                        serialize_branch(share_node)
+                        for share_node in sorted(
+                            host_node["shares"].values(),
+                            key=lambda value: value["name"].casefold(),
+                        )
+                    ],
+                }
+            )
+        return {"total": len(matches), "hosts": public_hosts}
 
 
 class DownloadTooLarge(Exception):
@@ -306,7 +393,7 @@ class WebState:
 class WebConfig:
     results_path: Path
     port: int
-    open_browser: bool
+    token_auth: bool
     preview_max_bytes: int
     download_max_bytes: int
     page_size: int
@@ -360,6 +447,8 @@ class WebHandler(BaseHTTPRequestHandler):
         }
 
     def _authorized(self) -> bool:
+        if not self.server.state.token:
+            return True
         return secrets.compare_digest(
             self.headers.get("Authorization", ""), "Bearer " + self.server.state.token
         )
@@ -409,18 +498,21 @@ class WebHandler(BaseHTTPRequestHandler):
         if parsed.path == "/api/facets":
             self._json(state.index.facets())
             return
-        if parsed.path == "/api/files":
+        if parsed.path in {"/api/files", "/api/tree"}:
             query = urllib.parse.parse_qs(parsed.query, keep_blank_values=True)
             if any(len(value[0]) > 512 for value in query.values() if value):
                 self._error(400, "Query value is too long", "invalid_query")
                 return
+            filters = tuple(
+                query.get(key, [""])[0] for key in ("q", "host", "share", "extension")
+            )
+            if parsed.path == "/api/tree":
+                self._json(state.index.tree(*filters))
+                return
             try:
                 self._json(
                     state.index.search(
-                        *(
-                            query.get(k, [""])[0]
-                            for k in ("q", "host", "share", "extension")
-                        ),
+                        *filters,
                         int(query.get("page", ["1"])[0]),
                         int(query.get("per_page", [str(state.index.page_size)])[0]),
                     )
@@ -524,24 +616,10 @@ class WebHandler(BaseHTTPRequestHandler):
             except FileNotFoundError:
                 pass
 
-    def do_POST(self) -> None:
-        if self.path != "/api/shutdown":
-            self._error(404, "Not found", "not_found")
-            return
-        if not self._guard():
-            return
-        expected = f"http://127.0.0.1:{self.server.server_port}"
-        origin = self.headers.get("Origin")
-        if origin not in {expected, f"http://localhost:{self.server.server_port}"}:
-            self._error(403, "Invalid Origin", "invalid_origin")
-            return
-        self._json({"status": "shutting_down"})
-        threading.Thread(target=self.server.shutdown, daemon=True).start()
-
     def do_HEAD(self) -> None:
         self._error(405, "Method not allowed", "method_not_allowed")
 
-    do_PUT = do_DELETE = do_PATCH = do_HEAD
+    do_POST = do_PUT = do_DELETE = do_PATCH = do_HEAD
 
 
 def run(config: WebConfig, auth: SMBAuth) -> int:
@@ -549,7 +627,7 @@ def run(config: WebConfig, auth: SMBAuth) -> int:
     index = FileIndex.load(config.results_path, config.page_size)
     runtime = Path(tempfile.mkdtemp(prefix="shrawler-web-"))
     os.chmod(runtime, 0o700)
-    token = secrets.token_hex(32)
+    token = secrets.token_hex(32) if config.token_auth else ""
     state = WebState(
         index,
         SessionPool(auth),
@@ -560,14 +638,16 @@ def run(config: WebConfig, auth: SMBAuth) -> int:
         threading.BoundedSemaphore(2),
     )
     server = WebServer(("127.0.0.1", config.port), state)
-    url = f"http://127.0.0.1:{server.server_port}/#token={token}"
+    url = f"http://127.0.0.1:{server.server_port}/"
+    if token:
+        url += f"#token={token}"
     print(
         f"Loaded {len(index.records)} files ({index.skipped} skipped) from {index.path}"
     )
     print("Local WebUI: " + url)
+    if not token:
+        print("WebUI token authentication is disabled; use --token-auth to enable it.")
     print("Files are fetched live from SMB and may differ from crawl metadata.")
-    if config.open_browser:
-        webbrowser.open(url)
     try:
         server.serve_forever()
     except KeyboardInterrupt:

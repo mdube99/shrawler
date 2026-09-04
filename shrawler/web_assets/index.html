@@ -1,14 +1,139 @@
 <!doctype html>
 <html lang="en">
-<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Shrawler WebUI</title><link rel="stylesheet" href="/assets/app.css"></head>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <title>Shrawler · File Inventory</title>
+  <link rel="stylesheet" href="/assets/app.css">
+</head>
 <body>
-<header><div><strong>SHRAWLER</strong><span id="status">Connecting…</span></div><button id="stop" type="button">Stop server</button></header>
-<main>
-  <section class="search"><label for="query">Search saved file inventory</label><input id="query" type="search" placeholder="Filename, path, host, share…" autofocus><div class="filters"><select id="host" aria-label="Host"><option value="">All hosts</option></select><select id="share" aria-label="Share"><option value="">All shares</option></select><select id="extension" aria-label="Extension"><option value="">All extensions</option></select><button id="clear" type="button">Clear</button></div></section>
-  <p id="summary"></p><div class="table"><table><thead><tr><th>Filename</th><th>Host</th><th>Share</th><th>Size</th><th>Modified</th><th>Path</th></tr></thead><tbody id="results"></tbody></table></div>
-  <nav><button id="previous" type="button">Previous</button><span id="page"></span><button id="next" type="button">Next</button></nav>
-</main>
-<aside id="details" hidden><button id="close-details" type="button">Close</button><h2 id="detail-name"></h2><dl id="metadata"></dl><div><button id="preview" type="button">Preview</button><button id="download" type="button">Download</button></div></aside>
-<dialog id="preview-dialog"><button id="close-preview" type="button">Close</button><h2>Safe preview</h2><p id="preview-message"></p><pre id="preview-text"></pre><img id="preview-image" alt="File preview" hidden><iframe id="preview-pdf" title="PDF preview" sandbox hidden></iframe></dialog>
-<script src="/assets/app.js"></script>
-</body></html>
+  <header class="app-header">
+    <div class="header-inner">
+      <div class="brand" aria-label="Shrawler SMB inventory">
+        <span class="brand-mark" aria-hidden="true"><svg viewBox="0 0 24 24"><use href="#icon-network"></use></svg></span>
+        <strong>Shrawler</strong><span>SMB inventory</span>
+      </div>
+      <div class="header-actions">
+        <div id="connection-status" class="connection-status" aria-live="polite">
+          <span class="status-dot" aria-hidden="true"></span><span id="status">Connecting…</span>
+        </div>
+      </div>
+    </div>
+  </header>
+
+  <main class="workspace">
+    <section class="intro" aria-labelledby="page-title">
+      <div>
+        <h1 id="page-title">Inventory explorer</h1>
+        <p><strong>Find the file that matters.</strong> Search captured SMB evidence, inspect its provenance, and retrieve it from the source.</p>
+      </div>
+      <div class="local-badge"><svg aria-hidden="true" viewBox="0 0 24 24"><use href="#icon-shield"></use></svg><span>Local session only</span></div>
+    </section>
+
+    <section class="search-panel" aria-label="Search and filter">
+      <div class="search-row">
+        <div class="search-field">
+          <svg class="search-icon" aria-hidden="true" viewBox="0 0 24 24"><use href="#icon-search"></use></svg>
+          <span id="search-spinner" class="small-spinner" hidden aria-hidden="true"></span>
+          <label class="sr-only" for="query">Search saved file inventory</label>
+          <input id="query" type="search" placeholder="Search filenames, paths, hosts…" autocomplete="off" autofocus>
+          <button id="clear-query" class="field-clear" type="button" aria-label="Clear search" hidden><svg aria-hidden="true" viewBox="0 0 24 24"><use href="#icon-close"></use></svg></button>
+          <kbd aria-label="Keyboard shortcut: slash">/</kbd>
+        </div>
+        <div class="filter-bar" id="desktop-filters">
+          <label><span>Host</span><select id="host"><option value="">Any host</option></select></label>
+          <label><span>Share</span><select id="share"><option value="">Any share</option></select></label>
+          <label><span>File type</span><select id="extension"><option value="">Any type</option></select></label>
+          <button id="clear" class="text-button" type="button" hidden>Clear filters</button>
+        </div>
+      </div>
+      <div id="active-filters" class="active-filters" aria-label="Active filters" hidden></div>
+    </section>
+
+    <section class="results-section" aria-labelledby="results-heading">
+      <h2 id="results-heading" class="sr-only">Inventory results</h2>
+      <div class="results-toolbar">
+        <p id="summary" aria-live="polite">Loading inventory…</p>
+        <div class="toolbar-actions">
+          <div id="tree-actions" class="tree-actions" hidden>
+            <button id="expand-tree" class="text-button" type="button">Expand all</button>
+            <button id="collapse-tree" class="text-button" type="button">Collapse all</button>
+          </div>
+          <button id="density" class="icon-button density-button" type="button" aria-pressed="false" title="Use compact rows">
+            <svg aria-hidden="true" viewBox="0 0 24 24"><use href="#icon-density"></use></svg><span>Compact</span>
+          </button>
+          <div class="view-switcher" aria-label="Results view">
+            <button id="table-view" type="button" aria-pressed="true"><svg aria-hidden="true" viewBox="0 0 24 24"><use href="#icon-table"></use></svg>Table</button>
+            <button id="tree-view" type="button" aria-pressed="false"><svg aria-hidden="true" viewBox="0 0 24 24"><use href="#icon-tree"></use></svg>Tree</button>
+          </div>
+        </div>
+      </div>
+
+      <div id="error-banner" class="error-banner" role="alert" hidden>
+        <svg aria-hidden="true" viewBox="0 0 24 24"><use href="#icon-alert"></use></svg>
+        <span id="error-message">Could not load inventory.</span>
+        <button id="retry" class="text-button" type="button">Retry</button>
+      </div>
+
+      <div id="table-container" class="table-shell">
+        <table>
+          <thead><tr><th class="tag-heading" scope="col">Type</th><th scope="col">File</th><th scope="col">Location</th><th class="numeric" scope="col">Size</th><th class="numeric" scope="col">Modified</th><th scope="col"><span class="sr-only">Details</span></th></tr></thead>
+          <tbody id="results"></tbody>
+        </table>
+      </div>
+
+      <div id="tree-container" class="tree-shell" hidden>
+        <div id="tree-loading" class="tree-loading" hidden><span class="spinner" aria-hidden="true"></span><span>Building complete hierarchy…</span></div>
+        <ul id="tree" class="file-tree" role="tree" aria-label="Filtered file hierarchy"></ul>
+      </div>
+
+      <nav id="pagination" class="pagination" aria-label="Results pagination">
+        <button id="previous" class="button" type="button"><svg aria-hidden="true" viewBox="0 0 24 24"><use href="#icon-arrow-left"></use></svg>Previous</button>
+        <span id="page">Page 1</span>
+        <button id="next" class="button" type="button">Next<svg aria-hidden="true" viewBox="0 0 24 24"><use href="#icon-arrow-right"></use></svg></button>
+      </nav>
+    </section>
+  </main>
+
+  <dialog id="preview-dialog" class="preview-dialog">
+    <div class="dialog-frame">
+      <header class="dialog-header">
+        <div class="preview-heading"><span id="preview-tag" class="specimen-tag neutral">FILE</span><div><span class="dialog-label">Safe preview</span><h2 id="preview-title">File preview</h2></div></div>
+        <button id="close-preview" class="dialog-close" type="button" aria-label="Close preview"><svg aria-hidden="true" viewBox="0 0 24 24"><use href="#icon-close"></use></svg></button>
+      </header>
+      <div class="preview-stage">
+        <div id="preview-loading" class="preview-loading"><span class="spinner" aria-hidden="true"></span><span>Loading preview…</span></div>
+        <div id="preview-error" class="preview-error" hidden><strong>Preview failed</strong><p id="preview-message"></p><span>You can still download this file.</span></div>
+        <pre id="preview-text" hidden></pre><img id="preview-image" alt="File preview" hidden><iframe id="preview-pdf" title="PDF preview" sandbox hidden></iframe>
+      </div>
+      <footer class="dialog-footer"><span id="preview-meta"></span><button id="preview-download" class="button primary" type="button"><svg aria-hidden="true" viewBox="0 0 24 24"><use href="#icon-download"></use></svg>Download</button></footer>
+    </div>
+  </dialog>
+
+  <div id="toast" class="toast" role="status" aria-live="polite" hidden><span id="toast-message"></span><button id="close-toast" type="button" aria-label="Dismiss notification"><svg aria-hidden="true" viewBox="0 0 24 24"><use href="#icon-close"></use></svg></button></div>
+
+  <svg class="svg-sprite" aria-hidden="true">
+    <symbol id="icon-network" viewBox="0 0 24 24"><path d="M5 7.5h14M7.5 5v5m9-5v5M12 7.5V14m-7 0h5v5H5zm9 0h5v5h-5z"/></symbol>
+    <symbol id="icon-shield" viewBox="0 0 24 24"><path d="M12 3 5 5.5v6c0 4.7 2.8 8 7 9.5 4.2-1.5 7-4.8 7-9.5v-6z"/><path d="m9 12 2 2 4-4"/></symbol>
+    <symbol id="icon-search" viewBox="0 0 24 24"><circle cx="10.5" cy="10.5" r="6.5"/><path d="m15.5 15.5 5 5"/></symbol>
+    <symbol id="icon-close" viewBox="0 0 24 24"><path d="m6 6 12 12M18 6 6 18"/></symbol>
+    <symbol id="icon-arrow-left" viewBox="0 0 24 24"><path d="m15 6-6 6 6 6"/></symbol>
+    <symbol id="icon-arrow-right" viewBox="0 0 24 24"><path d="m9 6 6 6-6 6"/></symbol>
+    <symbol id="icon-chevron" viewBox="0 0 24 24"><path d="m9 6 6 6-6 6"/></symbol>
+    <symbol id="icon-file" viewBox="0 0 24 24"><path d="M6 3h8l4 4v14H6z"/><path d="M14 3v5h5"/></symbol>
+    <symbol id="icon-folder" viewBox="0 0 24 24"><path d="M3 6h7l2 2h9v11H3z"/></symbol>
+    <symbol id="icon-server" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="6" rx="1"/><rect x="3" y="14" width="18" height="6" rx="1"/><path d="M7 7h.01M7 17h.01"/></symbol>
+    <symbol id="icon-share" viewBox="0 0 24 24"><circle cx="18" cy="5" r="2.5"/><circle cx="6" cy="12" r="2.5"/><circle cx="18" cy="19" r="2.5"/><path d="m8.3 10.8 7.4-4.4m-7.4 6.8 7.4 4.4"/></symbol>
+    <symbol id="icon-eye" viewBox="0 0 24 24"><path d="M2.5 12s3.5-6 9.5-6 9.5 6 9.5 6-3.5 6-9.5 6-9.5-6-9.5-6z"/><circle cx="12" cy="12" r="2.5"/></symbol>
+    <symbol id="icon-download" viewBox="0 0 24 24"><path d="M12 3v12m-5-5 5 5 5-5M5 21h14"/></symbol>
+    <symbol id="icon-copy" viewBox="0 0 24 24"><rect x="8" y="8" width="11" height="11" rx="1"/><path d="M16 8V5H5v11h3"/></symbol>
+    <symbol id="icon-check" viewBox="0 0 24 24"><path d="m5 12 4 4L19 6"/></symbol>
+    <symbol id="icon-table" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="1"/><path d="M3 9h18M9 9v11"/></symbol>
+    <symbol id="icon-tree" viewBox="0 0 24 24"><path d="M6 4v12m0-8h6m-6 8h6"/><rect x="12" y="5" width="8" height="6" rx="1"/><rect x="12" y="13" width="8" height="6" rx="1"/></symbol>
+    <symbol id="icon-density" viewBox="0 0 24 24"><path d="M5 6h14M5 12h14M5 18h14"/></symbol>
+    <symbol id="icon-alert" viewBox="0 0 24 24"><path d="M12 3 2.5 20h19zM12 9v5m0 3h.01"/></symbol>
+  </svg>
+  <script src="/assets/app.js"></script>
+</body>
+</html>

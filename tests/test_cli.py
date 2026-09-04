@@ -209,6 +209,16 @@ class CanonicalCliTests(unittest.TestCase):
         self.assertIn("RESULTS AUTH", " ".join(help_text.split()))
         self.assertIn("authentication", help_text)
 
+    def test_web_token_auth_is_opt_in(self):
+        self.assertFalse(
+            _web_parser().parse_args(["results.json", "user@host"]).token_auth
+        )
+        self.assertTrue(
+            _web_parser()
+            .parse_args(["results.json", "user@host", "--token-auth"])
+            .token_auth
+        )
+
     def test_config_help_describes_each_action(self):
         help_text = _config_parser().format_help()
         for action in ("init", "show", "path", "options"):

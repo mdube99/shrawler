@@ -503,7 +503,11 @@ def _web_parser() -> argparse.ArgumentParser:
     add_smb_auth_arguments(parser)
     web = parser.add_argument_group("web server")
     web.add_argument("--port", type=int, default=8765)
-    web.add_argument("--no-browser", action="store_true")
+    web.add_argument(
+        "--token-auth",
+        action="store_true",
+        help="require a random bearer token for WebUI API requests (default: off)",
+    )
     web.add_argument("--preview-max-size", type=parse_size, default=1024**2)
     web.add_argument("--download-max-size", type=parse_size, default=50 * 1024**2)
     web.add_argument("--page-size", type=int, default=100)
@@ -612,7 +616,7 @@ def main(argv: Optional[List[str]] = None) -> None:
         config = WebConfig(
             results_path=options.results,
             port=options.port,
-            open_browser=not options.no_browser,
+            token_auth=options.token_auth,
             preview_max_bytes=options.preview_max_size,
             download_max_bytes=options.download_max_size,
             page_size=options.page_size,

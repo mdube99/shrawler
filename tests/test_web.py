@@ -2,6 +2,7 @@ import io
 import json
 import tempfile
 import threading
+import time
 import unittest
 import urllib.error
 import urllib.request
@@ -85,6 +86,38 @@ class IndexTests(unittest.TestCase):
         self.assertEqual(len(index.records), 1)
         self.assertEqual(index.skipped, 1)
 
+    def test_tree_builds_complete_filtered_hierarchy(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            index = FileIndex.load(result_file(Path(tmp)), page_size=1)
+        tree = index.tree("reports", "server", "docs", "")
+        self.assertEqual(tree["total"], 2)
+        self.assertEqual(len(tree["hosts"]), 1)
+        host = tree["hosts"][0]
+        self.assertEqual((host["name"], host["file_count"]), ("server", 2))
+        share = host["shares"][0]
+        self.assertEqual((share["name"], share["file_count"]), ("docs", 2))
+        folder = share["folders"][0]
+        self.assertEqual((folder["name"], folder["file_count"]), ("Reports", 2))
+        self.assertEqual(
+            [row["file_name"] for row in folder["files"]],
+            ["café.md", "Secret.txt"],
+        )
+
+    def test_tree_normalizes_backslash_paths_and_applies_extension_filter(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = result_file(Path(tmp))
+            payload = json.loads(path.read_text())
+            payload["server"]["shares"]["docs"]["discovered_files"][0][
+                "remote_path"
+            ] = "\\Reports\\Private\\Secret.txt"
+            path.write_text(json.dumps(payload))
+            index = FileIndex.load(path)
+        tree = index.tree("", "", "", ".txt")
+        reports = tree["hosts"][0]["shares"][0]["folders"][0]
+        self.assertEqual(reports["name"], "Reports")
+        self.assertEqual(reports["folders"][0]["name"], "Private")
+        self.assertEqual(reports["folders"][0]["files"][0]["file_name"], "Secret.txt")
+
 
 class ContentTests(unittest.TestCase):
     def test_preview_requires_extension_and_valid_content(self):
@@ -161,7 +194,9 @@ class HttpTests(unittest.TestCase):
         self.tmp.cleanup()
 
     def request(self, path, token="token", host=None):
-        headers = {"Authorization": "Bearer " + token}
+        headers = {}
+        if token is not None:
+            headers["Authorization"] = "Bearer " + token
         if host:
             headers["Host"] = host
         return urllib.request.urlopen(
@@ -176,6 +211,11 @@ class HttpTests(unittest.TestCase):
             self.request("/api/status", host="evil.example")
         self.assertEqual(denied_host.exception.code, 400)
 
+    def test_api_allows_requests_when_token_auth_is_disabled(self):
+        self.server.state.token = ""
+        with self.request("/api/status", token=None) as response:
+            self.assertEqual(response.status, 200)
+
     def test_preview_and_download_security_headers(self):
         record = self.server.state.index.records[0]
         with self.request(f"/api/files/{record.id}/preview") as response:
@@ -188,7 +228,21 @@ class HttpTests(unittest.TestCase):
             self.assertEqual(
                 response.headers["Content-Type"], "application/octet-stream"
             )
+        deadline = time.monotonic() + 1
+        while (
+            list(Path(self.tmp.name).glob("*.download")) and time.monotonic() < deadline
+        ):
+            time.sleep(0.01)
         self.assertEqual(list(Path(self.tmp.name).glob("*.download")), [])
+
+    def test_tree_endpoint_returns_all_matching_files(self):
+        with self.request("/api/tree?q=reports&extension=.txt") as response:
+            payload = json.loads(response.read())
+        self.assertEqual(payload["total"], 1)
+        self.assertEqual(
+            payload["hosts"][0]["shares"][0]["folders"][0]["files"][0]["file_name"],
+            "Secret.txt",
+        )
 
 
 if __name__ == "__main__":
