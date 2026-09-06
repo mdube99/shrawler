@@ -78,3 +78,13 @@ and process listings.
 
 Nemesis credentials can be stored in the configuration file, which Shrawler
 creates with mode `0600`, or supplied through `NEMESIS_AUTH`.
+
+## Reviewing exported output
+
+Remote names, paths, share comments, and rule matches are attacker-controlled
+values. Terminal views render control characters and bidirectional formatting
+characters visibly so a malicious filename cannot move the cursor, clear the
+screen, or disguise its displayed order. CSV exports prefix values that look
+like spreadsheet formulas (`=`, `+`, `-`, or `@`, including after leading
+whitespace or controls) with an apostrophe. JSON retains the original values
+for evidence fidelity and machine processing.

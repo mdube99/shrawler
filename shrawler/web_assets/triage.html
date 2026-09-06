@@ -66,6 +66,39 @@
       <div class="table-shell"><table class="ranking-table"><thead><tr><th scope="col">Priority</th><th scope="col">File</th><th scope="col">Observed location</th><th scope="col">Reasons</th><th scope="col">Review</th></tr></thead><tbody id="ranked-files"></tbody></table></div>
       <nav class="pagination" aria-label="Ranked file pages"><button id="ranking-prev" class="button" type="button" disabled>Previous</button><span id="ranking-page">Page 1</span><button id="ranking-next" class="button" type="button" disabled>Next</button></nav>
     </section>
+    <section class="ranking-panel" aria-labelledby="collection-title">
+      <h2 id="collection-title">Collection queue</h2>
+      <p>Select candidates in the table above, save a manifest, and review its paths and limits before starting retrieval.</p>
+      <div class="ranking-controls">
+        <label>Name<input id="collection-name" value="Selected candidates" maxlength="200"></label>
+        <label>Per-file limit (bytes)<input id="collection-file-limit" type="number" min="1" value="52428800"></label>
+        <label>Total limit (bytes)<input id="collection-total-limit" type="number" min="1" value="524288000"></label>
+        <button id="collection-create" class="button" type="button">Save selected candidates</button>
+      </div>
+      <div class="ranking-controls">
+        <label>Saved manifest<select id="collection-manifest"></select></label>
+        <button id="collection-refresh" class="button" type="button">Refresh queue</button>
+        <button id="collection-export" class="button" type="button">Export manifest</button>
+        <button id="collection-run" class="button primary" type="button">Collect / retry failed files</button>
+      </div>
+      <p id="collection-status" role="status"></p>
+      <div class="table-shell"><table><thead><tr><th>Source path</th><th>Expected bytes</th><th>Reasons</th><th>Outcome</th><th>Evidence / error</th></tr></thead><tbody id="collection-items"></tbody></table></div>
+    </section>
+    <section class="ranking-panel" aria-labelledby="families-title">
+      <h2 id="families-title">File families</h2>
+      <p>Group the selected scan by possible numeric dates and versions. Groups are provisional; matching names do not prove matching contents. Decisions apply to the selected family or file across future rankings. Run a new ranking to apply them.</p>
+      <div class="ranking-controls">
+        <button id="families-build" class="button" type="button">Build families for selected scan</button>
+        <button id="families-refresh" class="button" type="button">Refresh families</button>
+        <button id="families-prev" class="button" type="button">Previous</button>
+        <button id="families-next" class="button" type="button">Next</button>
+        <button id="families-hash" class="button" type="button">Find duplicates in local collection</button>
+      </div>
+      <p id="families-status" role="status"></p>
+      <div id="families-list"></div>
+      <label>Review event ID to undo<input id="review-undo-id" type="number" min="1"></label>
+      <button id="review-undo" class="button" type="button">Undo decision</button>
+    </section>
   </main>
   <dialog id="explanation-dialog" class="ranking-dialog">
     <header><h2 id="explanation-title">Ranking explanation</h2><button id="close-explanation" class="button" type="button">Close</button></header>

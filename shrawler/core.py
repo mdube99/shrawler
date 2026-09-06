@@ -14,7 +14,7 @@ from copy import copy
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Set, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple, cast
 
 import requests
 import urllib3
@@ -440,6 +440,9 @@ class Shrawler(SnafflerEngineMixin):
         # Track downloads by UNC path to avoid duplicate downloads
         self.downloaded_unc_paths: Set[str] = set()
 
+        budget = getattr(self.args, "directory_budget", None)
+        if budget is not None and budget < 1:
+            raise ValueError("directory budget must be positive")
         self.workspace_dir = Path(self.args.output_dir).expanduser()
         self.output_dir = self.workspace_dir
         resume_value = getattr(self.args, "resume", None)
@@ -456,7 +459,24 @@ class Shrawler(SnafflerEngineMixin):
                 identity.username,
                 resume=resume_value,
             )
+            self.store.coverage.scope(
+                {
+                    key: getattr(self.args, key, None)
+                    for key in (
+                        "shares",
+                        "skip_share",
+                        "max_depth",
+                        "directory_budget",
+                        "expand_directory",
+                        "operating_mode",
+                        "host",
+                        "hosts_file",
+                        "snaffler_rules_dir",
+                    )
+                }
+            )
             self.output_dir = self.store.run_dir
+        self._directory_listings = 0
         self._resume_paths: Set[str] = set()
         if self.store and resume_value is not None:
             counts = self.store.summary_counts()
@@ -1925,13 +1945,46 @@ class Shrawler(SnafflerEngineMixin):
 
         if self.args.permission_check != "none" or require_listing:
             started = time.perf_counter()
+            did_list = False
             try:
-                root_results = list(smbclient.listPath(share, "*", password=None))
+                cached = (
+                    self.store.coverage.cached(self.current_host or "", share, "/")
+                    if self.store
+                    else None
+                )
+                if cached is None and self.store and require_listing:
+                    with self._state_lock:
+                        budget = getattr(self.args, "directory_budget", None)
+                        if budget is not None and self._directory_listings >= budget:
+                            self.store.coverage.mark(
+                                self.current_host or "",
+                                share,
+                                "/",
+                                0,
+                                "pending",
+                                "Directory budget exhausted",
+                            )
+                            return read_write, None
+                        self._directory_listings += 1
+                if cached is not None:
+                    root_results = cached
+                else:
+                    did_list = True
+                    root_results = list(smbclient.listPath(share, "*", password=None))
+                if cached is None and self.store and require_listing:
+                    self.store.coverage.listed(
+                        self.current_host or "", share, "/", 0, root_results
+                    )
                 read_write["read"] = True
-            except SessionError:
+            except SessionError as exc:
                 read_write["read"] = False
+                if self.store and require_listing:
+                    self.store.coverage.mark(
+                        self.current_host or "", share, "/", 0, "failed", str(exc)
+                    )
             finally:
-                self._record_operation("list_path", time.perf_counter() - started)
+                if did_list:
+                    self._record_operation("list_path", time.perf_counter() - started)
 
         if self.args.permission_check == "read-write":
             if (share_type & STYPE_MASK) != STYPE_DISKTREE:
@@ -2269,6 +2322,9 @@ class Shrawler(SnafflerEngineMixin):
         smbclient: Any,
         initial_results: Optional[List[Any]] = None,
     ) -> None:
+        if self.store:
+            self._spider_persisted(target, share, base_dir, smbclient, initial_results)
+            return
         directories: List[Any] = []
         files: List[Any] = []
         try:
@@ -2344,6 +2400,129 @@ class Shrawler(SnafflerEngineMixin):
 
         except Exception as e:
             logging.warning(f"Error accessing directory: {e}")
+
+    def _spider_persisted(
+        self,
+        target: str,
+        share: str,
+        base_dir: str,
+        smbclient: Any,
+        initial_results: Optional[List[Any]],
+    ) -> None:
+        from collections import deque
+
+        from .coverage import canonical
+
+        assert self.store is not None
+        coverage = self.store.coverage
+        work = deque([(canonical(base_dir), 0)])
+        selections = [
+            canonical(p).casefold()
+            for p in cast(List[str], getattr(self.args, "expand_directory", None) or [])
+        ]
+        while work:
+            path, depth = work.popleft()
+            cached = coverage.cached(target, share, path)
+            if (
+                cached is None
+                and selections
+                and path != "/"
+                and not any(
+                    selected == "/"
+                    or path.casefold() == selected
+                    or path.casefold().startswith(selected + "/")
+                    or selected.startswith(path.casefold() + "/")
+                    for selected in selections
+                )
+            ):
+                coverage.mark(
+                    target, share, path, depth, "pending", "Not selected for expansion"
+                )
+                continue
+            if depth > self.args.max_depth:
+                coverage.mark(
+                    target, share, path, depth, "depth_limit", "Maximum directory depth"
+                )
+                continue
+            if depth and self.snaffler_enabled:
+                discard, _ = self._evaluate_snaffler_directory(target, share, path)
+                if discard:
+                    coverage.mark(
+                        target,
+                        share,
+                        path,
+                        depth,
+                        "excluded",
+                        "Snaffler directory discard",
+                    )
+                    continue
+            try:
+                if cached is None:
+                    with self._state_lock:
+                        budget = getattr(self.args, "directory_budget", None)
+                        if budget is not None and self._directory_listings >= budget:
+                            coverage.mark(
+                                target,
+                                share,
+                                path,
+                                depth,
+                                "pending",
+                                "Directory budget exhausted",
+                            )
+                            continue
+                        self._directory_listings += 1
+                    if path == canonical(base_dir) and initial_results is not None:
+                        entries = initial_results
+                    else:
+                        if self.args.delay > 0:
+                            time.sleep(self.args.delay)
+                        started = time.perf_counter()
+                        entries = list(
+                            smbclient.listPath(
+                                share, path.rstrip("/") + "/*", password=None
+                            )
+                        )
+                        self._record_operation(
+                            "list_path", time.perf_counter() - started
+                        )
+                    coverage.listed(target, share, path, depth, entries)
+                    cached = coverage.cached(target, share, path) or []
+                files = [entry for entry in cached if not entry.is_directory()]
+                unique: Set[int] = (
+                    find_unique_files_in_directory(
+                        [(entry, entry.get_mtime_epoch()) for entry in files]
+                    )
+                    if self.args.unique
+                    else set()
+                )
+                if self.args.output_mode == "tree":
+                    print(escape_terminal(f"{target}\\{share}{path}"))
+                # Persisted listings are replayed locally after interruption. Files
+                # already recorded in this scan are skipped by the file handler.
+                for index, entry in enumerate(files):
+                    self._process_and_display_file(
+                        entry,
+                        "",
+                        path.rstrip("/"),
+                        smbclient,
+                        share,
+                        "",
+                        index == len(files) - 1,
+                        index in unique,
+                    )
+                coverage.mark(target, share, path, depth, "complete")
+                for entry in cached:
+                    if entry.is_directory():
+                        work.append(
+                            (canonical(path + "/" + entry.get_longname()), depth + 1)
+                        )
+            except Exception as exc:
+                coverage.mark(target, share, path, depth, "failed", str(exc))
+                logging.warning(
+                    "Error accessing directory %s: %s",
+                    escape_terminal(path),
+                    escape_terminal(str(exc)),
+                )
 
     def _process_and_display_file_root(
         self,

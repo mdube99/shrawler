@@ -4,6 +4,9 @@
   const token = new URLSearchParams(location.hash.slice(1)).get('token') || '';
   history.replaceState(null, '', location.pathname);
   $('inventory-link').href = '/' + (token ? `#token=${encodeURIComponent(token)}` : '');
+  const selectedFiles = new Set();
+  let manifests = [];
+  let retrievalEnabled = false;
   let catalog = {runs: [], scans: []};
   let cursors = [null];
   let nextCursor = null;
@@ -44,7 +47,7 @@
     $('save-ranking').disabled = active;
     $('cancel-job').hidden = !active;
   }
-  function resetPages() { cursors = [null]; nextCursor = null; }
+  function resetPages() { selectedFiles.clear(); cursors = [null]; nextCursor = null; }
   function updateCategories() {
     const run = catalog.runs.find(item => item.id === $('ranking-run').value);
     $('ranking-category').replaceChildren(option('', 'Highest category score'));
@@ -109,7 +112,14 @@
       const row = node('tr');
       row.append(node('td', String(item.review_score), 'ranking-score'), node('td', item.file_name), node('td', item.unc_path, 'ranking-path'));
       row.append(node('td', item.signals.filter(signal => signal.credited_points > 0).map(signal => signal.description).join('; ') || 'No supporting signals', 'ranking-reasons'));
-      const cell = node('td'); const button = node('button', 'Explain', 'button');
+      const cell = node('td');
+      if (!isPreview) {
+        const label = node('label', ' Collect ');
+        const select = node('input'); select.type = 'checkbox'; select.checked = selectedFiles.has(item.file_id);
+        select.addEventListener('change', () => { if (select.checked) selectedFiles.add(item.file_id); else selectedFiles.delete(item.file_id); });
+        label.prepend(select); cell.append(label);
+      }
+      const button = node('button', 'Explain', 'button');
       button.type = 'button'; button.addEventListener('click', () => showExplanation(item, isPreview)); cell.append(button); row.append(cell);
       $('ranked-files').append(row);
     });
@@ -222,9 +232,125 @@
   $('refresh-rankings').addEventListener('click', async () => { try { preview = null; resetPages(); await refreshCatalog(); await loadResults(); } catch (exception) { error(exception.message); } });
   $('close-explanation').addEventListener('click', () => $('explanation-dialog').close());
   $('explanation-dialog').addEventListener('click', event => { if (event.target === $('explanation-dialog')) $('explanation-dialog').close(); });
+  function showCollection() {
+    const manifest = manifests.find(item => item.id === $('collection-manifest').value);
+    $('collection-items').replaceChildren();
+    $('collection-run').disabled = !manifest || !retrievalEnabled;
+    $('collection-export').disabled = !manifest;
+    if (!manifest) { $('collection-status').textContent = 'No saved collection manifests.'; return; }
+    $('collection-status').textContent = `${manifest.expected_files} planned files · ${manifest.expected_bytes} expected bytes · ${manifest.consumed_bytes} received bytes · limits: ${manifest.max_file_size} per file / ${manifest.max_total_bytes} total. Previously collected files are skipped; status does not establish freshness.${retrievalEnabled ? '' : ' Offline session: retrieval disabled.'}`;
+    manifest.items.forEach(item => {
+      const row = node('tr');
+      [item.unc_path, item.size_bytes, item.reasons.join('; '), item.status, item.error || item.local_path || ''].forEach(value => row.append(node('td', String(value))));
+      $('collection-items').append(row);
+    });
+  }
+  async function refreshCollection(preferred) {
+    const selected = preferred || $('collection-manifest').value;
+    manifests = (await api('/api/collection')).items;
+    $('collection-manifest').replaceChildren(...manifests.map(item => option(item.id, `${item.name} · ${item.created_at}`)));
+    if (manifests.some(item => item.id === selected)) $('collection-manifest').value = selected;
+    showCollection();
+  }
+  $('collection-manifest').addEventListener('change', showCollection);
+  $('collection-refresh').addEventListener('click', () => refreshCollection().catch(exception => error(exception.message)));
+  $('collection-create').addEventListener('click', async () => {
+    try {
+      if (preview || !selectedFiles.size) throw new Error('Select candidates from a saved ranking first.');
+      const manifest = await api('/api/collection/create', {
+        run_id: $('ranking-run').value, category: $('ranking-category').value || null,
+        min_score: Number($('ranking-min').value), limit: 10000,
+        file_ids: [...selectedFiles], name: $('collection-name').value,
+        max_file_size: Number($('collection-file-limit').value), max_total_bytes: Number($('collection-total-limit').value)
+      });
+      await refreshCollection(manifest.id); error('');
+    } catch (exception) { error(exception.message); }
+  });
+  $('collection-run').addEventListener('click', async () => {
+    $('collection-run').disabled = true;
+    $('collection-status').textContent = 'Collecting exact paths from SMB. Outcomes are saved after each file.';
+    try { await api('/api/collection/run', {id: $('collection-manifest').value}); await refreshCollection(); error(''); }
+    catch (exception) { error(exception.message); $('collection-run').disabled = !retrievalEnabled; }
+  });
+  $('collection-export').addEventListener('click', () => {
+    const manifest = manifests.find(item => item.id === $('collection-manifest').value);
+    if (!manifest) return;
+    const url = URL.createObjectURL(new Blob([JSON.stringify(manifest, null, 2)], {type: 'application/json'}));
+    const link = node('a'); link.href = url; link.download = `collection-${manifest.id}.json`; link.click();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+  });
+  let familyScan = null;
+  let familyOffset = 0;
+  function reviewControls(scope, target) {
+    const controls = node('div', undefined, 'ranking-controls');
+    const disposition = node('select');
+    disposition.setAttribute('aria-label', 'Review disposition');
+    ['reviewed', 'relevant', 'defer', 'exclude'].forEach(value => disposition.append(option(value, value)));
+    const note = node('input'); note.placeholder = 'Review note'; note.maxLength = 4000;
+    note.setAttribute('aria-label', 'Review note');
+    const save = node('button', `Save ${scope} decision`, 'button'); save.type = 'button';
+    save.addEventListener('click', async () => {
+      try {
+        const event = await api('/api/review/decide', {scope, target, disposition: disposition.value, note: note.value});
+        $('review-undo-id').value = event.event_id;
+        $('families-status').textContent = `Saved ${scope} decision ${event.event_id}: ${event.disposition}. Run a new ranking to apply it. Existing manifests retain their reviewed selection.`;
+        error('');
+      } catch (exception) { error(exception.message); }
+    });
+    controls.append(disposition, note, save); return controls;
+  }
+  async function loadFamilies() {
+    familyScan = $('scan').value || familyScan || catalog.scans.find(item => item.status === 'completed')?.id;
+    if (!familyScan) throw new Error('Select a scan first.');
+    const result = await api(`/api/review/families?${new URLSearchParams({scan: familyScan, offset: String(familyOffset)})}`);
+    $('families-list').replaceChildren();
+    $('families-prev').disabled = familyOffset === 0;
+    $('families-next').disabled = result.items.length < 100;
+    result.items.forEach(family => {
+      const section = node('details');
+      section.append(node('summary', `${family.file_count} files · ${family.representative} · ${family.first_mtime} — ${family.last_mtime}${family.review ? ` · ${family.review.disposition} (event ${family.review.id})` : ''}`));
+      section.append(reviewControls('family', family.family_id));
+      const members = node('div'); const more = node('button', 'Load members', 'button'); more.type = 'button';
+      let offset = 0;
+      more.addEventListener('click', async () => {
+        try {
+          const page = await api(`/api/review/families?${new URLSearchParams({scan: familyScan, family: family.family_id, offset: String(offset)})}`);
+          page.items.forEach(item => { const member = node('div'); member.append(node('p', item.unc_path), reviewControls('file', item.file_id)); members.append(member); });
+          offset += page.items.length; more.disabled = page.items.length < 100; more.textContent = 'Load more members';
+        } catch (exception) { error(exception.message); }
+      });
+      section.append(members, more); $('families-list').append(section);
+    });
+  }
+  $('families-build').addEventListener('click', async () => {
+    $('families-build').disabled = true; $('families-status').textContent = 'Grouping saved metadata…';
+    try {
+      const result = await api('/api/review/build', {scan_id: $('scan').value || null});
+      familyScan = result.scan_id; familyOffset = 0; await loadFamilies();
+      $('families-status').textContent = `${result.files} files in ${result.families} provisional families.`;
+    } catch (exception) { error(exception.message); }
+    finally { $('families-build').disabled = false; }
+  });
+  $('families-refresh').addEventListener('click', () => loadFamilies().catch(exception => error(exception.message)));
+  $('families-prev').addEventListener('click', () => { familyOffset = Math.max(0, familyOffset - 100); loadFamilies().catch(exception => error(exception.message)); });
+  $('families-next').addEventListener('click', () => { familyOffset += 100; loadFamilies().catch(exception => error(exception.message)); });
+  $('review-undo').addEventListener('click', async () => {
+    try { await api('/api/review/undo', {event_id: Number($('review-undo-id').value)}); $('families-status').textContent = 'Decision undone. Run a new ranking to apply the change.'; await loadFamilies(); }
+    catch (exception) { error(exception.message); }
+  });
+  $('families-hash').addEventListener('click', async () => {
+    try {
+      $('families-status').textContent = 'Hashing local collected evidence…';
+      const result = await api('/api/review/hashes', {});
+      $('families-status').textContent = `${result.hashed_files} local files hashed; ${result.duplicates.length} confirmed duplicate groups.`;
+      $('families-list').replaceChildren(node('pre', JSON.stringify(result.duplicates, null, 2)));
+    } catch (exception) { error(exception.message); }
+  });
   (async () => {
     try {
       const status = await api('/api/status');
+      retrievalEnabled = status.retrieval_enabled;
+      await refreshCollection();
       $('mode').textContent = status.retrieval_enabled ? 'Scoring is offline' : 'Offline session';
       await refreshCatalog(); await loadResults(); await pollJob();
       setInterval(pollJob, 1500);

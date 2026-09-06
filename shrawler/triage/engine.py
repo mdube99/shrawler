@@ -7,7 +7,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from .rules import RuleSet
 
-ENGINE_VERSION = "2"
+ENGINE_VERSION = "3"
 
 SiblingLookup = Callable[
     [str, str, Tuple[str, ...], Dict[str, Any]], List[Dict[str, Any]]

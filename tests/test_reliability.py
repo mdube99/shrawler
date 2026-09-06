@@ -135,7 +135,6 @@ class ReliabilityTests(unittest.TestCase):
                 release_a.wait(timeout=2)
             else:
                 b_finished.set()
-                release_a.set()
             return HostRenderResult(
                 host=host,
                 display_name=host,
@@ -149,6 +148,14 @@ class ReliabilityTests(unittest.TestCase):
                 ],
             )
 
+        render_result = crawler._render_host_result
+
+        def render_then_release(result):
+            render_result(result)
+            if result.host == "host-b":
+                release_a.set()
+
+        crawler._render_host_result = render_then_release
         crawler._scan_host = scan_host
         output = StringIO()
         with redirect_stdout(output):

@@ -152,6 +152,16 @@ def _scan_parser(mode: str) -> argparse.ArgumentParser:
         help="resume an incomplete scan; omit SCAN_ID for the most recent",
     )
     if mode in {"spider", "snaffle"}:
+        parser.add_argument(
+            "--directory-budget",
+            type=int,
+            help="maximum additional directory listings per invocation (root listings included)",
+        )
+        parser.add_argument(
+            "--expand-directory",
+            action="append",
+            help="on resume, expand this exact share-relative subtree; repeat to select more",
+        )
         spider = parser.add_argument_group("downloads and content analysis")
         spider.add_argument(
             "--download-ext",
@@ -555,6 +565,9 @@ commands:
   shares    Enumerate shares and assess permissions
   spider    Recursively inventory files on readable shares
   snaffle   Classify files using Snaffler rules
+  review    Group file families, record decisions, undo, and hash local evidence
+  coverage  Inspect directory coverage, failures, and pending work
+  collect   Create, review, and run persistent collection manifests
   triage    Rank and explain saved inventory metadata offline
   report    Summarize saved results or retry Nemesis uploads
   web       Search saved results and retrieve indexed files locally
@@ -591,6 +604,18 @@ def main(argv: Optional[List[str]] = None) -> None:
         _print_top_level_help()
         return
     command = arguments[0]
+    if command == "review":
+        from .triage.review import main as review_main
+
+        raise SystemExit(review_main(arguments[1:]))
+    if command == "coverage":
+        from .coverage import main as coverage_main
+
+        raise SystemExit(coverage_main(arguments[1:]))
+    if command == "collect":
+        from .collection import main as collect_main
+
+        raise SystemExit(collect_main(arguments[1:]))
     if command == "triage":
         from .triage.cli import main as triage_main
 

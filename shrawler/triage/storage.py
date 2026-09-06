@@ -54,7 +54,7 @@ def connect_readonly(path: Path) -> sqlite3.Connection:
     return connection
 
 
-def _select_scan(
+def select_scan(
     connection: sqlite3.Connection, requested: Optional[str]
 ) -> sqlite3.Row:
     if requested:
@@ -125,7 +125,7 @@ def rank(
     # BEGIN pins all scan observations to a single SQLite read snapshot.
     with closing(connect_readonly(database)) as source:
         source.execute("BEGIN")
-        scan = _select_scan(source, scan_id)
+        scan = select_scan(source, scan_id)
         scan_data = dict(scan)
         with closing(sqlite3.connect(destination)) as target:
             target.execute("PRAGMA foreign_keys=ON")
@@ -153,8 +153,18 @@ def rank(
             )
             target.commit()
             try:
+                from .signals import InventorySignals
+
                 sibling_index = SiblingIndex(target, rules)
-                if sibling_index.contexts:
+                inventory_signals = InventorySignals(
+                    target,
+                    database,
+                    any(
+                        rule["id"].startswith("builtin.")
+                        for rule in rules.document.get("rules", [])
+                    ),
+                )
+                if sibling_index.contexts or inventory_signals.builtins:
                     if on_phase:
                         on_phase("indexing sibling names", 0)
                     for indexed, metadata in enumerate(
@@ -163,6 +173,7 @@ def rank(
                         if cancelled and cancelled():
                             raise KeyboardInterrupt
                         sibling_index.observe(metadata)
+                        inventory_signals.observe(metadata)
                         if indexed % 1000 == 0:
                             target.commit()
                         if on_phase and indexed % 10000 == 0:
@@ -178,6 +189,7 @@ def rank(
                     )
                     digest.update(serialized.encode() + b"\n")
                     evaluated = engine.evaluate(metadata)
+                    inventory_signals.apply(metadata, evaluated)
                     if evaluated["priority"] > 0:
                         summary["positive_files"] += 1
                         group = (

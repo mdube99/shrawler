@@ -54,5 +54,9 @@ if the file is downloaded.
 ## WebUI retrievals
 
 The WebUI keeps a small per-host SMB session pool and permits two concurrent
-retrievals. Table results are paginated. Tree data contains the complete
-filtered inventory, but the browser renders only expanded branches.
+retrievals. Table results are queried and paginated in SQLite. Tree branches are
+loaded only when expanded.
+
+Scan discoveries are committed to `shrawler.db` in bounded batches. This avoids
+rewriting a growing JSON document for each file and permits concurrent WebUI
+reads through SQLite WAL mode.

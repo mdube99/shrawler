@@ -1,0 +1,407 @@
+{
+  "_schema": {
+    "name": "shrawler-results",
+    "version": 3
+  },
+  "_summary": {
+    "fixture": true,
+    "description": "Synthetic inventory for Shrawler WebUI testing",
+    "hosts_attempted": 3,
+    "shares_enumerated": 7,
+    "files_seen": 37
+  },
+  "FS-FIN-01": {
+    "shares": {
+      "Finance$": {
+        "read_access": true,
+        "write_access": false,
+        "discovered_files": [
+          {
+            "remote_path": "\\Quarterly Reports\\2026\\Q3\\Consolidated-Forecast.xlsx",
+            "unc_path": "\\\\FS-FIN-01\\Finance$\\Quarterly Reports\\2026\\Q3\\Consolidated-Forecast.xlsx",
+            "file_name": "Consolidated-Forecast.xlsx",
+            "size_bytes": 4582312,
+            "readable_size": "4.4 MB",
+            "mtime_utc": "2026-09-03T12:00:00+00:00",
+            "scan_timestamp_utc": "2026-09-03T12:00:00+00:00"
+          },
+          {
+            "remote_path": "/Quarterly Reports/2026/Q3/Board-Presentation-FINAL.pdf",
+            "unc_path": "\\\\FS-FIN-01\\Finance$\\Quarterly Reports\\2026\\Q3\\Board-Presentation-FINAL.pdf",
+            "file_name": "Board-Presentation-FINAL.pdf",
+            "size_bytes": 12804991,
+            "readable_size": "12.2 MB",
+            "mtime_utc": "2026-08-27T11:00:00+00:00",
+            "scan_timestamp_utc": "2026-09-03T12:00:00+00:00"
+          },
+          {
+            "remote_path": "/Quarterly Reports/2026/Q2/revenue_by_region.csv",
+            "unc_path": "\\\\FS-FIN-01\\Finance$\\Quarterly Reports\\2026\\Q2\\revenue_by_region.csv",
+            "file_name": "revenue_by_region.csv",
+            "size_bytes": 284221,
+            "readable_size": "277.6 KB",
+            "mtime_utc": "2026-08-20T10:00:00+00:00",
+            "scan_timestamp_utc": "2026-09-03T12:00:00+00:00"
+          },
+          {
+            "remote_path": "\\Payroll\\Exports\\employee_payroll_2026-08.xlsx",
+            "unc_path": "\\\\FS-FIN-01\\Finance$\\Payroll\\Exports\\employee_payroll_2026-08.xlsx",
+            "file_name": "employee_payroll_2026-08.xlsx",
+            "size_bytes": 1944102,
+            "readable_size": "1.9 MB",
+            "mtime_utc": "2026-08-13T09:00:00+00:00",
+            "scan_timestamp_utc": "2026-09-03T12:00:00+00:00"
+          },
+          {
+            "remote_path": "/Payroll/Archive/payroll-system-backup.bak",
+            "unc_path": "\\\\FS-FIN-01\\Finance$\\Payroll\\Archive\\payroll-system-backup.bak",
+            "file_name": "payroll-system-backup.bak",
+            "size_bytes": 87229440,
+            "readable_size": "83.2 MB",
+            "mtime_utc": "2026-08-06T08:00:00+00:00",
+            "scan_timestamp_utc": "2026-09-03T12:00:00+00:00"
+          },
+          {
+            "remote_path": "/Tax/2025/Corporate-Tax-Return.pdf",
+            "unc_path": "\\\\FS-FIN-01\\Finance$\\Tax\\2025\\Corporate-Tax-Return.pdf",
+            "file_name": "Corporate-Tax-Return.pdf",
+            "size_bytes": 3412992,
+            "readable_size": "3.3 MB",
+            "mtime_utc": "2026-07-30T07:00:00+00:00",
+            "scan_timestamp_utc": "2026-09-03T12:00:00+00:00"
+          },
+          {
+            "remote_path": "\\Audit\\External\\requests-and-responses.docx",
+            "unc_path": "\\\\FS-FIN-01\\Finance$\\Audit\\External\\requests-and-responses.docx",
+            "file_name": "requests-and-responses.docx",
+            "size_bytes": 842113,
+            "readable_size": "822.4 KB",
+            "mtime_utc": "2026-07-23T06:00:00+00:00",
+            "scan_timestamp_utc": "2026-09-03T12:00:00+00:00"
+          }
+        ],
+        "downloaded_files": []
+      },
+      "Public": {
+        "read_access": true,
+        "write_access": true,
+        "discovered_files": [
+          {
+            "remote_path": "/Policies/Expense Policy 2026.pdf",
+            "unc_path": "\\\\FS-FIN-01\\Public\\Policies\\Expense Policy 2026.pdf",
+            "file_name": "Expense Policy 2026.pdf",
+            "size_bytes": 912441,
+            "readable_size": "891.1 KB",
+            "mtime_utc": "2026-07-16T05:00:00+00:00",
+            "scan_timestamp_utc": "2026-09-03T12:00:00+00:00"
+          },
+          {
+            "remote_path": "/Templates/Budget Request.xlsx",
+            "unc_path": "\\\\FS-FIN-01\\Public\\Templates\\Budget Request.xlsx",
+            "file_name": "Budget Request.xlsx",
+            "size_bytes": 88104,
+            "readable_size": "86.0 KB",
+            "mtime_utc": "2026-07-09T04:00:00+00:00",
+            "scan_timestamp_utc": "2026-09-03T12:00:00+00:00"
+          },
+          {
+            "remote_path": "\\Team Photos\\finance-offsite.png",
+            "unc_path": "\\\\FS-FIN-01\\Public\\Team Photos\\finance-offsite.png",
+            "file_name": "finance-offsite.png",
+            "size_bytes": 2781992,
+            "readable_size": "2.7 MB",
+            "mtime_utc": "2026-07-02T03:00:00+00:00",
+            "scan_timestamp_utc": "2026-09-03T12:00:00+00:00"
+          },
+          {
+            "remote_path": "/International/café-expenses.csv",
+            "unc_path": "\\\\FS-FIN-01\\Public\\International\\café-expenses.csv",
+            "file_name": "café-expenses.csv",
+            "size_bytes": 14822,
+            "readable_size": "14.5 KB",
+            "mtime_utc": "2026-06-25T02:00:00+00:00",
+            "scan_timestamp_utc": "2026-09-03T12:00:00+00:00"
+          }
+        ],
+        "downloaded_files": []
+      }
+    }
+  },
+  "DC-LAB-01": {
+    "shares": {
+      "SYSVOL": {
+        "read_access": true,
+        "write_access": false,
+        "discovered_files": [
+          {
+            "remote_path": "/corp.example/Policies/{31B2F340}/Machine/Scripts/Startup/bootstrap.ps1",
+            "unc_path": "\\\\DC-LAB-01\\SYSVOL\\corp.example\\Policies\\{31B2F340}\\Machine\\Scripts\\Startup\\bootstrap.ps1",
+            "file_name": "bootstrap.ps1",
+            "size_bytes": 18920,
+            "readable_size": "18.5 KB",
+            "mtime_utc": "2026-06-18T01:00:00+00:00",
+            "scan_timestamp_utc": "2026-09-03T12:00:00+00:00"
+          },
+          {
+            "remote_path": "\\corp.example\\Policies\\{31B2F340}\\Machine\\Registry.pol",
+            "unc_path": "\\\\DC-LAB-01\\SYSVOL\\corp.example\\Policies\\{31B2F340}\\Machine\\Registry.pol",
+            "file_name": "Registry.pol",
+            "size_bytes": 4096,
+            "readable_size": "4.0 KB",
+            "mtime_utc": "2026-06-11T00:00:00+00:00",
+            "scan_timestamp_utc": "2026-09-03T12:00:00+00:00"
+          },
+          {
+            "remote_path": "/corp.example/Policies/{A91F-TEST}/User/Scripts/logon.cmd",
+            "unc_path": "\\\\DC-LAB-01\\SYSVOL\\corp.example\\Policies\\{A91F-TEST}\\User\\Scripts\\logon.cmd",
+            "file_name": "logon.cmd",
+            "size_bytes": 2201,
+            "readable_size": "2.1 KB",
+            "mtime_utc": "2026-06-03T23:00:00+00:00",
+            "scan_timestamp_utc": "2026-09-03T12:00:00+00:00"
+          },
+          {
+            "remote_path": "/corp.example/scripts/legacy-map-drives.vbs",
+            "unc_path": "\\\\DC-LAB-01\\SYSVOL\\corp.example\\scripts\\legacy-map-drives.vbs",
+            "file_name": "legacy-map-drives.vbs",
+            "size_bytes": 8114,
+            "readable_size": "7.9 KB",
+            "mtime_utc": "2026-05-27T22:00:00+00:00",
+            "scan_timestamp_utc": "2026-09-03T12:00:00+00:00"
+          }
+        ],
+        "downloaded_files": []
+      },
+      "NETLOGON": {
+        "read_access": true,
+        "write_access": false,
+        "discovered_files": [
+          {
+            "remote_path": "\\scripts\\printer-install.ps1",
+            "unc_path": "\\\\DC-LAB-01\\NETLOGON\\scripts\\printer-install.ps1",
+            "file_name": "printer-install.ps1",
+            "size_bytes": 7992,
+            "readable_size": "7.8 KB",
+            "mtime_utc": "2026-05-20T21:00:00+00:00",
+            "scan_timestamp_utc": "2026-09-03T12:00:00+00:00"
+          },
+          {
+            "remote_path": "/scripts/software-deployment.bat",
+            "unc_path": "\\\\DC-LAB-01\\NETLOGON\\scripts\\software-deployment.bat",
+            "file_name": "software-deployment.bat",
+            "size_bytes": 3188,
+            "readable_size": "3.1 KB",
+            "mtime_utc": "2026-05-13T20:00:00+00:00",
+            "scan_timestamp_utc": "2026-09-03T12:00:00+00:00"
+          },
+          {
+            "remote_path": "/config/deployment.config",
+            "unc_path": "\\\\DC-LAB-01\\NETLOGON\\config\\deployment.config",
+            "file_name": "deployment.config",
+            "size_bytes": 1024,
+            "readable_size": "1.0 KB",
+            "mtime_utc": "2026-05-06T19:00:00+00:00",
+            "scan_timestamp_utc": "2026-09-03T12:00:00+00:00"
+          },
+          {
+            "remote_path": "\\archives\\old-logon-scripts.zip",
+            "unc_path": "\\\\DC-LAB-01\\NETLOGON\\archives\\old-logon-scripts.zip",
+            "file_name": "old-logon-scripts.zip",
+            "size_bytes": 448102,
+            "readable_size": "437.6 KB",
+            "mtime_utc": "2026-04-30T12:00:00+00:00",
+            "scan_timestamp_utc": "2026-09-03T12:00:00+00:00"
+          }
+        ],
+        "downloaded_files": []
+      }
+    }
+  },
+  "NAS-ARCHIVE": {
+    "shares": {
+      "Engineering": {
+        "read_access": true,
+        "write_access": false,
+        "discovered_files": [
+          {
+            "remote_path": "/Projects/Aurora/config/production.env",
+            "unc_path": "\\\\NAS-ARCHIVE\\Engineering\\Projects\\Aurora\\config\\production.env",
+            "file_name": "production.env",
+            "size_bytes": 2814,
+            "readable_size": "2.7 KB",
+            "mtime_utc": "2026-04-23T11:00:00+00:00",
+            "scan_timestamp_utc": "2026-09-03T12:00:00+00:00"
+          },
+          {
+            "remote_path": "/Projects/Aurora/config/secrets.yaml",
+            "unc_path": "\\\\NAS-ARCHIVE\\Engineering\\Projects\\Aurora\\config\\secrets.yaml",
+            "file_name": "secrets.yaml",
+            "size_bytes": 4201,
+            "readable_size": "4.1 KB",
+            "mtime_utc": "2026-04-16T10:00:00+00:00",
+            "scan_timestamp_utc": "2026-09-03T12:00:00+00:00"
+          },
+          {
+            "remote_path": "\\Projects\\Aurora\\docs\\architecture.md",
+            "unc_path": "\\\\NAS-ARCHIVE\\Engineering\\Projects\\Aurora\\docs\\architecture.md",
+            "file_name": "architecture.md",
+            "size_bytes": 48992,
+            "readable_size": "47.8 KB",
+            "mtime_utc": "2026-04-09T09:00:00+00:00",
+            "scan_timestamp_utc": "2026-09-03T12:00:00+00:00"
+          },
+          {
+            "remote_path": "/Projects/Aurora/releases/aurora-client.exe",
+            "unc_path": "\\\\NAS-ARCHIVE\\Engineering\\Projects\\Aurora\\releases\\aurora-client.exe",
+            "file_name": "aurora-client.exe",
+            "size_bytes": 22804992,
+            "readable_size": "21.7 MB",
+            "mtime_utc": "2026-04-02T08:00:00+00:00",
+            "scan_timestamp_utc": "2026-09-03T12:00:00+00:00"
+          },
+          {
+            "remote_path": "/Projects/Aurora/releases/aurora-support.dll",
+            "unc_path": "\\\\NAS-ARCHIVE\\Engineering\\Projects\\Aurora\\releases\\aurora-support.dll",
+            "file_name": "aurora-support.dll",
+            "size_bytes": 4208114,
+            "readable_size": "4.0 MB",
+            "mtime_utc": "2026-03-26T07:00:00+00:00",
+            "scan_timestamp_utc": "2026-09-03T12:00:00+00:00"
+          },
+          {
+            "remote_path": "\\Projects\\Beacon\\database\\customer-export.sql",
+            "unc_path": "\\\\NAS-ARCHIVE\\Engineering\\Projects\\Beacon\\database\\customer-export.sql",
+            "file_name": "customer-export.sql",
+            "size_bytes": 148294110,
+            "readable_size": "141.4 MB",
+            "mtime_utc": "2026-03-19T06:00:00+00:00",
+            "scan_timestamp_utc": "2026-09-03T12:00:00+00:00"
+          },
+          {
+            "remote_path": "/Projects/Beacon/keys/service-account.pem",
+            "unc_path": "\\\\NAS-ARCHIVE\\Engineering\\Projects\\Beacon\\keys\\service-account.pem",
+            "file_name": "service-account.pem",
+            "size_bytes": 3244,
+            "readable_size": "3.2 KB",
+            "mtime_utc": "2026-03-12T05:00:00+00:00",
+            "scan_timestamp_utc": "2026-09-03T12:00:00+00:00"
+          },
+          {
+            "remote_path": "/Projects/Beacon/README.txt",
+            "unc_path": "\\\\NAS-ARCHIVE\\Engineering\\Projects\\Beacon\\README.txt",
+            "file_name": "README.txt",
+            "size_bytes": 8913,
+            "readable_size": "8.7 KB",
+            "mtime_utc": "2026-03-05T04:00:00+00:00",
+            "scan_timestamp_utc": "2026-09-03T12:00:00+00:00"
+          }
+        ],
+        "downloaded_files": []
+      },
+      "Backups": {
+        "read_access": true,
+        "write_access": false,
+        "discovered_files": [
+          {
+            "remote_path": "\\Workstations\\ALICE-PC\\Users\\alice\\Documents\\passwords.kdbx",
+            "unc_path": "\\\\NAS-ARCHIVE\\Backups\\Workstations\\ALICE-PC\\Users\\alice\\Documents\\passwords.kdbx",
+            "file_name": "passwords.kdbx",
+            "size_bytes": 184320,
+            "readable_size": "180.0 KB",
+            "mtime_utc": "2026-02-26T03:00:00+00:00",
+            "scan_timestamp_utc": "2026-09-03T12:00:00+00:00"
+          },
+          {
+            "remote_path": "/Mail/Executives/ceo-archive.pst",
+            "unc_path": "\\\\NAS-ARCHIVE\\Backups\\Mail\\Executives\\ceo-archive.pst",
+            "file_name": "ceo-archive.pst",
+            "size_bytes": 2482294114,
+            "readable_size": "2.3 GB",
+            "mtime_utc": "2026-02-19T02:00:00+00:00",
+            "scan_timestamp_utc": "2026-09-03T12:00:00+00:00"
+          },
+          {
+            "remote_path": "/Databases/CRM/crm-full-2026-09-01.bak",
+            "unc_path": "\\\\NAS-ARCHIVE\\Backups\\Databases\\CRM\\crm-full-2026-09-01.bak",
+            "file_name": "crm-full-2026-09-01.bak",
+            "size_bytes": 8942012771,
+            "readable_size": "8.3 GB",
+            "mtime_utc": "2026-02-12T01:00:00+00:00",
+            "scan_timestamp_utc": "2026-09-03T12:00:00+00:00"
+          },
+          {
+            "remote_path": "\\Databases\\CRM\\crm-schema.sql",
+            "unc_path": "\\\\NAS-ARCHIVE\\Backups\\Databases\\CRM\\crm-schema.sql",
+            "file_name": "crm-schema.sql",
+            "size_bytes": 2841992,
+            "readable_size": "2.7 MB",
+            "mtime_utc": "2026-02-05T00:00:00+00:00",
+            "scan_timestamp_utc": "2026-09-03T12:00:00+00:00"
+          },
+          {
+            "remote_path": "/Servers/WEB-01/etc/nginx/nginx.conf",
+            "unc_path": "\\\\NAS-ARCHIVE\\Backups\\Servers\\WEB-01\\etc\\nginx\\nginx.conf",
+            "file_name": "nginx.conf",
+            "size_bytes": 12841,
+            "readable_size": "12.5 KB",
+            "mtime_utc": "2026-01-28T23:00:00+00:00",
+            "scan_timestamp_utc": "2026-09-03T12:00:00+00:00"
+          },
+          {
+            "remote_path": "/Servers/WEB-01/var/log/access.log",
+            "unc_path": "\\\\NAS-ARCHIVE\\Backups\\Servers\\WEB-01\\var\\log\\access.log",
+            "file_name": "access.log",
+            "size_bytes": 48991201,
+            "readable_size": "46.7 MB",
+            "mtime_utc": "2026-01-21T22:00:00+00:00",
+            "scan_timestamp_utc": "2026-09-03T12:00:00+00:00"
+          }
+        ],
+        "downloaded_files": []
+      },
+      "Legal": {
+        "read_access": true,
+        "write_access": false,
+        "discovered_files": [
+          {
+            "remote_path": "\\Cases\\Example Matter\\Discovery\\Production_Index.csv",
+            "unc_path": "\\\\NAS-ARCHIVE\\Legal\\Cases\\Example Matter\\Discovery\\Production_Index.csv",
+            "file_name": "Production_Index.csv",
+            "size_bytes": 78441,
+            "readable_size": "76.6 KB",
+            "mtime_utc": "2026-01-14T21:00:00+00:00",
+            "scan_timestamp_utc": "2026-09-03T12:00:00+00:00"
+          },
+          {
+            "remote_path": "/Cases/Example Matter/Discovery/Very-Long-Evidence-Filename-Designed-To-Test-Truncation-And-Responsive-Layouts-Final-v12.pdf",
+            "unc_path": "\\\\NAS-ARCHIVE\\Legal\\Cases\\Example Matter\\Discovery\\Very-Long-Evidence-Filename-Designed-To-Test-Truncation-And-Responsive-Layouts-Final-v12.pdf",
+            "file_name": "Very-Long-Evidence-Filename-Designed-To-Test-Truncation-And-Responsive-Layouts-Final-v12.pdf",
+            "size_bytes": 19882114,
+            "readable_size": "19.0 MB",
+            "mtime_utc": "2026-01-07T20:00:00+00:00",
+            "scan_timestamp_utc": "2026-09-03T12:00:00+00:00"
+          },
+          {
+            "remote_path": "/Contracts/2026/Vendor Agreement - Example Corp.docx",
+            "unc_path": "\\\\NAS-ARCHIVE\\Legal\\Contracts\\2026\\Vendor Agreement - Example Corp.docx",
+            "file_name": "Vendor Agreement - Example Corp.docx",
+            "size_bytes": 441209,
+            "readable_size": "430.9 KB",
+            "mtime_utc": "2025-12-31T19:00:00+00:00",
+            "scan_timestamp_utc": "2026-09-03T12:00:00+00:00"
+          },
+          {
+            "remote_path": "\\Research\\notes.json",
+            "unc_path": "\\\\NAS-ARCHIVE\\Legal\\Research\\notes.json",
+            "file_name": "notes.json",
+            "size_bytes": 88221,
+            "readable_size": "86.2 KB",
+            "mtime_utc": "2025-12-25T12:00:00+00:00",
+            "scan_timestamp_utc": "2026-09-03T12:00:00+00:00"
+          }
+        ],
+        "downloaded_files": []
+      }
+    }
+  }
+}

@@ -71,7 +71,7 @@ shrawler snaffle 'DOMAIN/user@server' \
 Open the saved inventory:
 
 ```bash
-shrawler web ./results/shrawler_results.json 'DOMAIN/user@server'
+shrawler web 'DOMAIN/user@server' ./results/shrawler.db
 ```
 
 ## Commands
@@ -81,6 +81,7 @@ shrawler web ./results/shrawler_results.json 'DOMAIN/user@server'
 | `shares` | Enumerate shares and assess permissions without recursion |
 | `spider` | Recursively inventory files on readable shares |
 | `snaffle` | Inventory files and apply Snaffler classification rules |
+| `triage` | Rank saved inventory metadata offline and explain review priorities |
 | `report` | Summarize results or retry failed Nemesis uploads |
 | `web` | Browse saved results and retrieve selected files |
 | `config` | Create and inspect persistent configuration |
@@ -154,6 +155,8 @@ shrawler spider 'DOMAIN/user@server' \
 
 ### Download selected file types
 
+The default download extension set includes KeePass `.kdbx` and `.kdb` databases.
+
 ```bash
 shrawler spider 'DOMAIN/user@server' \
   --download-ext '.config,.txt,.xlsx' \
@@ -163,15 +166,28 @@ shrawler spider 'DOMAIN/user@server' \
 Omit the value after `--download-ext` to download every file that fits the
 configured limits. Use `--download-ext default` for Shrawler's default set.
 
+### Review share coverage
+
+Skipped shares are shown with their reasons and saved in JSON and share CSV
+reports. Include normally excluded administrative shares explicitly:
+
+```bash
+shrawler spider 'DOMAIN/user@server' --include-all-shares
+```
+
+Explicit `--exclude-share` options still apply. `--share SYSVOL` selects that
+share even though it is excluded by default.
+
 ### Resume an interrupted scan
 
 ```bash
-shrawler spider 'DOMAIN/user@server' --resume ./results
+shrawler spider 'DOMAIN/user@server' --output ./results --resume
 ```
 
-Shrawler appends discoveries to `scan-events.jsonl` and atomically publishes
-`scan-state.json`. Completed hosts and shares are skipped during resume, and
-previously recorded file paths are not processed twice.
+Shrawler resumes the most recent interrupted scan in the workspace database.
+Pass a short scan ID after `--resume` to select a different interrupted scan.
+Completed hosts and shares are skipped, and recorded file paths are not
+processed twice.
 
 ### Use a low-noise profile
 
@@ -216,7 +232,7 @@ and operational guidance.
 ## Local WebUI
 
 ```bash
-shrawler web ./results/shrawler_results.json 'DOMAIN/user@server'
+shrawler web 'DOMAIN/user@server' ./results/shrawler.db
 ```
 
 Shrawler prints the local URL without opening a browser.
@@ -224,9 +240,11 @@ Shrawler prints the local URL without opening a browser.
 The WebUI provides:
 
 - Paginated Table view for dense file review
-- Complete filtered Tree view grouped by host, share, and folder
+- Lazy-loading Tree view grouped by host, share, and folder
 - Search by filename, path, host, share, or extension
 - Inline file metadata and copyable UNC paths
+- Rule, triage, share-root permission, and collection-status filters
+- Findings and collection indicators with evidence from each file's latest scan
 - Conservative text, image, and PDF previews
 - Live file retrieval from the recorded SMB source
 
@@ -234,24 +252,12 @@ The server binds to `127.0.0.1`. Local browser access does not require a WebUI
 token by default. Add `--token-auth` to require a random bearer token:
 
 ```bash
-shrawler web ./results/shrawler_results.json 'DOMAIN/user@server' --token-auth
+shrawler web 'DOMAIN/user@server' ./results/shrawler.db --token-auth
 ```
 
 SMB credentials stay in the server process and are never sent to the browser.
 The browser can request only opaque file identifiers from the loaded inventory,
 not arbitrary SMB coordinates.
-
-### Try the interface without scanning
-
-The repository includes a synthetic schema-v3 inventory:
-
-```bash
-shrawler web ./test_shrawler_results.json 'user@127.0.0.1' -no-pass
-```
-
-Search, filtering, pagination, and Tree navigation work without live SMB hosts.
-Preview and Download fail as expected because the fixture refers to nonexistent
-test systems.
 
 See [docs/webui.md](docs/webui.md) for preview types, size limits, and security
 details.
@@ -260,16 +266,17 @@ details.
 
 | Path | Contents |
 | :--- | :--- |
-| `shrawler_results.json` | Schema-versioned consolidated results |
-| `scan-events.jsonl` | Append-only discovery and checkpoint events |
-| `scan-state.json` | Latest atomic resume state |
+| `shrawler.db` | Live multi-scan inventory and resume state |
+| `runs/<run>/shrawler_results.json` | Schema-versioned results for one scan |
 | `shrawler_shares.csv` | Share permissions when CSV output is enabled |
 | `shrawler_files.csv` | Discovered files when CSV output is enabled |
 | `shrawler_downloads.csv` | Download metadata when CSV output is enabled |
 | `shrawler_snaffler_matches.csv` | Snaffler matches when CSV output is enabled |
-| `downloads/` | Files downloaded from SMB |
+| `runs/<run>/downloads/` | Files downloaded from SMB during one scan |
 
-JSON output currently uses schema version 3. It contains `_schema` and
+The default workspace is `./shrawler`; `--output DIR` selects another workspace.
+Each scan receives an automatic folder under `runs/`. JSON is exported on normal
+completion and on Ctrl+C. JSON output currently uses schema version 3 and contains `_schema` and
 `_summary`, per-host status, per-share permissions, discovered files, download
 digests, and Nemesis delivery state when configured.
 
@@ -319,6 +326,25 @@ not want to store those credentials in the file.
 
 ## Snaffler and Nemesis
 
+For offline review before collection, score a saved inventory using metadata and
+bounded directory context:
+
+```bash
+shrawler triage run ./results/shrawler.db
+shrawler triage list ./results/shrawler.db --category infrastructure --limit 100
+shrawler triage explain ./results/shrawler.db -- FILE_ID
+```
+
+Triage requires no SMB credentials or remote reads. Scores express review
+priority, with per-rule evidence; they do not confirm sensitive content. See
+[Offline metadata triage](docs/triage.md) for substring rules, sibling context,
+subtree labels, and scan-specific ranking history. Open the **Ranked review**
+page to build, preview, and save rules from the WebUI:
+
+```bash
+shrawler web --offline ./results/shrawler.db
+```
+
 Snaffler mode loads TOML rules recursively and supports share, directory, file,
 content, and post-match scopes. Content inspection defaults to relayed mode so
 metadata rules decide which eligible files are read.
@@ -328,7 +354,7 @@ file through a bounded background queue. Failed uploads preserve the local file
 and can be retried without rescanning SMB:
 
 ```bash
-shrawler report ./results/shrawler_results.json --retry-failed
+shrawler report ./results/runs/RUN/shrawler_results.json --retry-failed
 ```
 
 See [docs/snaffler.md](docs/snaffler.md) and
@@ -354,6 +380,7 @@ strict type and lint configuration in `pyproject.toml`.
 - [Permission checks and OPSEC](docs/opsec.md)
 - [Local WebUI](docs/webui.md)
 - [Snaffler support](docs/snaffler.md)
+- [Offline metadata triage](docs/triage.md)
 - [Nemesis integration](docs/nemesis.md)
 - [Output formats](docs/output-format.md)
 - [Performance and concurrency](docs/performance.md)

@@ -53,7 +53,7 @@ certificates. Use this behavior only on a trusted assessment network.
 ## Retry failed uploads
 
 ```bash
-shrawler report ./results/shrawler_results.json --retry-failed
+shrawler report ./results/runs/RUN/shrawler_results.json --retry-failed
 ```
 
 The report command reads locally downloaded files and retries failed or

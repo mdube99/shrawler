@@ -15,9 +15,11 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple, cast
 
+from .collection import CollectionBusyError, CollectionQueue, smb_retriever
 from .output import escape_terminal
 from .smb import SMBAuth, close_smb, connect_smb
 from .store import SCHEMA_VERSION
+from .triage.review import ReviewStore
 from .triage.service import TriageBusyError, TriageService
 from .triage.storage import (
     catalog as triage_catalog,
@@ -1070,6 +1072,32 @@ class WebHandler(BaseHTTPRequestHandler):
         if not self._guard():
             return
         state = self.server.state
+        if parsed.path == "/api/review/families":
+            try:
+                query = urllib.parse.parse_qs(parsed.query)
+                self._json(
+                    ReviewStore(state.index.path).families(
+                        query["scan"][0],
+                        int(query.get("limit", ["100"])[0]),
+                        int(query.get("offset", ["0"])[0]),
+                        query.get("family", [None])[0],
+                    )
+                )
+            except (ValueError, KeyError, OSError, sqlite3.Error) as exc:
+                self._error(400, str(exc), "invalid_request")
+            return
+        if parsed.path == "/api/collection":
+            try:
+                queue = CollectionQueue(state.index.path)
+                query = urllib.parse.parse_qs(parsed.query)
+                self._json(
+                    queue.get(query["id"][0])
+                    if "id" in query
+                    else {"items": queue.list()}
+                )
+            except (ValueError, OSError, sqlite3.Error) as exc:
+                self._error(400, str(exc), "invalid_request")
+            return
         if parsed.path.startswith("/api/triage/"):
             self._triage_get(parsed)
             return
@@ -1328,17 +1356,38 @@ class WebHandler(BaseHTTPRequestHandler):
             payload = json.loads(self.rfile.read(length))
             if not isinstance(payload, dict):
                 raise ValueError("expected a JSON object")
+            payload = cast(Dict[str, Any], payload)
             path = urllib.parse.urlsplit(self.path).path
-            if path == "/api/triage/jobs":
-                self._json(service.start(cast(Dict[str, Any], payload)), 202)
+            if path == "/api/review/build":
+                self._json(ReviewStore(service.database).build(payload.get("scan_id")))
+            elif path == "/api/review/decide":
+                self._json(ReviewStore(service.database).decide(**payload))
+            elif path == "/api/review/undo":
+                self._json(ReviewStore(service.database).undo(payload["event_id"]))
+            elif path == "/api/review/hashes":
+                self._json(ReviewStore(service.database).hashes())
+            elif path == "/api/collection/create":
+                self._json(CollectionQueue(service.database).create(**payload), 201)
+            elif path == "/api/collection/run":
+                pool = self.server.state.pool
+                if pool is None:
+                    raise ValueError("Remote retrieval is disabled in offline mode")
+                with self.server.state.retrievals:
+                    self._json(
+                        CollectionQueue(service.database).run(
+                            payload["id"], smb_retriever(pool.auth)
+                        )
+                    )
+            elif path == "/api/triage/jobs":
+                self._json(service.start(payload), 202)
             elif path == "/api/triage/cancel":
                 service.cancel()
                 self._json({"cancel_requested": True})
             else:
                 self._error(404, "Unknown ranking endpoint", "not_found")
-        except TriageBusyError as exc:
+        except (TriageBusyError, CollectionBusyError) as exc:
             self._error(409, str(exc), "job_running")
-        except (ValueError, OSError) as exc:
+        except (ValueError, OSError, sqlite3.Error, TypeError, KeyError) as exc:
             self.close_connection = True
             self._error(400, str(exc), "invalid_request")
 

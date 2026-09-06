@@ -1,7 +1,7 @@
 # Local WebUI
 
-The WebUI opens a saved schema-v3 inventory and retrieves selected files from
-SMB using credentials held by the server process.
+The WebUI searches a live Shrawler SQLite workspace and retrieves selected files
+from SMB using credentials held by the server process.
 
 The interface is designed for desktop browsers. Windows narrower than the
 desktop layout retain the full data grid and scroll horizontally.
@@ -9,13 +9,23 @@ desktop layout retain the full data grid and scroll horizontally.
 ## Start the server
 
 ```bash
-shrawler web ./results/shrawler_results.json 'DOMAIN/user@server'
+shrawler web 'DOMAIN/user@server' ./results/shrawler.db
 ```
+
+For browsing and ranking without remote retrieval:
+
+```bash
+shrawler web --offline ./results/shrawler.db
+```
+
+Offline mode requires no SMB credentials and disables remote previews and
+downloads in both the interface and API.
 
 Options:
 
 | Option | Purpose |
 | :--- | :--- |
+| `--offline` | Browse and rank saved metadata without SMB credentials or retrieval |
 | `--port PORT` | Select the local port, default `8765` |
 | `--token-auth` | Require a random bearer token for API requests |
 | `--preview-max-size SIZE` | Set the per-file preview limit, default 1 MiB |
@@ -30,14 +40,29 @@ bearer credential.
 
 ## Views
 
+**Ranked review** opens a separate page for scan-specific priorities, category
+filters, saved ranking history, and explanations. Its rule builder supports
+filename fragments, extensions, directory labels, and sibling filename patterns.
+Preview rules against the saved inventory, export their TOML for the CLI, or run
+and save a ranking for paginated review. Jobs report progress and can be cancelled.
+See [Offline metadata triage](triage.md) for rule semantics and limitations.
+
 Table view displays one paginated result set. Select a file to open its UNC
 path, remote path, indexed time, and file actions beneath the row.
 
-Tree view loads the complete filtered inventory and groups it by host, share,
-and folder. Only expanded branches are rendered into the document, which keeps
-large collapsed trees fast without a frontend framework.
+Tree view groups the inventory by host, share, and folder. Branches are queried
+only when expanded so large workspaces are not transferred as one hierarchy.
 
-Search and host, share, and file-type filters apply to both views.
+Search and host, share, file-type, Snaffler rule, triage, permission, and
+collection-status filters apply to both views. File details show matching rules,
+share-root read/write permissions, collection status, and the indexed evidence
+timestamp. In cumulative database mode these fields come from the latest file
+observation scan, so findings and permissions from separate scanner identities
+are not combined. A file with no recorded download is shown as
+`not_collected`; that does not imply that collection was attempted and failed.
+Permission fields are share-root observations: read/write access plus tested
+rights such as add file, add directory, write DAC, and write owner. They do not
+replace an ACL review on the file itself.
 
 ## Preview handling
 
@@ -59,26 +84,26 @@ marks all responses as non-cacheable.
 
 ## File retrieval
 
-Browser requests identify files by random opaque IDs assigned when the results
-file is loaded. The browser cannot submit arbitrary host, share, or path values.
+Browser requests identify files by random opaque IDs stored in the inventory.
+The browser cannot submit arbitrary host, share, or path values.
 
 Files are fetched live and may differ from crawl metadata. Shrawler maintains a
 small SMB session pool, limits concurrent retrievals, writes data to a private
 temporary directory, and removes temporary files after transfer or disconnect.
 
-One SMB credential context is tried against every host recorded in the results.
+One SMB credential context is tried against every host recorded in the database.
 The optional host in `AUTH` provides authentication and Kerberos context. Each
 inventory record supplies the actual destination.
 
-## Test fixture
-
-```bash
-shrawler web ./test_shrawler_results.json 'user@127.0.0.1' -no-pass
-```
-
-The fixture exercises Table view, Tree view, filters, long paths, Unicode, and
-file-type tags. Its hosts do not exist, so Preview and Download fail normally.
+The browser polls the database revision while a scan is active, so newly
+committed files appear without restarting the server.
 
 ## Stopping the server
 
-Press `Ctrl+C` in the terminal that started Shrawler.
+Press `Ctrl+C` in the terminal that started Shrawler. An active ranking job is
+asked to cancel during shutdown; completed rankings remain in the local triage
+database.
+
+The **Ranked review** page also provides a persistent [collection queue](collection.md): select candidates, save and review a manifest, then collect or retry failed files. CLI and WebUI share the same manifests. Offline sessions support creation and review only.
+
+**Ranked review → File families** groups saved metadata, expands family members, records file/family review decisions, and supports undo. New rankings apply those decisions. Local evidence hashing confirms duplicate content without remote reads. See [File-family review](families.md).

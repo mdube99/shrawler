@@ -68,3 +68,21 @@ tag = "deployment-area"
 sibling_name_any = ["web.config", "deploy.ps1", "appsettings.*.json"]
 minimum_distinct_patterns = 2
 apply_to_descendants = 1
+
+[[rules]]
+id = "builtin.financial-name"
+description = "Filename indicates financial records"
+category = "financial-data"
+signal_group = "financial-name"
+points = 25
+[rules.when]
+filename_token_any = ["payroll", "invoice", "invoices", "banking", "ledger", "tax", "salary"]
+
+[[rules]]
+id = "builtin.customer-name"
+description = "Filename indicates customer or client records"
+category = "customer-information"
+signal_group = "customer-name"
+points = 25
+[rules.when]
+filename_token_any = ["customers", "customer", "clients", "client", "crm"]

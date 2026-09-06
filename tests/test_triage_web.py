@@ -193,6 +193,37 @@ class RankingHttpTests(unittest.TestCase):
         finally:
             released.set()
 
+    def test_family_review_api_offline_and_undo(self) -> None:
+        built = self.request("/api/review/build", {})
+        families = self.request("/api/review/families?scan=" + built["scan_id"])
+        family = families["items"][0]["family_id"]
+        members = self.request(
+            "/api/review/families?scan=" + built["scan_id"] + "&family=" + family
+        )
+        self.assertTrue(members["items"])
+        event = self.request(
+            "/api/review/decide",
+            {
+                "scope": "family",
+                "target": family,
+                "disposition": "exclude",
+                "note": "reviewed locally",
+            },
+        )
+        refreshed = self.request("/api/review/families?scan=" + built["scan_id"])
+        self.assertEqual(refreshed["items"][0]["review"]["disposition"], "exclude")
+        self.assertEqual(
+            self.request("/api/review/undo", {"event_id": event["event_id"]})["undone"],
+            event["event_id"],
+        )
+        with self.assertRaises(urllib.error.HTTPError) as failure:
+            self.request(
+                "/api/review/decide",
+                {"scope": "family", "target": family, "disposition": "exclude"},
+                {"X-Shrawler-Request": "0"},
+            )
+        self.assertEqual(failure.exception.code, 403)
+
 
 if __name__ == "__main__":
     unittest.main()

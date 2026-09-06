@@ -10,7 +10,7 @@ shrawler shares TARGET [options]
 shrawler spider TARGET [options]
 shrawler snaffle TARGET --rules DIR [options]
 shrawler report RESULTS [--retry-failed]
-shrawler web RESULTS AUTH [options]
+shrawler web AUTH DATABASE [options]
 shrawler config [init|show|path|options]
 ```
 
@@ -90,6 +90,10 @@ shrawler spider 'DOMAIN/user@server' \
   --exclude-share Software
 ```
 
+Administrative shares are skipped by default and are recorded in the results with
+the reason they were skipped. Use `--include-all-shares` to include them; explicit
+`--exclude-share` values still take precedence.
+
 `--shares` and `--add-share` remain available as comma-separated compatibility
 forms.
 
@@ -137,10 +141,11 @@ depend on the command and include `summary`, `progress`, `matches`, and `tree`.
 ## Resume
 
 ```bash
-shrawler spider 'DOMAIN/user@server' --resume ./results
+shrawler spider 'DOMAIN/user@server' --output ./results --resume
 ```
 
-When `--resume` has no value, Shrawler uses the current directory.
+When `--resume` has no value, Shrawler resumes the most recent incomplete scan
+in the selected workspace. Pass a short scan ID to select another scan.
 
 ## Legacy invocation
 
@@ -151,3 +156,9 @@ shrawler 'DOMAIN/user@server' --spider
 ```
 
 Use the task-oriented commands for new automation.
+
+## Collection manifests
+
+Use `shrawler collect create|list|show|run` to save reviewed ranked candidates and retrieve exact paths independently of scanning. See [Collection queue](collection.md) for examples and resume behavior.
+
+Use `shrawler coverage` for [directory coverage and staged resume](coverage.md), and `shrawler review build|list|decide|undo|hashes` for [file-family review](families.md).

@@ -13,6 +13,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Set, Tuple, cast
 
+from .coverage import DirectoryCoverage
 from .output import safe_csv_row
 
 SCHEMA_VERSION = 1
@@ -71,6 +72,15 @@ class ScanStore:
         self.connection.commit()
         if resume is not None:
             self.scan_id, self.short_id, run_path = self._select_resume(resume, mode)
+            saved_identity = self.connection.execute(
+                "SELECT domain,username FROM scans WHERE id=?", (self.scan_id,)
+            ).fetchone()
+            if tuple(saved_identity) != (domain, username):
+                self.connection.close()
+                self._lock_file.close()
+                raise ValueError(
+                    "Resume must use the original domain and username; start a new scan for another identity"
+                )
             self.run_dir = Path(run_path)
             self.connection.execute(
                 "UPDATE scans SET status='running', updated_at_utc=? WHERE id=?",
@@ -100,6 +110,7 @@ class ScanStore:
                 ),
             )
             self.connection.commit()
+        self.coverage = DirectoryCoverage(self)
         self._stop_commit = threading.Event()
         self._commit_thread = threading.Thread(
             target=self._commit_periodically,
@@ -256,6 +267,8 @@ class ScanStore:
 
     def host_status(self, host: str) -> Optional[str]:
         with self._lock:
+            if self.coverage.outstanding(host):
+                return "partial"
             row = self.connection.execute(
                 "SELECT status FROM hosts WHERE scan_id=? AND host=?",
                 (self.scan_id, host),
@@ -287,6 +300,8 @@ class ScanStore:
 
     def share_status(self, host: str, share: str) -> Optional[str]:
         with self._lock:
+            if self.coverage.outstanding(host, share):
+                return "partial"
             row = self.connection.execute(
                 """SELECT s.status FROM shares s JOIN hosts h ON h.id=s.host_id
                    WHERE h.scan_id=? AND h.host=? AND s.name=?""",
@@ -480,6 +495,8 @@ class ScanStore:
         snaffler_summary: Optional[Dict[str, Any]] = None,
     ) -> None:
         with self._lock:
+            if status == "completed" and self.coverage.outstanding():
+                status = "partial"
             self.connection.execute(
                 """UPDATE scans SET status=?, updated_at_utc=?, finished_at_utc=?,
                    summary_json=?, snaffler_summary_json=? WHERE id=?""",
