@@ -115,6 +115,9 @@
       const fallbackReasons = item.signals.filter(signal => signal.category === 'extension-fallback').map(signal => signal.description);
       row.append(node('td', (positiveReasons.length ? positiveReasons : fallbackReasons).join('; ') || 'No supporting signals', 'ranking-reasons'));
       const cell = node('td');
+      const fileActions = node('a', 'View / download / Nemesis', 'button');
+      fileActions.href = `/#file=${encodeURIComponent(item.file_id)}${token ? `&token=${encodeURIComponent(token)}` : ''}`;
+      cell.append(fileActions);
       if (!isPreview) {
         const label = node('label', ' Collect ');
         const select = node('input'); select.type = 'checkbox'; select.checked = selectedFiles.has(item.file_id);

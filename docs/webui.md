@@ -30,6 +30,8 @@ Options:
 | `--token-auth` | Require a random bearer token for API requests |
 | `--preview-max-size SIZE` | Set the per-file preview limit, default 1 MiB |
 | `--download-max-size SIZE` | Set the per-file download limit, default 50 MiB |
+| `--nemesis-max-size SIZE` | Set the per-file Nemesis transfer limit, default 50 MiB |
+| `--nemesis-url`, `--nemesis-auth`, `--nemesis-project` | Configure explicit Nemesis delivery; also accepts existing config/environment values |
 | `--page-size N` | Set Table view page size, from 1 through 500 |
 
 The server binds only to `127.0.0.1` and prints its URL without opening a browser.
@@ -50,6 +52,12 @@ See [Offline metadata triage](triage.md) for rule semantics and limitations.
 Table view displays one paginated result set. Select a file to open its UNC
 path, remote path, indexed time, and file actions beneath the row.
 
+File actions offer **View file**, **Download**, and **Send to Nemesis** separately.
+Sending requires no prior browser download: Shrawler stages the remote bytes,
+uploads them, and deletes the staged copy after success. Failed uploads retain
+their staged copy for local retry. See [Nemesis delivery](nemesis.md) for limits,
+receipts, and recovery. Ranked review links to these same actions.
+
 Tree view groups the inventory by host, share, and folder. Branches are queried
 only when expanded so large workspaces are not transferred as one hierarchy.
 
@@ -63,6 +71,13 @@ are not combined. A file with no recorded download is shown as
 Permission fields are share-root observations: read/write access plus tested
 rights such as add file, add directory, write DAC, and write owner. They do not
 replace an ACL review on the file itself.
+
+After a ranking run completes, the main inventory automatically selects the
+latest completed run. The Ranking filter chooses another saved run; Rank category
+switches from overall priority to a category score; Minimum rating filters the
+selected score; and Sort can order table rows and expanded tree files by rating.
+The displayed rating is a snapshot from that run. Files discovered after the
+ranking remain unranked until the ranking is run again.
 
 ## Preview handling
 
@@ -88,8 +103,9 @@ Browser requests identify files by random opaque IDs stored in the inventory.
 The browser cannot submit arbitrary host, share, or path values.
 
 Files are fetched live and may differ from crawl metadata. Shrawler maintains a
-small SMB session pool, limits concurrent retrievals, writes data to a private
-temporary directory, and removes temporary files after transfer or disconnect.
+small SMB session pool and limits concurrent retrievals. Preview and browser
+download files use a private temporary directory and are removed after transfer
+or disconnect. Nemesis delivery uses its separate persistent retry spool.
 
 One SMB credential context is tried against every host recorded in the database.
 The optional host in `AUTH` provides authentication and Kerberos context. Each

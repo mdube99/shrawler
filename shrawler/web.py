@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple, cast
 
 from .collection import CollectionBusyError, CollectionQueue, smb_retriever
+from .nemesis import DeliveryStore, NemesisConfig
 from .output import escape_terminal
 from .smb import SMBAuth, close_smb, connect_smb
 from .store import SCHEMA_VERSION
@@ -25,6 +26,7 @@ from .triage.storage import (
     catalog as triage_catalog,
     explain as triage_explain,
     list_results as triage_list,
+    result_path as triage_result_path,
 )
 
 TEXT_EXTENSIONS = frozenset(
@@ -77,6 +79,10 @@ class FileRecord:
     collection_status: str = "unknown"
     collection_detail: Optional[Dict[str, Any]] = None
     metadata_scan_timestamp_utc: str = ""
+    ranking_run_id: str = ""
+    ranking_priority: Optional[int] = None
+    ranking_score: Optional[int] = None
+    ranking_category: str = ""
 
     def public(self) -> Dict[str, Any]:
         value = asdict(self)
@@ -296,6 +302,9 @@ class FileIndex:
         triage: str = "",
         permission: str = "",
         collection: str = "",
+        ranking_run: str = "",
+        ranking_category: str = "",
+        ranking_min: int = 0,
     ) -> List[FileRecord]:
         terms = q.casefold().split()
         return [
@@ -337,10 +346,35 @@ class FileIndex:
         triage: str = "",
         permission: str = "",
         collection: str = "",
+        ranking_run: str = "",
+        ranking_category: str = "",
+        ranking_min: int = 0,
+        sort: str = "path",
+        direction: str = "asc",
     ) -> Dict[str, Any]:
         matches = self._matching(
             q, host, share, extension, rule, triage, permission, collection
         )
+        sort_keys: Dict[str, Callable[[FileRecord], Any]] = {
+            "path": lambda row: (
+                row.host.casefold(),
+                row.share.casefold(),
+                row.remote_path.casefold(),
+            ),
+            "type": lambda row: (row.extension, row.file_name.casefold()),
+            "file": lambda row: row.file_name.casefold(),
+            "location": lambda row: (
+                row.host.casefold(),
+                row.share.casefold(),
+                row.remote_path.casefold(),
+            ),
+            "priority": lambda row: row.ranking_score or 0,
+            "size": lambda row: row.size_bytes,
+            "modified": lambda row: row.mtime_utc,
+        }
+        if sort not in sort_keys or direction not in {"asc", "desc"}:
+            raise ValueError("Invalid inventory sort")
+        matches.sort(key=sort_keys[sort], reverse=direction == "desc")
         per_page = min(max(per_page, 1), self.page_size, 500)
         page = max(page, 1)
         start = (page - 1) * per_page
@@ -362,6 +396,11 @@ class FileIndex:
         triage: str = "",
         permission: str = "",
         collection: str = "",
+        ranking_run: str = "",
+        ranking_category: str = "",
+        ranking_min: int = 0,
+        sort: str = "path",
+        direction: str = "asc",
     ) -> Dict[str, Any]:
         """Build a complete host/share/folder hierarchy for matching records."""
         matches = self._matching(
@@ -474,6 +513,12 @@ class DatabaseIndex:
         )
         connection.execute("PRAGMA query_only=ON")
         connection.execute("PRAGMA busy_timeout=5000")
+        ranking_path = triage_result_path(self.path)
+        if ranking_path.is_file():
+            connection.execute(
+                "ATTACH DATABASE ? AS triage",
+                (str(ranking_path.resolve()),),
+            )
         return connection
 
     @staticmethod
@@ -572,6 +617,9 @@ class DatabaseIndex:
         triage: str = "",
         permission: str = "",
         collection: str = "",
+        ranking_run: str = "",
+        ranking_category: str = "",
+        ranking_min: int = 0,
     ) -> Tuple[str, List[Any]]:
         clauses: List[str] = []
         values: List[Any] = []
@@ -630,6 +678,11 @@ class DatabaseIndex:
                 + cls._evidence_join("downloads")
                 + " WHERE matched_file.id=files.id)"
             )
+        if ranking_run and ranking_min > 0:
+            clauses.append("ranking_score >= ?")
+            values.append(ranking_min)
+        if ranking_run and ranking_category:
+            clauses.append("ranking_category.file_id IS NOT NULL")
         return (" WHERE " + " AND ".join(clauses) if clauses else "", values)
 
     def facets(self) -> Dict[str, List[str]]:
@@ -694,7 +747,51 @@ class DatabaseIndex:
             "host_count": int(counts[1]),
             "revision": int(revision[0]) if revision else 0,
             "scan_active": bool(active[0]),
+            "ranking_runs": self.ranking_catalog().get("runs", []),
         }
+
+    def ranking_catalog(self) -> Dict[str, Any]:
+        try:
+            return triage_catalog(self.path)
+        except (OSError, sqlite3.Error, ValueError):
+            return {"scans": [], "runs": []}
+
+    @staticmethod
+    def _ranking_join(run_id: str, category: str) -> Tuple[str, List[Any], str]:
+        if not run_id:
+            return "", [], "0"
+        joins = (
+            " LEFT JOIN triage.triage_files ranking"
+            " ON ranking.file_id=files.public_id AND ranking.run_id=?"
+        )
+        values: List[Any] = [run_id]
+        score = "COALESCE(ranking.priority, 0)"
+        if category:
+            joins += (
+                " LEFT JOIN triage.triage_categories ranking_category"
+                " ON ranking_category.file_id=files.public_id"
+                " AND ranking_category.run_id=ranking.run_id"
+                " AND ranking_category.category=?"
+            )
+            values.append(category)
+            score = "COALESCE(ranking_category.score, 0)"
+        return joins, values, score
+
+    @staticmethod
+    def _apply_ranking(
+        records: List[FileRecord], rows: List[sqlite3.Row], category: str
+    ) -> None:
+        for record, row in zip(records, rows):
+            record.ranking_run_id = str(row["ranking_run_id"] or "")
+            record.ranking_priority = (
+                int(row["ranking_priority"])
+                if row["ranking_priority"] is not None
+                else None
+            )
+            record.ranking_score = (
+                int(row["ranking_score"]) if row["ranking_score"] is not None else None
+            )
+            record.ranking_category = category
 
     def get(self, public_id: str) -> Optional[FileRecord]:
         with self._connect() as connection:
@@ -715,9 +812,71 @@ class DatabaseIndex:
         triage: str = "",
         permission: str = "",
         collection: str = "",
+        ranking_run: str = "",
+        ranking_category: str = "",
+        ranking_min: int = 0,
+        sort: str = "path",
+        direction: str = "asc",
     ) -> Dict[str, Any]:
-        where, values = self._where(
-            q, host, share, extension, rule, triage, permission, collection
+        where, where_values = self._where(
+            q,
+            host,
+            share,
+            extension,
+            rule,
+            triage,
+            permission,
+            collection,
+            ranking_run,
+            ranking_category,
+            ranking_min,
+        )
+        joins, join_values, ranking_score = self._ranking_join(
+            ranking_run, ranking_category
+        )
+        ranking_projection = (
+            "ranking.run_id AS ranking_run_id, ranking.priority AS ranking_priority, "
+            f"{ranking_score} AS ranking_score"
+            if ranking_run
+            else "'' AS ranking_run_id, NULL AS ranking_priority, NULL AS ranking_score"
+        )
+        values = join_values + where_values
+        if ranking_run and ranking_min > 0:
+            where = where.replace("ranking_score >= ?", f"{ranking_score} >= ?")
+        sort_columns = {
+            "path": [
+                "files.host COLLATE NOCASE",
+                "files.share COLLATE NOCASE",
+                "files.remote_path COLLATE NOCASE",
+                "files.file_name COLLATE NOCASE",
+            ],
+            "type": [
+                "files.extension COLLATE NOCASE",
+                "files.file_name COLLATE NOCASE",
+            ],
+            "file": [
+                "files.file_name COLLATE NOCASE",
+                "files.remote_path COLLATE NOCASE",
+            ],
+            "location": [
+                "files.host COLLATE NOCASE",
+                "files.share COLLATE NOCASE",
+                "files.remote_path COLLATE NOCASE",
+            ],
+            "priority": [ranking_score, "files.remote_path COLLATE NOCASE"],
+            "size": ["files.size_bytes", "files.file_name COLLATE NOCASE"],
+            "modified": ["files.mtime_utc", "files.file_name COLLATE NOCASE"],
+        }
+        if sort not in sort_columns or direction not in {"asc", "desc"}:
+            raise ValueError("Invalid inventory sort")
+        if sort == "priority" and not ranking_run:
+            sort = "path"
+        order = (
+            " ORDER BY "
+            + ", ".join(
+                f"{column} {direction.upper()}" for column in sort_columns[sort]
+            )
+            + ", files.public_id"
         )
         per_page = min(max(per_page, 1), self.page_size, 500)
         page = max(page, 1)
@@ -725,20 +884,23 @@ class DatabaseIndex:
         with self._connect() as connection:
             total = int(
                 connection.execute(
-                    "SELECT COUNT(*) FROM files" + where, values
+                    "SELECT COUNT(*) FROM files" + joins + where, values
                 ).fetchone()[0]
             )
             rows = connection.execute(
-                "SELECT * FROM files"
+                "SELECT files.*, "
+                + ranking_projection
+                + " FROM files"
+                + joins
                 + where
-                + " ORDER BY host COLLATE NOCASE, share COLLATE NOCASE, "
-                "remote_path COLLATE NOCASE, file_name COLLATE NOCASE LIMIT ? OFFSET ?",
+                + order
+                + " LIMIT ? OFFSET ?",
                 (*values, per_page, start),
             )
-            items = [
-                record.public()
-                for record in self._enrich([self._record(row) for row in rows])
-            ]
+            rows = list(rows)
+            records = [self._record(row) for row in rows]
+            self._apply_ranking(records, rows, ranking_category)
+            items = [record.public() for record in self._enrich(records)]
         return {
             "items": items,
             "page": page,
@@ -757,16 +919,38 @@ class DatabaseIndex:
         triage: str = "",
         permission: str = "",
         collection: str = "",
+        ranking_run: str = "",
+        ranking_category: str = "",
+        ranking_min: int = 0,
+        sort: str = "path",
+        direction: str = "asc",
     ) -> Dict[str, Any]:
         """Return root host nodes; descendants are loaded on expansion."""
-        where, values = self._where(
-            q, host, share, extension, rule, triage, permission, collection
+        where, where_values = self._where(
+            q,
+            host,
+            share,
+            extension,
+            rule,
+            triage,
+            permission,
+            collection,
+            ranking_run,
+            ranking_category,
+            ranking_min,
         )
+        joins, join_values, ranking_score = self._ranking_join(
+            ranking_run, ranking_category
+        )
+        values = join_values + where_values
+        if ranking_run and ranking_min > 0:
+            where = where.replace("ranking_score >= ?", f"{ranking_score} >= ?")
         with self._connect() as connection:
             rows = list(
                 connection.execute(
-                    "SELECT host AS name, COUNT(*) AS file_count, "
+                    "SELECT files.host AS name, COUNT(*) AS file_count, "
                     "COALESCE(SUM(size_bytes), 0) AS size_bytes FROM files"
+                    + joins
                     + where
                     + " GROUP BY host ORDER BY host COLLATE NOCASE",
                     values,
@@ -795,19 +979,47 @@ class DatabaseIndex:
         triage: str = "",
         permission: str = "",
         collection: str = "",
+        ranking_run: str = "",
+        ranking_category: str = "",
+        ranking_min: int = 0,
+        sort: str = "path",
+        direction: str = "asc",
     ) -> Dict[str, Any]:
         """Return immediate children for one host, share, or folder."""
         if not host:
             raise ValueError("tree branch requires a host")
-        where, values = self._where(
-            q, host, share, extension, rule, triage, permission, collection
+        where, where_values = self._where(
+            q,
+            host,
+            share,
+            extension,
+            rule,
+            triage,
+            permission,
+            collection,
+            ranking_run,
+            ranking_category,
+            ranking_min,
         )
+        joins, join_values, ranking_score = self._ranking_join(
+            ranking_run, ranking_category
+        )
+        ranking_projection = (
+            "ranking.run_id AS ranking_run_id, ranking.priority AS ranking_priority, "
+            f"{ranking_score} AS ranking_score"
+            if ranking_run
+            else "'' AS ranking_run_id, NULL AS ranking_priority, NULL AS ranking_score"
+        )
+        values = join_values + where_values
+        if ranking_run and ranking_min > 0:
+            where = where.replace("ranking_score >= ?", f"{ranking_score} >= ?")
         if not share:
             with self._connect() as connection:
                 rows = list(
                     connection.execute(
-                        "SELECT share AS name, COUNT(*) AS file_count, "
+                        "SELECT files.share AS name, COUNT(*) AS file_count, "
                         "COALESCE(SUM(size_bytes), 0) AS size_bytes FROM files"
+                        + joins
                         + where
                         + " GROUP BY share ORDER BY share COLLATE NOCASE",
                         values,
@@ -834,10 +1046,27 @@ class DatabaseIndex:
         files: List[FileRecord] = []
         with self._connect() as connection:
             for row in connection.execute(
-                "SELECT * FROM files" + where + " ORDER BY remote_path COLLATE NOCASE",
+                "SELECT files.*, "
+                + ranking_projection
+                + " FROM files"
+                + joins
+                + where
+                + (
+                    " ORDER BY "
+                    + ranking_score
+                    + " "
+                    + direction.upper()
+                    + ", files.remote_path COLLATE NOCASE"
+                    if sort == "priority"
+                    and ranking_run
+                    and direction in {"asc", "desc"}
+                    else " ORDER BY files.remote_path COLLATE NOCASE"
+                ),
                 values,
             ):
                 record = self._record(row)
+                record_rows = [row]
+                self._apply_ranking([record], record_rows, ranking_category)
                 path = "/" + record.remote_path.replace("\\", "/").lstrip("/")
                 if not path.startswith(prefix):
                     continue
@@ -973,6 +1202,8 @@ class WebState:
     runtime_dir: Path
     retrievals: threading.BoundedSemaphore
     triage: Optional[TriageService] = None
+    nemesis: Optional[NemesisConfig] = None
+    nemesis_max: int = 50 * 1024**2
 
 
 @dataclass(frozen=True)
@@ -983,6 +1214,8 @@ class WebConfig:
     preview_max_bytes: int
     download_max_bytes: int
     page_size: int
+    nemesis: Optional[NemesisConfig] = None
+    nemesis_max_bytes: int = 50 * 1024**2
 
 
 class WebServer(ThreadingHTTPServer):
@@ -1109,6 +1342,8 @@ class WebHandler(BaseHTTPRequestHandler):
                     "download_max_bytes": state.download_max,
                     "retrieval_enabled": state.pool is not None,
                     "triage_enabled": state.triage is not None,
+                    "nemesis_enabled": state.nemesis is not None,
+                    "nemesis_max_bytes": state.nemesis_max,
                 }
             )
             self._json(status)
@@ -1132,6 +1367,11 @@ class WebHandler(BaseHTTPRequestHandler):
                     "triage",
                     "permission",
                     "collection",
+                    "ranking_run",
+                    "ranking_category",
+                    "ranking_min",
+                    "sort",
+                    "direction",
                 )
             )
             if filters[6] not in {
@@ -1145,18 +1385,63 @@ class WebHandler(BaseHTTPRequestHandler):
             } or filters[7] not in {"", "collected", "not_collected"}:
                 self._error(400, "Invalid evidence filter", "invalid_query")
                 return
+            if filters[11] not in {
+                "",
+                "path",
+                "type",
+                "file",
+                "location",
+                "priority",
+                "size",
+                "modified",
+            }:
+                self._error(400, "Invalid inventory sort", "invalid_query")
+                return
+            if filters[12] not in {"", "asc", "desc"}:
+                self._error(400, "Invalid inventory sort direction", "invalid_query")
+                return
+            if filters[9] and not filters[8]:
+                self._error(
+                    400, "Ranking category requires a ranking run", "invalid_query"
+                )
+                return
+            if filters[8] and not triage_result_path(state.index.path).is_file():
+                self._error(
+                    400,
+                    "No saved ranking database exists for this inventory",
+                    "invalid_query",
+                )
+                return
+            try:
+                ranking_min = int(filters[10] or "0")
+            except ValueError:
+                self._error(400, "Invalid ranking minimum", "invalid_query")
+                return
+            if ranking_min < 0 or ranking_min > 100000:
+                self._error(400, "Invalid ranking minimum", "invalid_query")
+                return
+            ranking_args = (
+                filters[8],
+                filters[9],
+                ranking_min,
+                filters[11] or "path",
+                filters[12] or ("desc" if filters[11] == "priority" else "asc"),
+            )
             if parsed.path == "/api/tree/branch":
                 try:
                     self._json(
                         state.index.tree_branch(
-                            *filters[:4], query.get("parent", [""])[0], *filters[4:]
+                            *filters[:4],
+                            query.get("parent", [""])[0],
+                            *filters[4:8],
+                            *ranking_args,
                         )
                     )
                 except (AttributeError, ValueError) as exc:
                     self._error(400, str(exc), "invalid_query")
                 return
             if parsed.path == "/api/tree":
-                self._json(state.index.tree(*filters))
+                self._json(state.index.tree(*filters[:8], *ranking_args))
                 return
             try:
                 self._json(
@@ -1164,7 +1449,8 @@ class WebHandler(BaseHTTPRequestHandler):
                         *filters[:4],
                         int(query.get("page", ["1"])[0]),
                         int(query.get("per_page", [str(state.index.page_size)])[0]),
-                        *filters[4:],
+                        *filters[4:8],
+                        *ranking_args,
                     )
                 )
             except (ValueError, OverflowError):
@@ -1358,7 +1644,28 @@ class WebHandler(BaseHTTPRequestHandler):
                 raise ValueError("expected a JSON object")
             payload = cast(Dict[str, Any], payload)
             path = urllib.parse.urlsplit(self.path).path
-            if path == "/api/review/build":
+            if path == "/api/nemesis/send":
+                state = self.server.state
+                if state.nemesis is None:
+                    raise ValueError(
+                        "Configure Nemesis URL, authentication, and project first"
+                    )
+                if set(payload) != {"file_id"} or not isinstance(
+                    payload["file_id"], str
+                ):
+                    raise ValueError("Provide a file_id only")
+                record = state.index.get(payload["file_id"])
+                if record is None:
+                    raise ValueError("Unknown file ID")
+                with state.retrievals:
+                    result = DeliveryStore(service.database).send(
+                        record,
+                        state.nemesis,
+                        state.pool.retrieve if state.pool else None,
+                        state.nemesis_max,
+                    )
+                self._json(result)
+            elif path == "/api/review/build":
                 self._json(ReviewStore(service.database).build(payload.get("scan_id")))
             elif path == "/api/review/decide":
                 self._json(ReviewStore(service.database).decide(**payload))
@@ -1407,6 +1714,8 @@ def run(config: WebConfig, auth: Optional[SMBAuth]) -> int:
         runtime,
         threading.BoundedSemaphore(2),
         TriageService(config.database_path, runtime),
+        config.nemesis,
+        config.nemesis_max_bytes,
     )
     server = WebServer(("127.0.0.1", config.port), state)
     url = f"http://127.0.0.1:{server.server_port}/"

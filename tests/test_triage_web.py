@@ -12,6 +12,7 @@ from typing import Any, Dict, List, Optional
 from unittest.mock import patch
 
 from shrawler.cli import main as dispatch
+from shrawler.nemesis import NemesisConfig
 from shrawler.store import ScanStore
 from shrawler.triage.service import TriageBusyError, TriageService
 from shrawler.triage.storage import result_path
@@ -37,6 +38,28 @@ class OfflineWebCliTests(unittest.TestCase):
 
 
 class RankingHttpTests(unittest.TestCase):
+    def test_direct_nemesis_action_and_offline_retry(self) -> None:
+        from unittest.mock import Mock
+
+        self.server.state.nemesis = NemesisConfig("https://nemesis/api", "u:p", "test")
+        record = self.server.state.index.search("", "", "", "", 1, 1)["items"][0]
+        pool = Mock()
+        pool.retrieve.side_effect = lambda record, sink: sink(b"x" * record.size_bytes)
+        self.server.state.pool = pool
+        with patch("shrawler.nemesis.upload", side_effect=ValueError("HTTP 503")):
+            result = self.request("/api/nemesis/send", {"file_id": record["id"]})
+        self.assertEqual(result["status"], "upload_failed")
+        self.server.state.pool = None
+        with patch("shrawler.nemesis.upload", return_value={"response_id": "ok"}):
+            result = self.request("/api/nemesis/send", {"file_id": record["id"]})
+        self.assertEqual(result["status"], "uploaded")
+        pool.retrieve.assert_called_once()
+
+    def test_nemesis_rejects_unconfigured_and_untrusted_requests(self) -> None:
+        for headers in ({}, {"X-Shrawler-Request": ""}):
+            with self.assertRaises(urllib.error.HTTPError):
+                self.request("/api/nemesis/send", {"file_id": "a" * 24}, headers)
+
     def setUp(self) -> None:
         self.temporary = tempfile.TemporaryDirectory()
         self.root = Path(self.temporary.name)
@@ -121,6 +144,40 @@ class RankingHttpTests(unittest.TestCase):
         self.request("/api/triage/jobs", {"preview": False})
         saved = self.finished_job()
         run_id = saved["result"]["run_id"]
+        inventory = self.request(
+            f"/api/files?ranking_run={run_id}&sort=priority&limit=4"
+        )
+        self.assertEqual(inventory["items"][0]["ranking_run_id"], run_id)
+        self.assertGreaterEqual(
+            inventory["items"][0]["ranking_score"],
+            inventory["items"][-1]["ranking_score"],
+        )
+        names_ascending = self.request("/api/files?sort=file&direction=asc")["items"]
+        names_descending = self.request("/api/files?sort=file&direction=desc")["items"]
+        self.assertEqual(
+            [item["file_name"] for item in names_ascending],
+            list(reversed([item["file_name"] for item in names_descending])),
+        )
+        rating_ascending = self.request(
+            f"/api/files?ranking_run={run_id}&sort=priority&direction=asc"
+        )["items"]
+        self.assertLessEqual(
+            rating_ascending[0]["ranking_score"],
+            rating_ascending[-1]["ranking_score"],
+        )
+        positive = self.request(
+            f"/api/files?ranking_run={run_id}&ranking_min=1&limit=10"
+        )
+        self.assertTrue(positive["items"])
+        self.assertTrue(all(item["ranking_score"] >= 1 for item in positive["items"]))
+        tree = self.request(f"/api/tree?ranking_run={run_id}")
+        self.assertEqual(tree["total"], 4)
+        branch = self.request(
+            f"/api/tree/branch?host=server&share=DATA&parent=/Project42&ranking_run={run_id}"
+        )
+        self.assertTrue(
+            any(item["ranking_run_id"] == run_id for item in branch["files"])
+        )
         catalog = self.request("/api/triage/catalog")
         self.assertEqual(catalog["runs"][0]["id"], run_id)
         page = self.request(

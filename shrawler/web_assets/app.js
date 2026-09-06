@@ -25,6 +25,10 @@
     expanded: new Set(),
     treeFocusKey: null,
     retrievalEnabled: false,
+    nemesisEnabled: false,
+    rankingRuns: [],
+    rankingSignature: '',
+    sortDirection: 'asc',
     revision: 0
   };
 
@@ -132,7 +136,9 @@
 
   function filters() {
     return {q: $('query').value, host: $('host').value, share: $('share').value, extension: $('extension').value,
-      rule: $('rule').value, triage: $('triage').value, permission: $('permission').value, collection: $('collection').value};
+      rule: $('rule').value, triage: $('triage').value, permission: $('permission').value, collection: $('collection').value,
+      ranking_run: $('ranking').value, ranking_category: $('ranking-category').value,
+      ranking_min: $('ranking-min').value, sort: $('sort').value, direction: state.sortDirection};
   }
 
   function filterParams(includePage = false) {
@@ -153,6 +159,72 @@
     if (values.includes(current)) $(id).value = current;
   }
 
+  function appendRankingOptions(runs) {
+    const selected = $('ranking').value;
+    while ($('ranking').options.length > 1) $('ranking').remove(1);
+    runs.filter(run => run.status === 'completed').forEach(run => {
+      const option = document.createElement('option');
+      option.value = run.id;
+      option.textContent = `${run.started_at} · ${Number(run.file_count || 0).toLocaleString()} files`;
+      $('ranking').append(option);
+    });
+    const completed = runs.filter(run => run.status === 'completed');
+    if (runs.some(run => run.id === selected)) $('ranking').value = selected;
+    else if (completed.length) $('ranking').value = completed[0].id;
+    updateRankingCategories();
+  }
+
+  function updateRankingCategories() {
+    const run = state.rankingRuns.find(item => item.id === $('ranking').value);
+    const selected = $('ranking-category').value;
+    while ($('ranking-category').options.length > 1) $('ranking-category').remove(1);
+    (run?.categories || []).forEach(category => {
+      const option = document.createElement('option');
+      option.value = category;
+      option.textContent = category;
+      $('ranking-category').append(option);
+    });
+    if ((run?.categories || []).includes(selected)) $('ranking-category').value = selected;
+    else if (!run) $('ranking-category').value = '';
+    if (!run) $('ranking-min').value = '';
+    $('ranking-category').disabled = !run;
+    $('ranking-min').disabled = !run;
+    $('sort').querySelector('option[value="priority"]').disabled = !run;
+    document.querySelector('.sort-header[data-sort="priority"]').disabled = !run;
+    if (!run && $('sort').value === 'priority') {
+      $('sort').value = 'path';
+      state.sortDirection = 'asc';
+    }
+  }
+
+  function sortName(value) {
+    return {path: 'Path', type: 'Type', file: 'File', location: 'Location', priority: 'Rating', size: 'Size', modified: 'Modified'}[value] || 'Path';
+  }
+
+  function renderSortHeaders() {
+    document.querySelectorAll('.sort-header').forEach(button => {
+      const active = button.dataset.sort === $('sort').value;
+      const heading = button.closest('th');
+      if (active) heading.setAttribute('aria-sort', state.sortDirection === 'desc' ? 'descending' : 'ascending');
+      else heading.removeAttribute('aria-sort');
+    });
+  }
+
+  function setSort(column) {
+    if (column === 'priority' && !$('ranking').value) {
+      showToast('Select a completed ranking before sorting by rating', true);
+      return;
+    }
+    if ($('sort').value === column) state.sortDirection = state.sortDirection === 'asc' ? 'desc' : 'asc';
+    else {
+      $('sort').value = column;
+      state.sortDirection = ['priority', 'size', 'modified'].includes(column) ? 'desc' : 'asc';
+    }
+    state.page = 1;
+    renderSortHeaders();
+    refresh();
+  }
+
   function setSearching(active) {
     $('search-spinner').hidden = !active;
     document.querySelector('.search-icon').hidden = active;
@@ -161,12 +233,15 @@
   function renderFilters() {
     const values = filters();
     const entries = [
-      ['q', 'Search', values.q ? `“${values.q}”` : ''],
+    ['q', 'Search', values.q ? `“${values.q}”` : ''],
       ['host', 'Host', values.host],
       ['share', 'Share', values.share],
       ['extension', 'Type', values.extension ? extensionLabel(values.extension) : ''],
       ['rule', 'Rule', values.rule], ['triage', 'Triage', values.triage],
-      ['permission', 'Share-root permission', permissionName(values.permission)], ['collection', 'Collection', values.collection ? statusLabel(values.collection) : '']
+      ['permission', 'Share-root permission', permissionName(values.permission)], ['collection', 'Collection', values.collection ? statusLabel(values.collection) : ''],
+      ['ranking', 'Ranking', values.ranking_run ? 'Selected' : ''], ['ranking-category', 'Rank category', values.ranking_category],
+      ['ranking-min', 'Minimum rating', values.ranking_min ? `${values.ranking_min}+` : ''],
+      ['sort', 'Sort', values.sort !== 'path' || state.sortDirection !== 'asc' ? `${sortName(values.sort)} ${state.sortDirection === 'desc' ? '↓' : '↑'}` : '']
     ].filter(entry => entry[2]);
     $('clear').hidden = entries.length === 0;
     $('clear-query').hidden = !values.q;
@@ -180,7 +255,10 @@
       remove.setAttribute('aria-label', `Remove ${label.toLowerCase()} filter`);
       remove.append(icon('close'));
       remove.addEventListener('click', () => {
-        $(id === 'q' ? 'query' : id).value = '';
+        if (id === 'sort') {
+          $('sort').value = 'path';
+          state.sortDirection = 'asc';
+        } else $(id === 'q' ? 'query' : id).value = '';
         scheduleRefresh();
       });
       chip.append(remove);
@@ -190,7 +268,10 @@
 
   function clearFilters() {
     $('query').value = '';
-    ['host', 'share', 'extension', 'rule', 'triage', 'permission', 'collection'].forEach(id => { $(id).value = ''; });
+    ['host', 'share', 'extension', 'rule', 'triage', 'permission', 'collection', 'ranking', 'ranking-category', 'ranking-min'].forEach(id => { $(id).value = ''; });
+    $('sort').value = 'path';
+    state.sortDirection = 'asc';
+    renderSortHeaders();
     scheduleRefresh();
   }
 
@@ -200,6 +281,18 @@
     list.append(element('dt', '', label), element('dd', '', value || '—'));
     field.append(list);
     return field;
+  }
+
+  function ratingText(item) {
+    if (!item.ranking_run_id) return '—';
+    const score = item.ranking_score ?? item.ranking_priority ?? 0;
+    return item.ranking_category ? `${score} · ${item.ranking_category}` : String(score);
+  }
+
+  function ratingBadge(item) {
+    const value = element('span', `rating-badge ${item.ranking_run_id ? 'ranked' : 'unranked'}`, ratingText(item));
+    value.title = item.ranking_run_id ? `Ranking score: ${ratingText(item)}` : 'No selected ranking';
+    return value;
   }
 
   async function copyPath(item, button, pathNode) {
@@ -249,6 +342,7 @@
     evidence.append(metadataField('Indexed', formatDate(item.scan_timestamp_utc)));
     const matchNames = (item.rule_matches || []).map(match => `${match.rule_name || 'unnamed'}${match.triage ? ` · ${match.triage}` : ''}`);
     evidence.append(metadataField('Collection', statusLabel(item.collection_status)));
+    evidence.append(metadataField('Ranking', ratingText(item)));
     evidence.append(metadataField('Evidence observation', formatDate(item.metadata_scan_timestamp_utc || item.scan_timestamp_utc)));
     evidence.append(metadataField('Share-root listing', permissionLabel(item.permissions, 'read')));
     evidence.append(metadataField('Share-root write-related access', permissionLabel(item.permissions, 'write')));
@@ -260,7 +354,7 @@
 
     const actions = element('div', 'detail-actions');
     const canPreview = state.retrievalEnabled && previewable.has(item.extension);
-    const previewButton = actionButton('Preview', 'eye', 'preview-action', () => {
+    const previewButton = actionButton('View file', 'eye', 'preview-action', () => {
       if (canPreview) openPreview(item);
       else showToast('Preview is not available for this file type', true);
     });
@@ -277,8 +371,12 @@
     close.addEventListener('click', closeHandler);
     previewButton.hidden = !state.retrievalEnabled;
     downloadButton.hidden = !state.retrievalEnabled;
-    if (!state.retrievalEnabled) actions.replaceChildren(element('span', 'unavailable-note', 'Offline session: remote retrieval disabled.'));
-    actions.append(downloadButton, close);
+    if (!state.retrievalEnabled && !state.nemesisEnabled) actions.prepend(element('span', 'unavailable-note', 'Offline session: remote retrieval disabled.'));
+    let nemesisButton;
+    nemesisButton = actionButton('Send to Nemesis', 'upload', 'button', () => sendToNemesis(item, nemesisButton));
+    nemesisButton.disabled = !state.nemesisEnabled;
+    nemesisButton.title = state.nemesisEnabled ? 'Retrieve and send this file; no browser download' : 'Configure Nemesis when starting Shrawler';
+    actions.append(downloadButton, nemesisButton, close);
     panel.append(paths, evidence, actions);
     return panel;
   }
@@ -312,7 +410,7 @@
     if (!state.items.length) {
       const row = document.createElement('tr');
       const cell = element('td', 'empty-message');
-      cell.colSpan = 6;
+      cell.colSpan = 7;
       cell.append(element('strong', '', 'No files match these filters.'), element('span', '', 'Try a broader search or clear an active filter.'));
       row.append(cell);
       body.append(row);
@@ -345,6 +443,8 @@
       const location = element('span', 'location-strip', locationText(item));
       location.title = locationText(item);
       locationCell.append(location);
+      const ratingCell = element('td', 'numeric');
+      ratingCell.append(ratingBadge(item));
       const sizeCell = element('td', 'numeric');
       sizeCell.append(element('span', 'size-value', item.readable_size || formatBytes(item.size_bytes)));
       const dateCell = element('td', 'numeric');
@@ -353,7 +453,7 @@
       dateCell.append(time);
       const chevronCell = element('td', 'row-chevron');
       chevronCell.append(icon('chevron'));
-      row.append(tagCell, fileCell, locationCell, sizeCell, dateCell, chevronCell);
+      row.append(tagCell, fileCell, locationCell, ratingCell, sizeCell, dateCell, chevronCell);
       row.addEventListener('click', event => { if (!event.target.closest('button')) toggleTableDetails(item); });
       body.append(row);
 
@@ -361,7 +461,7 @@
         const detailRow = element('tr', 'detail-row');
         detailRow.id = `details-${item.id}`;
         const detailCell = document.createElement('td');
-        detailCell.colSpan = 6;
+        detailCell.colSpan = 7;
         detailCell.append(detailPanel(item, () => toggleTableDetails(item)));
         detailRow.append(detailCell);
         body.append(detailRow);
@@ -417,7 +517,7 @@
       const label = element('span', 'tree-label file-label');
       label.append(specimenTag(node.extension), element('span', '', node.file_name));
       const meta = element('span', 'tree-file-meta');
-      meta.append(element('span', '', node.readable_size || formatBytes(node.size_bytes)), element('span', '', formatDate(node.mtime_utc)), element('span', `collection-indicator ${node.collection_status || 'unknown'}`, statusLabel(node.collection_status)), element('span', 'finding-indicator', findingText(node)));
+      meta.append(ratingBadge(node), element('span', '', node.readable_size || formatBytes(node.size_bytes)), element('span', '', formatDate(node.mtime_utc)), element('span', `collection-indicator ${node.collection_status || 'unknown'}`, statusLabel(node.collection_status)), element('span', 'finding-indicator', findingText(node)));
       line.append(label, meta);
       line.setAttribute('aria-expanded', String(state.selectedId === node.id));
       line.addEventListener('click', () => toggleTreeFile(node, key));
@@ -642,6 +742,7 @@
 
   function refresh() {
     renderFilters();
+    renderSortHeaders();
     state.selectedId = null;
     if (state.view === 'tree') loadTree();
     else searchTable();
@@ -757,8 +858,28 @@
     }
   }
 
+  async function sendToNemesis(item, button) {
+    button.disabled = true;
+    button.textContent = 'Sending…';
+    try {
+      const response = await api('/api/nemesis/send', {
+        method: 'POST', headers: {'Content-Type': 'application/json', 'X-Shrawler-Request': '1'},
+        body: JSON.stringify({file_id: item.id})
+      });
+      const result = await response.json();
+      if (result.status !== 'uploaded') throw new Error(result.error || 'Upload failed; staged evidence retained for retry');
+      button.textContent = 'Uploaded to Nemesis';
+      showToast(`Uploaded: ${item.file_name}${result.response_id ? ` · ${result.response_id}` : ''}`);
+    } catch (error) {
+      button.textContent = 'Retry Nemesis upload';
+      button.disabled = false;
+      showToast(error.message, true);
+    }
+  }
+
   Promise.all([api('/api/status').then(response => response.json()), api('/api/facets').then(response => response.json())]).then(([status, facets]) => {
     state.retrievalEnabled = status.retrieval_enabled !== false;
+    state.nemesisEnabled = status.nemesis_enabled === true;
     state.revision = status.revision || 0;
     $('status').textContent = `Connected — ${status.file_count.toLocaleString()} files indexed`;
     $('connection-status').classList.add('ready');
@@ -769,13 +890,34 @@
     appendOptions('triage', facets.triages || []);
     appendOptions('permission', facets.permissions || []);
     appendOptions('collection', facets.collections || []);
+    state.rankingRuns = status.ranking_runs || [];
+    state.rankingSignature = JSON.stringify(state.rankingRuns.map(run => [run.id, run.status, run.file_count]));
+    appendRankingOptions(state.rankingRuns);
     document.body.classList.toggle('compact', state.compact);
     $('density').setAttribute('aria-pressed', String(state.compact));
     setView(state.view === 'tree' ? 'tree' : 'table');
+    const requestedFile = fragment.get('file');
+    if (requestedFile) {
+      api(`/api/files/${encodeURIComponent(requestedFile)}`).then(response => response.json()).then(item => {
+        const dialog = element('dialog', 'preview-dialog');
+        const close = () => dialog.close();
+        dialog.append(detailPanel(item, close));
+        dialog.addEventListener('close', () => dialog.remove());
+        document.body.append(dialog); dialog.showModal();
+      }).catch(error => showToast(error.message, true));
+    }
     setInterval(async () => {
       try {
         const latest = await (await api('/api/status')).json();
         $('status').textContent = `Connected — ${latest.file_count.toLocaleString()} files indexed${latest.scan_active ? ' · scanning' : ''}`;
+        const rankingSignature = JSON.stringify((latest.ranking_runs || []).map(run => [run.id, run.status, run.file_count]));
+        if (rankingSignature !== state.rankingSignature) {
+          state.rankingRuns = latest.ranking_runs || [];
+          state.rankingSignature = rankingSignature;
+          appendRankingOptions(state.rankingRuns);
+          treeCache.clear();
+          refresh();
+        }
         if ((latest.revision || 0) !== state.revision) {
           state.revision = latest.revision || 0;
           treeCache.clear();
@@ -798,7 +940,16 @@
   });
 
   $('query').addEventListener('input', scheduleRefresh);
-  ['host', 'share', 'extension', 'rule', 'triage', 'permission', 'collection'].forEach(id => $(id).addEventListener('change', scheduleRefresh));
+  ['host', 'share', 'extension', 'rule', 'triage', 'permission', 'collection', 'ranking-min'].forEach(id => $(id).addEventListener('change', scheduleRefresh));
+  $('ranking').addEventListener('change', () => { updateRankingCategories(); scheduleRefresh(); });
+  $('ranking-category').addEventListener('change', scheduleRefresh);
+  $('sort').addEventListener('change', () => {
+    state.sortDirection = ['priority', 'size', 'modified'].includes($('sort').value) ? 'desc' : 'asc';
+    state.page = 1;
+    renderSortHeaders();
+    refresh();
+  });
+  document.querySelectorAll('.sort-header').forEach(button => button.addEventListener('click', () => setSort(button.dataset.sort)));
   $('clear-query').addEventListener('click', () => { $('query').value = ''; scheduleRefresh(); $('query').focus(); });
   $('clear').addEventListener('click', clearFilters);
   $('retry').addEventListener('click', refresh);

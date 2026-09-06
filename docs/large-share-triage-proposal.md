@@ -94,9 +94,35 @@ A two-million-record synthetic benchmark now covers ranking, family grouping, in
 - Repeated remote reads avoided.
 - Clearly documented coverage and unexplored scope.
 
-## Open questions
+## Clarified operational priorities
 
-- When Snaffler is off limits, is the main concern running its executable, remote file reads and authentication volume, content inspection, or something else?
-- What most often limits the engagement: enumeration time, download/storage limits, analyst review time, or confidence that important files were found?
+The primary OPSEC concern is remote file-content reads, including whether
+classification requires reading every discovered file. Running an external
+Snaffler executable is not the concern: Shrawler's `snaffle` mode evaluates its
+supported Snaffler TOML rules inside Shrawler and does not launch Snaffler.exe.
 
-These answers can refine the implementation details within the agreed order: #4, #3, then finish #1.
+Enumeration retrieves directory entries and metadata. Content inspection is a
+separate action: by default, `relayed` mode runs content rules reached through
+metadata-rule relays; content-based post-match rules can also read a matched
+candidate. `all` mode attempts content-rule evaluation for eligible files more
+broadly. When content is needed, the current reader retrieves the entire file
+through SMB `getFile`, subject to the observed-size gate and content-read budget
+checks. Matched files may also be downloaded automatically. Disabling automatic
+downloads alone does not disable content inspection. See [Snaffler support](snaffler.md).
+
+The biggest limitations are **enumeration time** and **confidence that important
+files were found**. These reinforce the agreed #4 → #3 → finish #1 order:
+
+- Reuse completed listings and expose pending, failed, excluded, and depth-limited
+  directories so time spent enumerating produces a clear coverage record.
+- Review repetitive files as families, keeping their metadata grouping provisional.
+- Rank saved metadata using credential names, operational-purpose signals, and
+  directory context; retain an extension fallback for arbitrarily named files.
+- Use selective collection to inspect candidates, including bounded fallback
+  selections. Metadata priority cannot confirm contents or measure how many
+  important files remain undiscovered.
+
+Faster staged enumeration trades early results against unexplored scope. Report
+enumeration coverage separately from confidence in sensitive-file discovery;
+neither a completed listing nor an empty ranked shortlist proves absence of
+important files. Former #5 and #6 remain outside this roadmap.

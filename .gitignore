@@ -10,3 +10,4 @@ downloads/
 *.part
 shrawler_*.csv
 shrawler_results.json
+*.nemesis/

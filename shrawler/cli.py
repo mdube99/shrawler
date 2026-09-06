@@ -536,6 +536,10 @@ def _web_parser() -> argparse.ArgumentParser:
     )
     web.add_argument("--preview-max-size", type=parse_size, default=1024**2)
     web.add_argument("--download-max-size", type=parse_size, default=50 * 1024**2)
+    from .nemesis import add_arguments
+
+    add_arguments(web)
+    web.add_argument("--nemesis-max-size", type=parse_size, default=50 * 1024**2)
     web.add_argument("--page-size", type=int, default=100)
     return parser
 
@@ -568,6 +572,7 @@ commands:
   review    Group file families, record decisions, undo, and hash local evidence
   coverage  Inspect directory coverage, failures, and pending work
   collect   Create, review, and run persistent collection manifests
+  nemesis   Send an indexed file directly to Nemesis or retry a staged upload
   triage    Rank and explain saved inventory metadata offline
   report    Summarize saved results or retry Nemesis uploads
   web       Search saved results and retrieve indexed files locally
@@ -604,6 +609,10 @@ def main(argv: Optional[List[str]] = None) -> None:
         _print_top_level_help()
         return
     command = arguments[0]
+    if command == "nemesis":
+        from .nemesis import main as nemesis_main
+
+        raise SystemExit(nemesis_main(arguments[1:]))
     if command == "review":
         from .triage.review import main as review_main
 
@@ -652,6 +661,7 @@ def main(argv: Optional[List[str]] = None) -> None:
             or not 1 <= options.page_size <= 500
             or options.preview_max_size < 1
             or options.download_max_size < 1
+            or options.nemesis_max_size < 1
         ):
             parser.error("invalid WebUI limits or port")
         auth = None
@@ -666,12 +676,20 @@ def main(argv: Optional[List[str]] = None) -> None:
                 auth = _create_auth(options, options.auth)
             except ValueError as exc:
                 parser.error(str(exc))
+        from .nemesis import configuration
+
+        try:
+            nemesis = configuration(options)
+        except ValueError as exc:
+            parser.error(str(exc))
         config = WebConfig(
             database_path=options.database,
             port=options.port,
             token_auth=options.token_auth,
             preview_max_bytes=options.preview_max_size,
             download_max_bytes=options.download_max_size,
+            nemesis=nemesis,
+            nemesis_max_bytes=options.nemesis_max_size,
             page_size=options.page_size,
         )
         raise SystemExit(run(config, auth))
