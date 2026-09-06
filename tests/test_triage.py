@@ -448,7 +448,10 @@ class StorageTests(unittest.TestCase):
                 if r["rule_id"] == "builtin.deployment-config"
             )["matched"]
         )
-        self.assertEqual(result["summary"]["positive_files"], 3)
+        # deploy.ps1 now has its own operational-purpose signal in addition to
+        # serving as sibling context for the three configuration files.
+        self.assertEqual(items["/Project42/deploy.ps1"]["priority"], 10)
+        self.assertEqual(result["summary"]["positive_files"], 4)
 
     def test_sibling_patterns_require_distinct_files_and_historical_scope(self):
         custom = validate(

@@ -325,6 +325,12 @@ def list_results(
         values: List[Any] = (
             [run["id"], category, min_score] if category else [run["id"], min_score]
         )
+        if category == "extension-fallback":
+            # Category membership is supplied by the zero-point extension rule.
+            # Keep this pool disjoint from recommendations and analyst decisions.
+            query += (
+                " AND f.priority=0 AND json_extract(f.result_json, '$.review') IS NULL"
+            )
         if after is not None:
             if type(after[0]) is not int or after[0] < 0:
                 raise ValueError("invalid ranking cursor")

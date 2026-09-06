@@ -3,7 +3,7 @@ version = 1
 [[contexts]]
 id = "builtin.deployment-area"
 tag = "deployment-area"
-directory_name_any = ["deploy", "deployments", "release", "releases"]
+directory_name_any = ["deploy", "deployment", "deployments", "release", "releases"]
 apply_to_descendants = 2
 
 [[rules]]
@@ -13,7 +13,7 @@ category = "infrastructure"
 signal_group = "configuration"
 points = 30
 [rules.when]
-extension_any = [".config", ".ini", ".yaml", ".yml", ".json", ".env"]
+extension_any = [".config", ".ini", ".yaml", ".yml", ".json", ".xml", ".env"]
 context_any = ["deployment-area"]
 
 [[rules]]
@@ -23,7 +23,7 @@ category = "infrastructure"
 signal_group = "environment"
 points = 20
 [rules.when]
-extension_any = [".config", ".ini", ".yaml", ".yml", ".json", ".env"]
+extension_any = [".config", ".ini", ".yaml", ".yml", ".json", ".xml", ".env"]
 filename_token_any = ["prod", "production"]
 
 [[rules]]
@@ -42,7 +42,7 @@ category = "credentials"
 signal_group = "credential-name"
 points = 25
 [rules.when]
-filename_token_any = ["password", "passwords", "credentials", "secrets"]
+filename_token_any = ["password", "passwords", "credential", "credentials", "secret", "secrets", "connectionstring", "connectionstrings"]
 
 [[rules]]
 id = "builtin.credential-fragment"
@@ -86,3 +86,89 @@ signal_group = "customer-name"
 points = 25
 [rules.when]
 filename_token_any = ["customers", "customer", "clients", "client", "crm"]
+
+# Broad extension matches are a review pool, not evidence of sensitive content.
+# The extension-fallback category is filtered to unreviewed, zero-priority files.
+[[rules]]
+id = "builtin.extension-fallback"
+description = "Config/script extension only; retained for fallback review"
+category = "extension-fallback"
+signal_group = "extension"
+points = 0
+[rules.when]
+extension_any = [".config", ".ini", ".bat", ".ps1", ".json", ".xml"]
+
+[[rules]]
+id = "builtin.credential-config-script"
+description = "Credential-related filename has a configuration or script extension"
+category = "credentials"
+signal_group = "credential-format"
+points = 5
+[rules.when]
+filename_contains_any = ["cred", "pass", "secret", "connectionstring"]
+extension_any = [".config", ".ini", ".bat", ".ps1", ".json", ".xml"]
+
+[[rules]]
+id = "builtin.operational-script"
+description = "Script name suggests installation, deployment, or administration that may use authentication"
+category = "credentials"
+signal_group = "operational-purpose"
+points = 10
+[rules.when]
+extension_any = [".bat", ".ps1"]
+filename_token_any = ["join", "adjoin", "domainjoin", "install", "installation", "installer", "deploy", "deployment", "provision", "provisioning", "mapdrive", "mapdrives", "backup", "scheduledtask", "scheduledtasks"]
+
+[[rules]]
+id = "builtin.operational-script-phrases"
+description = "Script name suggests drive mapping or scheduled tasks that may use authentication"
+category = "credentials"
+signal_group = "operational-purpose"
+points = 10
+[rules.when]
+extension_any = [".bat", ".ps1"]
+filename_glob_any = ["*map*drive*", "*scheduled*task*"]
+
+[[contexts]]
+id = "builtin.automation-area"
+tag = "automation-area"
+directory_name_any = ["deploy", "deployment", "deployments", "scripts", "automation", "provisioning", "install", "installers", "backup", "backups"]
+apply_to_descendants = 1
+
+# Context strengthens the purpose signal, including arbitrarily named scripts.
+# Same group: this replaces the 10-point name signal rather than double-counting.
+[[rules]]
+id = "builtin.automation-script-context"
+description = "Script is inside an observed automation or deployment directory"
+category = "credentials"
+signal_group = "operational-purpose"
+points = 20
+[rules.when]
+extension_any = [".bat", ".ps1"]
+context_any = ["automation-area"]
+
+[[rules]]
+id = "builtin.payment-name"
+description = "Filename suggests payment card or cardholder records"
+category = "payment-data"
+signal_group = "payment-name"
+points = 30
+[rules.when]
+filename_glob_any = ["*credit*card*", "*card*number*", "*cardholder*"]
+
+[[rules]]
+id = "builtin.identity-name"
+description = "Filename contains an explicit identity-document or SSN token"
+category = "personal-information"
+signal_group = "identity-name"
+points = 25
+[rules.when]
+filename_token_any = ["ssn", "passport", "passports"]
+
+[[rules]]
+id = "builtin.identity-phrases"
+description = "Filename suggests social security or national identity records"
+category = "personal-information"
+signal_group = "identity-name"
+points = 25
+[rules.when]
+filename_glob_any = ["*social*security*", "*national*id*"]

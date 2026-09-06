@@ -103,6 +103,44 @@ such as `compass`; its explanation records exactly which fragment matched.
 These weights are initial heuristics, not calibrated findings.
 There are no automatic downloads, content classifiers, or network actions.
 
+### Credential signals, operational scripts, and extension fallback
+
+The default rules retain broad `cred`, `pass`, and `ssn` filename matches across
+all extensions. Explicit credential names score 25; a credential-related name
+with `.config`, `.ini`, `.bat`, `.ps1`, `.json`, or `.xml` gains 5 points. Name
+fragments and stronger tokens share a group so they do not double-count.
+Payment-card names have their own `payment-data` category (30 points); explicit
+SSN or identity-document names score 25 in `personal-information`. Broad names
+remain heuristic: `cred` may mean credit and `pass` may occur in ordinary words.
+
+Operational `.ps1` and `.bat` names such as `AD Join`, `DomainJoin`, `Install`,
+`Deploy`, `Provision`, `MapDrive`, `Backup`, and `ScheduledTask` score 10. Scripts
+inside automation, scripts, or deployment directories score 20, including
+arbitrarily named scripts. That context replaces the weaker purpose-name signal
+rather than adding it again, and applies at most one directory level below the
+matched directory. Configuration context rules also recognize `.xml` and the
+singular `Deployment` directory.
+
+Extension alone contributes **zero priority**. The `extension-fallback` category
+shows unreviewed, zero-priority files with your six extensions, such as
+`123.ps1` or `package.json`. Files with positive name, context, rarity, or other
+signals appear in the ranked shortlist instead. Files with recorded analyst
+decisions are omitted from fallback review. To review and queue a bounded slice:
+
+```bash
+# Create a new ranking to pick up the updated defaults.
+shrawler triage run results/shrawler.db
+shrawler triage list results/shrawler.db --min-score 1 --limit 100
+shrawler triage list results/shrawler.db --category extension-fallback --limit 100
+shrawler collect create results/shrawler.db --category extension-fallback --limit 25
+```
+
+In the WebUI, save a new ranking and select `extension-fallback` in the category
+selector with minimum score **0**. Review candidates and save selected files to
+a manifest as usual. The fallback reason is shown even though it contributes no
+points. Existing rankings and collection manifests keep their saved rules and
+selections. These weights express review order, not confirmation of credentials.
+
 ## Rules and engagement-specific context
 
 Rules use their own versioned TOML schema. They do not accept Snaffler TOML

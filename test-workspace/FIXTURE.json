@@ -1,0 +1,17 @@
+{
+  "workspace": "/home/mark/development/shrawler/test-workspace",
+  "database": "/home/mark/development/shrawler/test-workspace/shrawler.db",
+  "completed_scan": "c4ab75109da845aaba8afe7897b95a77",
+  "partial_scan": "a51a567f807b4353b7ae77f61b50f8aa",
+  "ranking_run": "11b517636af94519aed9e82f6496c006",
+  "families": {
+    "scan_id": "c4ab75109da845aaba8afe7897b95a77",
+    "files": 11,
+    "families": 9
+  },
+  "collection_manifest": "24cc924103dc44d5a45da4df0d411917",
+  "collection_statuses": {
+    "failed": 1,
+    "collected": 5
+  }
+}

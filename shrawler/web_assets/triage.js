@@ -111,7 +111,9 @@
     data.items.forEach(item => {
       const row = node('tr');
       row.append(node('td', String(item.review_score), 'ranking-score'), node('td', item.file_name), node('td', item.unc_path, 'ranking-path'));
-      row.append(node('td', item.signals.filter(signal => signal.credited_points > 0).map(signal => signal.description).join('; ') || 'No supporting signals', 'ranking-reasons'));
+      const positiveReasons = item.signals.filter(signal => signal.credited_points > 0).map(signal => signal.description);
+      const fallbackReasons = item.signals.filter(signal => signal.category === 'extension-fallback').map(signal => signal.description);
+      row.append(node('td', (positiveReasons.length ? positiveReasons : fallbackReasons).join('; ') || 'No supporting signals', 'ranking-reasons'));
       const cell = node('td');
       if (!isPreview) {
         const label = node('label', ' Collect ');
@@ -226,7 +228,10 @@
     preview = null; $('ranking-run').querySelector('option[value="__preview"]')?.remove();
     resetPages(); updateCategories(); loadResults();
   });
-  ['ranking-category', 'ranking-min'].forEach(id => $(id).addEventListener('change', () => { preview = null; resetPages(); loadResults(); }));
+  ['ranking-category', 'ranking-min'].forEach(id => $(id).addEventListener('change', () => {
+    if (id === 'ranking-category' && $('ranking-category').value === 'extension-fallback') $('ranking-min').value = '0';
+    preview = null; resetPages(); loadResults();
+  }));
   $('ranking-prev').addEventListener('click', () => { if (cursors.length > 1) { cursors.pop(); loadResults(); } });
   $('ranking-next').addEventListener('click', () => { if (nextCursor) { cursors.push(nextCursor); loadResults(); } });
   $('refresh-rankings').addEventListener('click', async () => { try { preview = null; resetPages(); await refreshCatalog(); await loadResults(); } catch (exception) { error(exception.message); } });

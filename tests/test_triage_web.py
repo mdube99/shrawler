@@ -116,7 +116,7 @@ class RankingHttpTests(unittest.TestCase):
         self.assertEqual(len(self.request("/api/triage/catalog")["scans"]), 1)
         self.request("/api/triage/jobs", {"preview": True})
         preview = self.finished_job()
-        self.assertEqual(preview["result"]["summary"]["positive_files"], 3)
+        self.assertEqual(preview["result"]["summary"]["positive_files"], 4)
         self.assertFalse(result_path(self.database).exists())
         self.request("/api/triage/jobs", {"preview": False})
         saved = self.finished_job()

@@ -137,6 +137,11 @@ class CollectionQueue:
                         if s["credited_points"] > 0
                     ]
                     or [
+                        s["description"]
+                        for s in candidate["signals"]
+                        if s["category"] == "extension-fallback"
+                    ]
+                    or [
                         f"Selected by saved ranking query (score {candidate['review_score']})"
                     ],
                     "previously_collected": prior,
