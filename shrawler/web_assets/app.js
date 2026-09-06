@@ -6,6 +6,7 @@
   history.replaceState(null, '', `${location.pathname}${location.search}`);
 
   const $ = id => document.getElementById(id);
+  $('ranked-review-link').href = '/triage' + (token ? `#token=${encodeURIComponent(token)}` : '');
   const previewable = new Set('.txt .log .csv .json .xml .ini .conf .config .cnf .properties .prop .yaml .yml .md .rst .py .js .ts .jsx .tsx .java .cs .go .rs .rb .php .ps1 .bat .cmd .vbs .sh .sql .pem .key .png .jpg .jpeg .gif .webp .pdf'.split(' '));
   const sensitiveTypes = new Set('.env .pem .key .kdbx .pst .ost .sql .bak .config .conf .ini .yaml .yml .pfx .p12 .kirbi .ccache'.split(' '));
   const executableTypes = new Set('.zip .7z .rar .tar .gz .exe .dll .msi .ps1 .bat .cmd .vbs .sh .jar'.split(' '));
@@ -22,7 +23,9 @@
     treeData: null,
     treeKey: '',
     expanded: new Set(),
-    treeFocusKey: null
+    treeFocusKey: null,
+    retrievalEnabled: false,
+    revision: 0
   };
 
   let searchTimer = null;
@@ -99,6 +102,19 @@
   };
 
   const locationText = item => `${item.host || 'Unknown host'} › ${item.share || 'Unknown share'}`;
+  const statusLabel = value => ({collected: 'Collected', not_collected: 'Not collected', unknown: 'Unknown'}[value] || value || 'Unknown');
+  const permissionName = key => ({read: 'List share root', write: 'Write-related access', add_file: 'Create files', add_subdirectory: 'Create directories', write_dac: 'Modify ACL', write_owner: 'Change owner'}[key] || key);
+  const permissionLabel = (permissions, key) => {
+    const rights = ['read', 'write'].includes(key) ? permissions : permissions && permissions.write_rights;
+    return rights && rights[key] === true ? 'Yes' : rights && rights[key] === false ? 'No' : 'Unknown';
+  };
+  const findingText = item => {
+    const matches = item.rule_matches || [];
+    if (!matches.length) return 'No findings';
+    const names = [...new Set(matches.map(match => match.rule_name || 'Unnamed rule'))];
+    const triages = [...new Set(matches.map(match => match.triage).filter(Boolean))];
+    return `${names.slice(0, 2).join(', ')}${names.length > 2 ? ` +${names.length - 2}` : ''}${triages.length ? ` · ${triages.join(', ')}` : ''}`;
+  };
 
   function showToast(message, isError = false) {
     clearTimeout(toastTimer);
@@ -115,7 +131,8 @@
   }
 
   function filters() {
-    return {q: $('query').value, host: $('host').value, share: $('share').value, extension: $('extension').value};
+    return {q: $('query').value, host: $('host').value, share: $('share').value, extension: $('extension').value,
+      rule: $('rule').value, triage: $('triage').value, permission: $('permission').value, collection: $('collection').value};
   }
 
   function filterParams(includePage = false) {
@@ -125,12 +142,15 @@
   }
 
   function appendOptions(id, values) {
+    const current = $(id).value;
+    while ($(id).options.length > 1) $(id).remove(1);
     values.forEach(value => {
       const option = document.createElement('option');
       option.value = value;
-      option.textContent = id.includes('extension') ? extensionLabel(value) : (value || '(none)');
+      option.textContent = id === 'extension' ? extensionLabel(value) : id === 'collection' ? statusLabel(value) : id === 'permission' ? permissionName(value) : (value || '(none)');
       $(id).append(option);
     });
+    if (values.includes(current)) $(id).value = current;
   }
 
   function setSearching(active) {
@@ -144,7 +164,9 @@
       ['q', 'Search', values.q ? `“${values.q}”` : ''],
       ['host', 'Host', values.host],
       ['share', 'Share', values.share],
-      ['extension', 'Type', values.extension ? extensionLabel(values.extension) : '']
+      ['extension', 'Type', values.extension ? extensionLabel(values.extension) : ''],
+      ['rule', 'Rule', values.rule], ['triage', 'Triage', values.triage],
+      ['permission', 'Share-root permission', permissionName(values.permission)], ['collection', 'Collection', values.collection ? statusLabel(values.collection) : '']
     ].filter(entry => entry[2]);
     $('clear').hidden = entries.length === 0;
     $('clear-query').hidden = !values.q;
@@ -168,7 +190,7 @@
 
   function clearFilters() {
     $('query').value = '';
-    ['host', 'share', 'extension'].forEach(id => { $(id).value = ''; });
+    ['host', 'share', 'extension', 'rule', 'triage', 'permission', 'collection'].forEach(id => { $(id).value = ''; });
     scheduleRefresh();
   }
 
@@ -225,9 +247,19 @@
 
     const evidence = element('div', 'detail-evidence');
     evidence.append(metadataField('Indexed', formatDate(item.scan_timestamp_utc)));
+    const matchNames = (item.rule_matches || []).map(match => `${match.rule_name || 'unnamed'}${match.triage ? ` · ${match.triage}` : ''}`);
+    evidence.append(metadataField('Collection', statusLabel(item.collection_status)));
+    evidence.append(metadataField('Evidence observation', formatDate(item.metadata_scan_timestamp_utc || item.scan_timestamp_utc)));
+    evidence.append(metadataField('Share-root listing', permissionLabel(item.permissions, 'read')));
+    evidence.append(metadataField('Share-root write-related access', permissionLabel(item.permissions, 'write')));
+    evidence.append(metadataField('Share add file', permissionLabel(item.permissions, 'add_file')));
+    evidence.append(metadataField('Share add directory', permissionLabel(item.permissions, 'add_subdirectory')));
+    evidence.append(metadataField('Share write DAC', permissionLabel(item.permissions, 'write_dac')));
+    evidence.append(metadataField('Share write owner', permissionLabel(item.permissions, 'write_owner')));
+    evidence.append(metadataField('Snaffler rules', matchNames.join(', ') || 'None'));
 
     const actions = element('div', 'detail-actions');
-    const canPreview = previewable.has(item.extension);
+    const canPreview = state.retrievalEnabled && previewable.has(item.extension);
     const previewButton = actionButton('Preview', 'eye', 'preview-action', () => {
       if (canPreview) openPreview(item);
       else showToast('Preview is not available for this file type', true);
@@ -243,6 +275,9 @@
     close.setAttribute('aria-label', 'Close file details');
     close.append(icon('close'));
     close.addEventListener('click', closeHandler);
+    previewButton.hidden = !state.retrievalEnabled;
+    downloadButton.hidden = !state.retrievalEnabled;
+    if (!state.retrievalEnabled) actions.replaceChildren(element('span', 'unavailable-note', 'Offline session: remote retrieval disabled.'));
     actions.append(downloadButton, close);
     panel.append(paths, evidence, actions);
     return panel;
@@ -298,6 +333,9 @@
       trigger.setAttribute('aria-expanded', String(selected));
       trigger.setAttribute('aria-controls', `details-${item.id}`);
       trigger.append(element('span', 'file-name', item.file_name), element('span', 'file-path', item.remote_path || 'Path unavailable'));
+      const evidenceLine = element('span', 'file-evidence');
+      evidenceLine.append(element('span', `collection-indicator ${item.collection_status || 'unknown'}`, statusLabel(item.collection_status)), element('span', 'finding-indicator', findingText(item)));
+      trigger.append(evidenceLine);
       trigger.title = item.file_name;
       trigger.addEventListener('click', () => toggleTableDetails(item));
       trigger.addEventListener('keydown', event => tableKeydown(event, index));
@@ -379,7 +417,7 @@
       const label = element('span', 'tree-label file-label');
       label.append(specimenTag(node.extension), element('span', '', node.file_name));
       const meta = element('span', 'tree-file-meta');
-      meta.append(element('span', '', node.readable_size || formatBytes(node.size_bytes)), element('span', '', formatDate(node.mtime_utc)));
+      meta.append(element('span', '', node.readable_size || formatBytes(node.size_bytes)), element('span', '', formatDate(node.mtime_utc)), element('span', `collection-indicator ${node.collection_status || 'unknown'}`, statusLabel(node.collection_status)), element('span', 'finding-indicator', findingText(node)));
       line.append(label, meta);
       line.setAttribute('aria-expanded', String(state.selectedId === node.id));
       line.addEventListener('click', () => toggleTreeFile(node, key));
@@ -393,7 +431,7 @@
       kind.append(icon(type === 'host' ? 'server' : type === 'share' ? 'share' : 'folder'));
       line.append(kind, element('span', 'tree-label', node.name), element('span', 'tree-count', `${node.file_count.toLocaleString()} files · ${formatBytes(node.size_bytes)}`));
       line.setAttribute('aria-expanded', String(open));
-      line.addEventListener('click', () => toggleBranch(key));
+      line.addEventListener('click', () => toggleBranch(type, node, key));
       if (open) {
         const group = element('ul', 'tree-group');
         group.setAttribute('role', 'group');
@@ -425,9 +463,32 @@
     if (focusables.length && !focusables.some(node => node.tabIndex === 0)) focusables[0].tabIndex = 0;
   }
 
-  function toggleBranch(key) {
+  async function loadBranch(type, node) {
+    if (node.loaded) return;
+    const params = filterParams(false);
+    if (type === 'host') params.set('host', node.name);
+    else {
+      params.set('host', node.host);
+      params.set('share', node.share || node.name);
+      if (type === 'folder') params.set('parent', node.path);
+    }
+    const data = await (await api(`/api/tree/branch?${params}`)).json();
+    if (type === 'host') node.shares = data.shares;
+    else {
+      node.folders = data.folders;
+      node.files = data.files;
+    }
+    node.loaded = true;
+  }
+
+  async function toggleBranch(type, node, key) {
     if (state.expanded.has(key)) state.expanded.delete(key);
-    else state.expanded.add(key);
+    else {
+      state.expanded.add(key);
+      renderTree();
+      try { await loadBranch(type, node); }
+      catch (error) { state.expanded.delete(key); showError(error.message); }
+    }
     state.treeFocusKey = key;
     renderTree();
     restoreFocus(`[data-key="${CSS.escape(key)}"]`);
@@ -473,15 +534,24 @@
     } else if (['ArrowRight', 'ArrowLeft'].includes(event.key)) event.preventDefault();
   }
 
-  function collectBranches() {
-    const keys = [];
-    const walk = (type, node, path) => {
+  async function expandAllBranches() {
+    if (!state.treeData || state.treeData.total > 5000) return;
+    const expanded = new Set();
+    const walk = async (type, node, path) => {
       const key = treeKey(path);
-      keys.push(key);
-      branchChildren(type, node).forEach(([childType, child]) => { if (childType !== 'file') walk(childType, child, [...path, child.name]); });
+      expanded.add(key);
+      await loadBranch(type, node);
+      for (const [childType, child] of branchChildren(type, node)) {
+        if (childType !== 'file') await walk(childType, child, [...path, child.name]);
+      }
     };
-    if (state.treeData) state.treeData.hosts.forEach(host => walk('host', host, [`host:${host.name}`]));
-    return keys;
+    setSearching(true);
+    try {
+      for (const host of state.treeData.hosts) await walk('host', host, [`host:${host.name}`]);
+      state.expanded = expanded;
+      renderTree();
+    } catch (error) { showError(error.message); }
+    finally { setSearching(false); }
   }
 
   async function searchTable() {
@@ -530,18 +600,13 @@
     setSearching(true);
     $('tree').replaceChildren();
     $('tree-loading').hidden = false;
-    $('summary').textContent = 'Building complete hierarchy…';
+    $('summary').textContent = 'Loading hierarchy…';
     try {
       const data = await (await api(`/api/tree?${key}`, {signal: request.signal})).json();
       treeCache.set(key, data);
       if (treeCache.size > 8) treeCache.delete(treeCache.keys().next().value);
       state.treeData = data;
       state.expanded.clear();
-      if (data.hosts.length === 1) {
-        const host = data.hosts[0];
-        state.expanded.add(treeKey([`host:${host.name}`]));
-        if (host.shares.length === 1) state.expanded.add(treeKey([`host:${host.name}`, host.shares[0].name]));
-      }
       renderTree();
       renderTreeSummary();
     } catch (error) {
@@ -693,14 +758,39 @@
   }
 
   Promise.all([api('/api/status').then(response => response.json()), api('/api/facets').then(response => response.json())]).then(([status, facets]) => {
+    state.retrievalEnabled = status.retrieval_enabled !== false;
+    state.revision = status.revision || 0;
     $('status').textContent = `Connected — ${status.file_count.toLocaleString()} files indexed`;
     $('connection-status').classList.add('ready');
     appendOptions('host', facets.hosts);
     appendOptions('share', facets.shares);
     appendOptions('extension', facets.extensions);
+    appendOptions('rule', facets.rules || []);
+    appendOptions('triage', facets.triages || []);
+    appendOptions('permission', facets.permissions || []);
+    appendOptions('collection', facets.collections || []);
     document.body.classList.toggle('compact', state.compact);
     $('density').setAttribute('aria-pressed', String(state.compact));
     setView(state.view === 'tree' ? 'tree' : 'table');
+    setInterval(async () => {
+      try {
+        const latest = await (await api('/api/status')).json();
+        $('status').textContent = `Connected — ${latest.file_count.toLocaleString()} files indexed${latest.scan_active ? ' · scanning' : ''}`;
+        if ((latest.revision || 0) !== state.revision) {
+          state.revision = latest.revision || 0;
+          treeCache.clear();
+          const updatedFacets = await (await api('/api/facets')).json();
+          appendOptions('host', updatedFacets.hosts);
+          appendOptions('share', updatedFacets.shares);
+          appendOptions('extension', updatedFacets.extensions);
+          appendOptions('rule', updatedFacets.rules || []);
+          appendOptions('triage', updatedFacets.triages || []);
+          appendOptions('permission', updatedFacets.permissions || []);
+          appendOptions('collection', updatedFacets.collections || []);
+          refresh();
+        }
+      } catch (_) { /* The normal request UI reports actionable errors. */ }
+    }, 2000);
   }).catch(error => {
     $('status').textContent = error.message;
     $('connection-status').classList.add('error');
@@ -708,7 +798,7 @@
   });
 
   $('query').addEventListener('input', scheduleRefresh);
-  ['host', 'share', 'extension'].forEach(id => $(id).addEventListener('change', scheduleRefresh));
+  ['host', 'share', 'extension', 'rule', 'triage', 'permission', 'collection'].forEach(id => $(id).addEventListener('change', scheduleRefresh));
   $('clear-query').addEventListener('click', () => { $('query').value = ''; scheduleRefresh(); $('query').focus(); });
   $('clear').addEventListener('click', clearFilters);
   $('retry').addEventListener('click', refresh);
@@ -723,7 +813,7 @@
   $('previous').addEventListener('click', () => { if (state.page > 1) { state.page -= 1; searchTable(); } });
   $('next').addEventListener('click', () => { if (state.hasNext) { state.page += 1; searchTable(); } });
   $('tree').addEventListener('keydown', treeKeydown);
-  $('expand-tree').addEventListener('click', () => { state.expanded = new Set(collectBranches()); renderTree(); });
+  $('expand-tree').addEventListener('click', expandAllBranches);
   $('collapse-tree').addEventListener('click', () => { state.expanded.clear(); state.selectedId = null; renderTree(); });
   $('close-preview').addEventListener('click', closePreview);
   $('preview-dialog').addEventListener('click', event => { if (event.target === $('preview-dialog')) closePreview(); });
@@ -733,7 +823,7 @@
   $('toast').addEventListener('mouseenter', () => clearTimeout(toastTimer));
   $('toast').addEventListener('mouseleave', () => { toastTimer = setTimeout(hideToast, 2000); });
   document.addEventListener('keydown', event => {
-    if (event.key === '/' && document.activeElement !== $('query') && !$('preview-dialog').open) { event.preventDefault(); $('query').focus(); }
+    if (event.key === '/' && !['INPUT', 'TEXTAREA', 'SELECT'].includes(document.activeElement.tagName) && !$('preview-dialog').open) { event.preventDefault(); $('query').focus(); }
     if (event.key === 'Escape' && state.selectedId && !$('preview-dialog').open) {
       const id = state.selectedId;
       state.selectedId = null;

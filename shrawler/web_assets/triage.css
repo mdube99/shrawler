@@ -1,0 +1,32 @@
+.ranking-workspace { max-width: 1480px; }
+.ranking-panel { margin: 24px 0; padding: 24px; background: var(--surface-1); border: 1px solid var(--line); border-radius: var(--radius-md); }
+.ranking-panel h2 { margin: 0 0 16px; font-size: 18px; }
+.ranking-controls { display: flex; flex-wrap: wrap; align-items: end; gap: 16px; margin: 16px 0; }
+.ranking-controls label, .builder-grid label { display: flex; flex-direction: column; gap: 6px; color: var(--text-secondary); }
+.ranking-controls select { max-width: 540px; }
+.ranking-controls input[type=number] { width: 110px; }
+.ranking-controls .checkbox-label { flex-direction: row; align-items: center; padding: 9px 0; }
+.ranking-controls .checkbox-label input { width: auto; }
+.ranking-workspace input, .ranking-workspace select, .ranking-workspace textarea { color: var(--text); background: var(--surface-2); border: 1px solid var(--line-strong); border-radius: var(--radius-sm); padding: 8px 10px; }
+.ranking-workspace details > summary { cursor: pointer; color: var(--teal); padding: 8px 0; }
+.builder-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 14px; margin: 14px 0; }
+.rule-editor-label { display: block; margin-top: 20px; margin-bottom: 6px; color: var(--text-secondary); }
+#rules-toml { width: 100%; resize: vertical; font: 13px/1.6 var(--font-data); }
+.ranking-actions { margin-bottom: 0; }
+#job-status, #ranking-summary, #job-summary { color: var(--text-secondary); }
+.ranking-table th:nth-child(1) { width: 90px; }
+.ranking-table th { top: var(--header-height); }
+.ranking-table th:nth-child(2) { width: 22%; }
+.ranking-table th:nth-child(3) { width: 37%; }
+.ranking-table th:nth-child(5) { width: 110px; }
+.ranking-table td { padding: 10px 12px; border-bottom: 1px solid var(--line); vertical-align: top; white-space: normal; overflow-wrap: anywhere; }
+.ranking-score { font: 600 18px var(--font-data); color: var(--amber-hover); }
+.ranking-path { font-family: var(--font-data); font-size: 12px; color: var(--text-secondary); }
+.ranking-reasons { color: var(--text-secondary); font-size: 12px; }
+.ranking-dialog { width: min(900px, 90vw); max-height: 85vh; padding: 24px; background: var(--surface-1); color: var(--text); border: 1px solid var(--line-strong); border-radius: var(--radius-md); }
+.ranking-dialog::backdrop { background: #000a; }
+.ranking-dialog header { display: flex; justify-content: space-between; align-items: center; }
+.ranking-dialog h2 { margin: 0; font-size: 20px; overflow-wrap: anywhere; }
+.ranking-dialog pre { padding: 12px; background: var(--surface-2); white-space: pre-wrap; overflow-wrap: anywhere; font: 12px/1.6 var(--font-data); }
+.ranking-dialog section { border-top: 1px solid var(--line); margin-top: 16px; padding-top: 12px; }
+#explanation-path, #counts-body { overflow-wrap: anywhere; }

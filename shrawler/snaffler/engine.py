@@ -12,6 +12,7 @@ from typing import Any, Dict, List, Optional, Pattern, Set, Tuple
 
 from colorama import Fore, Style
 
+from ..output import escape_terminal
 from .models import SnafflerRule
 
 try:
@@ -421,9 +422,7 @@ class SnafflerEngineMixin:
             self._record_operation("content_read", time.perf_counter() - started)
             logging.debug(f"Failed to read file content for Snaffler: {exc}")
             return None
-        self._record_operation(
-            "content_read", time.perf_counter() - started, len(data)
-        )
+        self._record_operation("content_read", time.perf_counter() - started, len(data))
         with self._state_lock:
             self._prefetched_content[cache_key] = data
 
@@ -457,10 +456,14 @@ class SnafflerEngineMixin:
             if context.get("unc_path"):
                 self.snaffler_matched_file_keys.add(str(context["unc_path"]))
 
+        if self.store:
+            self.store.add_match(match_row)
+
         host = str(context.get("host", ""))
         share_name = str(context.get("share_name", ""))
         if (
-            host
+            not self.store
+            and host
             and share_name
             and host in self.scan_results
             and share_name in self.scan_results[host]["shares"]
@@ -551,9 +554,7 @@ class SnafflerEngineMixin:
         if self.args.snaffler_content_mode == "all":
             pending_content_rules = {
                 rule.rule_name
-                for rule in self.snaffler_rules_by_scope.get(
-                    "ContentsEnumeration", []
-                )
+                for rule in self.snaffler_rules_by_scope.get("ContentsEnumeration", [])
             }
         post_rules: Set[str] = {
             rule.rule_name for rule in self.snaffler_rules_by_scope.get("PostMatch", [])
@@ -716,7 +717,9 @@ class SnafflerEngineMixin:
             return ""
         rule, _ = candidate_matches[0]
         return (
-            f" {Fore.YELLOW}[SNAFFLER: {rule.rule_name}/{rule.triage}]{Style.RESET_ALL}"
+            " "
+            f"{Fore.YELLOW}[SNAFFLER: {escape_terminal(rule.rule_name)}"
+            f"/{escape_terminal(rule.triage)}]{Style.RESET_ALL}"
         )
 
     def _display_snaffler_summary(self) -> None:
@@ -733,6 +736,3 @@ class SnafflerEngineMixin:
             top_rules = self.snaffler_match_counter.most_common(5)
             formatted = ", ".join([f"{name} ({count})" for name, count in top_rules])
             logging.info(f"Snaffler top matched rules: {formatted}")
-
-
-

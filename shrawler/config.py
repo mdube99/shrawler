@@ -15,6 +15,7 @@ DEFAULT_CONFIG = """# Shrawler defaults. Command-line options override these val
 profile = "balanced"
 view = "progress"
 format = "console"
+include_all_shares = false
 
 [nemesis]
 url = ""                 # Example: "https://nemesis:7443/api"
@@ -35,6 +36,7 @@ Top level:
   output    results directory path
   shares    list of included share names
   exclude_shares  list of excluded share names
+  include_all_shares  include normally skipped administrative shares (default: false)
 
 [nemesis]:
   url             API URL (example: https://nemesis:7443/api)

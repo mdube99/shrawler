@@ -1,4 +1,5 @@
 import json
+import sqlite3
 import stat
 import tempfile
 import unittest
@@ -70,6 +71,28 @@ class _DownloadClient:
 
 
 class ReliabilityTests(unittest.TestCase):
+    def test_ctrl_c_finalization_exports_partial_database_results(self):
+        with tempfile.TemporaryDirectory() as workspace:
+            crawler = _build_shrawler(
+                operating_mode="shares",
+                spider=False,
+                json_output=True,
+                output_dir=workspace,
+            )
+            assert crawler.store is not None
+            crawler.store.upsert_host(
+                "server", "server", "connection_failed", "unreachable"
+            )
+            run_dir = crawler.output_dir
+
+            crawler.finalize(interrupted=True)
+
+            result = json.loads((run_dir / "shrawler_results.json").read_text())
+            self.assertEqual(result["server"]["status"], "connection_failed")
+            with sqlite3.connect(Path(workspace) / "shrawler.db") as connection:
+                status = connection.execute("SELECT status FROM scans").fetchone()[0]
+            self.assertEqual(status, "interrupted")
+
     def test_share_formatter_returns_row_without_printing(self):
         from shrawler.core import format_share_info
 

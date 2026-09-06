@@ -1,0 +1,70 @@
+version = 1
+
+[[contexts]]
+id = "builtin.deployment-area"
+tag = "deployment-area"
+directory_name_any = ["deploy", "deployments", "release", "releases"]
+apply_to_descendants = 2
+
+[[rules]]
+id = "builtin.deployment-config"
+description = "Configuration file within deployment context"
+category = "infrastructure"
+signal_group = "configuration"
+points = 30
+[rules.when]
+extension_any = [".config", ".ini", ".yaml", ".yml", ".json", ".env"]
+context_any = ["deployment-area"]
+
+[[rules]]
+id = "builtin.production-config"
+description = "Configuration filename contains a production environment token"
+category = "infrastructure"
+signal_group = "environment"
+points = 20
+[rules.when]
+extension_any = [".config", ".ini", ".yaml", ".yml", ".json", ".env"]
+filename_token_any = ["prod", "production"]
+
+[[rules]]
+id = "builtin.password-database"
+description = "Filename has a password database extension"
+category = "credentials"
+signal_group = "password-database"
+points = 60
+[rules.when]
+extension_any = [".kdb", ".kdbx"]
+
+[[rules]]
+id = "builtin.credential-name"
+description = "Filename contains a credential-related token"
+category = "credentials"
+signal_group = "credential-name"
+points = 25
+[rules.when]
+filename_token_any = ["password", "passwords", "credentials", "secrets"]
+
+[[rules]]
+id = "builtin.credential-fragment"
+description = "Filename contains a credential-related fragment (broad match)"
+category = "credentials"
+signal_group = "credential-name"
+points = 15
+[rules.when]
+filename_contains_any = ["cred", "pass"]
+
+[[rules]]
+id = "builtin.ssn-fragment"
+description = "Filename contains ssn (possible personal information)"
+category = "personal-information"
+signal_group = "identity-name"
+points = 15
+[rules.when]
+filename_contains_any = ["ssn"]
+
+[[contexts]]
+id = "builtin.deployment-siblings"
+tag = "deployment-area"
+sibling_name_any = ["web.config", "deploy.ps1", "appsettings.*.json"]
+minimum_distinct_patterns = 2
+apply_to_descendants = 1

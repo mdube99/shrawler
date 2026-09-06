@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
 
-import copy
 import hashlib
 import json
 import logging
@@ -11,6 +10,7 @@ import time
 import uuid
 from collections import Counter, defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from copy import copy
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -46,10 +46,11 @@ from impacket.smbconnection import (
     SessionError,
 )
 
+from .output import escape_terminal, safe_csv_row
 from .progress import ProgressReporter
 from .smb import SMBAuth, connect_smb, create_smb_auth
 from .snaffler import SnafflerEngineMixin, SnafflerRule
-from .state import ScanStateStore
+from .store import ScanStore
 
 # Load .env file if it exists
 load_dotenv()
@@ -144,6 +145,9 @@ class Formatter(logging.Formatter):
 
     def format(self, record: logging.LogRecord) -> str:
         init()
+        record = copy(record)
+        record.msg = escape_terminal(record.getMessage())
+        record.args = ()
         if record.levelno == logging.INFO:
             self._style._fmt = f"{Fore.GREEN}[+]{Style.RESET_ALL} %(message)s"
         elif record.levelno == logging.DEBUG:
@@ -184,6 +188,7 @@ class HostRenderResult:
     status: str
     error: Optional[str] = None
     shares: List[ShareDisplay] = field(default_factory=list)
+    skipped_shares: List[Tuple[str, str]] = field(default_factory=list)
 
 
 def format_share_info(
@@ -194,6 +199,8 @@ def format_share_info(
     snaffler_marker: str = "",
 ) -> str:
     """Format one share row without writing to process-global stdout."""
+    share_name = escape_terminal(share_name)
+    share_comment = escape_terminal(share_comment)
     if share_perms["read"] and share_perms["write"]:
         prefix = Fore.GREEN + "[+]" + Style.RESET_ALL
     elif share_perms["read"] and not share_perms["write"]:
@@ -324,7 +331,9 @@ def display_unique_files(unique_files_data: List[Tuple[float, str]]) -> None:
 
     for mtime, file_path in unique_files_data:
         readable_time = datetime.fromtimestamp(mtime).strftime("%Y-%m-%d %H:%M:%S")
-        print(f"{Fore.GREEN}[+]{Style.RESET_ALL} {readable_time} | {file_path}")
+        print(
+            f"{Fore.GREEN}[+]{Style.RESET_ALL} {readable_time} | {escape_terminal(file_path)}"
+        )
 
 
 class Shrawler(SnafflerEngineMixin):
@@ -365,6 +374,7 @@ class Shrawler(SnafflerEngineMixin):
 
         # CSV output data structures
         self.share_rows: List[Dict[str, Any]] = []
+        self.skipped_shares: Dict[str, List[Tuple[str, str]]] = defaultdict(list)
         self.file_rows: List[Dict[str, Any]] = []
         self.download_rows: List[Dict[str, Any]] = []
         self.csv_enabled = False
@@ -397,8 +407,8 @@ class Shrawler(SnafflerEngineMixin):
             ".csv",
             ".xlsx",
             ".pdf",
-            ".kbdx",
-            ".kbd",
+            ".kdbx",
+            ".kdb",
             ".docx",
             ".doc",
             ".xls",
@@ -430,30 +440,29 @@ class Shrawler(SnafflerEngineMixin):
         # Track downloads by UNC path to avoid duplicate downloads
         self.downloaded_unc_paths: Set[str] = set()
 
-        self.output_dir = Path(self.args.output_dir).expanduser()
-        resume_path = getattr(self.args, "resume", None)
-        state_root = Path(resume_path).expanduser() if resume_path else self.output_dir
-        persist_state = self.args.operating_mode != "legacy" or bool(resume_path)
-        self.state_store = ScanStateStore(state_root, enabled=persist_state)
+        self.workspace_dir = Path(self.args.output_dir).expanduser()
+        self.output_dir = self.workspace_dir
+        resume_value = getattr(self.args, "resume", None)
+        persist_database = self.args.operating_mode != "legacy" and bool(
+            self.args.json_output
+        )
+        self.store: Optional[ScanStore] = None
+        if persist_database:
+            identity = auth or self._get_auth()
+            self.store = ScanStore(
+                self.workspace_dir,
+                self.args.operating_mode,
+                identity.domain,
+                identity.username,
+                resume=resume_value,
+            )
+            self.output_dir = self.store.run_dir
         self._resume_paths: Set[str] = set()
-        if resume_path:
-            saved = self.state_store.load()
-            saved_results = saved.get("results", {})
-            if isinstance(saved_results, dict):
-                self.scan_results = saved_results
-                self._resume_paths = {
-                    str(item.get("unc_path"))
-                    for key, host in saved_results.items()
-                    if not key.startswith("_") and isinstance(host, dict)
-                    for share in host.get("shares", {}).values()
-                    for item in share.get("discovered_files", [])
-                    if item.get("unc_path")
-                }
-            saved_summary = saved.get("summary", {})
-            if isinstance(saved_summary, dict):
-                self.files_seen_count = int(saved_summary.get("files_seen", 0))
-                self.download_count = int(saved_summary.get("files_downloaded", 0))
-                self.downloaded_bytes = int(saved_summary.get("downloaded_bytes", 0))
+        if self.store and resume_value is not None:
+            counts = self.store.summary_counts()
+            self.files_seen_count = int(counts["files_seen"])
+            self.download_count = int(counts["files_downloaded"])
+            self.downloaded_bytes = int(counts["downloaded_bytes"])
 
         # Process counting arguments (requires self.extensions)
         self._process_count_arguments()
@@ -659,7 +668,7 @@ class Shrawler(SnafflerEngineMixin):
         # Calculate column widths
         max_type_width = max(
             len("File Type"),
-            max(len(str(item)) for item, _ in sorted_counts),
+            max(len(escape_terminal(item)) for item, _ in sorted_counts),
             len("TOTAL"),
         )
         count_width = max(len("Count"), len(str(total_count)))
@@ -675,7 +684,7 @@ class Shrawler(SnafflerEngineMixin):
 
         for item, count in sorted_counts:
             print(
-                f"| {str(item).ljust(max_type_width)} | {str(count).rjust(count_width)} |"
+                f"| {escape_terminal(item).ljust(max_type_width)} | {str(count).rjust(count_width)} |"
             )
 
         print(border_line)
@@ -813,7 +822,7 @@ class Shrawler(SnafflerEngineMixin):
 
             # Collect data for CSV output
             csv_entry: Optional[Dict[str, Any]] = None
-            if self.args.csv_output:
+            if self.args.csv_output and not self.store:
                 clean_remote_path = remote_path.lstrip("/").replace("/", "\\")
                 unc_path = f"\\\\{host}\\{share}\\{clean_remote_path}"
 
@@ -836,13 +845,21 @@ class Shrawler(SnafflerEngineMixin):
                 }
                 self.download_rows.append(csv_entry)
 
-            # Add to scan results (within the appropriate share's downloaded_files list)
-            with self._state_lock:
-                self.scan_results[host]["shares"][share]["downloaded_files"].append(
-                    file_entry
+            if self.store:
+                file_entry["_store_id"] = self.store.add_download(
+                    host, share, file_entry
                 )
-                self.download_count += 1
-                self.downloaded_bytes += actual_size
+                with self._state_lock:
+                    self.download_count += 1
+                    self.downloaded_bytes += actual_size
+            else:
+                # Add to compatibility in-memory results.
+                with self._state_lock:
+                    self.scan_results[host]["shares"][share]["downloaded_files"].append(
+                        file_entry
+                    )
+                    self.download_count += 1
+                    self.downloaded_bytes += actual_size
 
             if nemesis_upload:
                 self._queue_nemesis_upload(file_entry, csv_entry)
@@ -912,6 +929,8 @@ class Shrawler(SnafflerEngineMixin):
                         csv_entry["nemesis_status"] = "uploaded"
                         csv_entry["nemesis_response_id"] = result["response_id"]
                         csv_entry["nemesis_last_error"] = None
+                if self.store:
+                    self.store.update_download(int(file_entry["_store_id"]), file_entry)
                 return
 
             last_error = result.get("last_error") or "Nemesis upload failed"
@@ -926,6 +945,8 @@ class Shrawler(SnafflerEngineMixin):
             state["status"] = "failed"
             if csv_entry is not None:
                 csv_entry["nemesis_status"] = "failed"
+        if self.store:
+            self.store.update_download(int(file_entry["_store_id"]), file_entry)
         logging.warning(
             f"Nemesis upload failed after {max_attempts} attempts: "
             f"{file_entry['unc_path']}"
@@ -940,19 +961,21 @@ class Shrawler(SnafflerEngineMixin):
             future.result()
         if executor is not None:
             executor.shutdown(wait=True)
+        if self.store:
+            downloads = self.store.summary_counts()["downloads"]
+        else:
+            downloads = [
+                entry
+                for host, result in self.scan_results.items()
+                if not host.startswith("_") and isinstance(result, dict)
+                for share in result.get("shares", {}).values()
+                for entry in share.get("downloaded_files", [])
+            ]
         uploaded = sum(
-            entry.get("nemesis", {}).get("status") == "uploaded"
-            for host, result in self.scan_results.items()
-            if not host.startswith("_") and isinstance(result, dict)
-            for share in result.get("shares", {}).values()
-            for entry in share.get("downloaded_files", [])
+            entry.get("nemesis", {}).get("status") == "uploaded" for entry in downloads
         )
         failed = sum(
-            entry.get("nemesis", {}).get("status") == "failed"
-            for host, result in self.scan_results.items()
-            if not host.startswith("_") and isinstance(result, dict)
-            for share in result.get("shares", {}).values()
-            for entry in share.get("downloaded_files", [])
+            entry.get("nemesis", {}).get("status") == "failed" for entry in downloads
         )
         if futures:
             logging.info(f"Nemesis uploads: {uploaded} uploaded, {failed} failed")
@@ -1082,6 +1105,8 @@ class Shrawler(SnafflerEngineMixin):
         Returns:
             List of CSV filenames that were actually written
         """
+        if self.store:
+            return self.store.export_csv()
         import csv
 
         csv_files_written = []
@@ -1092,6 +1117,8 @@ class Shrawler(SnafflerEngineMixin):
             shares_fieldnames = [
                 "host",
                 "share_name",
+                "status",
+                "skip_reason",
                 "comment",
                 "read_permission",
                 "write_permission",
@@ -1110,7 +1137,7 @@ class Shrawler(SnafflerEngineMixin):
             with output_path.open("w", newline="") as f:
                 writer = csv.DictWriter(f, fieldnames=shares_fieldnames)
                 writer.writeheader()
-                writer.writerows(self.share_rows)
+                writer.writerows(safe_csv_row(row) for row in self.share_rows)
             os.chmod(output_path, 0o600)
             csv_files_written.append(str(output_path))
 
@@ -1134,7 +1161,7 @@ class Shrawler(SnafflerEngineMixin):
             with output_path.open("w", newline="") as f:
                 writer = csv.DictWriter(f, fieldnames=files_fieldnames)
                 writer.writeheader()
-                writer.writerows(self.file_rows)
+                writer.writerows(safe_csv_row(row) for row in self.file_rows)
             os.chmod(output_path, 0o600)
             csv_files_written.append(str(output_path))
 
@@ -1161,7 +1188,7 @@ class Shrawler(SnafflerEngineMixin):
             with output_path.open("w", newline="") as f:
                 writer = csv.DictWriter(f, fieldnames=downloads_fieldnames)
                 writer.writeheader()
-                writer.writerows(self.download_rows)
+                writer.writerows(safe_csv_row(row) for row in self.download_rows)
             os.chmod(output_path, 0o600)
             csv_files_written.append(str(output_path))
 
@@ -1182,7 +1209,7 @@ class Shrawler(SnafflerEngineMixin):
             with output_path.open("w", newline="") as f:
                 writer = csv.DictWriter(f, fieldnames=snaffler_fieldnames)
                 writer.writeheader()
-                writer.writerows(self.snaffler_matches)
+                writer.writerows(safe_csv_row(row) for row in self.snaffler_matches)
             os.chmod(output_path, 0o600)
             csv_files_written.append(str(output_path))
 
@@ -1190,6 +1217,8 @@ class Shrawler(SnafflerEngineMixin):
 
     def write_json_output(self) -> Path:
         """Write consolidated JSON results with private permissions."""
+        if self.store:
+            return self.store.export_json(self._build_scan_summary())
         self.scan_results["_schema"] = {
             "name": "shrawler-results",
             "version": 3,
@@ -1204,6 +1233,84 @@ class Shrawler(SnafflerEngineMixin):
 
     def _build_scan_summary(self) -> Dict[str, Any]:
         """Build a machine-readable summary of the current scan state."""
+        if self.store:
+            persisted = self.store.summary_counts()
+            shares = [
+                json.loads(row[0])
+                for row in self.store.connection.execute(
+                    """SELECT s.payload_json FROM shares s
+                       JOIN hosts h ON h.id=s.host_id WHERE h.scan_id=?""",
+                    (self.store.scan_id,),
+                )
+            ]
+            downloads = persisted["downloads"]
+            return {
+                "generated_at_utc": datetime.now(timezone.utc).isoformat(),
+                "hosts_attempted": persisted["hosts_attempted"],
+                "host_statuses": persisted["host_statuses"],
+                "shares_enumerated": persisted["shares_enumerated"],
+                "shares_skipped": sum(
+                    share.get("skip_reason") is not None for share in shares
+                ),
+                "share_skip_reasons": dict(
+                    Counter(
+                        str(share["skip_reason"])
+                        for share in shares
+                        if share.get("skip_reason")
+                    )
+                ),
+                "readable_shares": sum(
+                    bool(share.get("permissions", {}).get("read")) for share in shares
+                ),
+                "writable_shares": sum(
+                    share.get("permissions", {}).get("write") is True
+                    for share in shares
+                ),
+                "write_status_unknown": sum(
+                    share.get("permissions", {}).get("write_status") == "unknown"
+                    for share in shares
+                ),
+                "acl_control_shares": sum(
+                    bool(
+                        share.get("permissions", {})
+                        .get("write_rights", {})
+                        .get("write_dac")
+                    )
+                    or bool(
+                        share.get("permissions", {})
+                        .get("write_rights", {})
+                        .get("write_owner")
+                    )
+                    for share in shares
+                ),
+                "write_verified_shares": sum(
+                    share.get("permissions", {}).get("write_status") == "verified"
+                    for share in shares
+                ),
+                "files_seen": persisted["files_seen"],
+                "files_downloaded": persisted["files_downloaded"],
+                "downloaded_bytes": persisted["downloaded_bytes"],
+                "snaffler_matches": persisted["snaffler_matches"],
+                "nemesis": {
+                    "mode": self.args.nemesis_mode,
+                    "uploaded": sum(
+                        item.get("nemesis", {}).get("status") == "uploaded"
+                        for item in downloads
+                    ),
+                    "failed": sum(
+                        item.get("nemesis", {}).get("status") == "failed"
+                        for item in downloads
+                    ),
+                },
+                "operations": {
+                    name: {
+                        "count": self.operation_counts[name],
+                        "seconds": round(self.operation_seconds[name], 6),
+                        "bytes": self.operation_bytes[name],
+                    }
+                    for name in sorted(self.operation_counts)
+                },
+            }
         host_results = [
             result
             for key, result in self.scan_results.items()
@@ -1227,6 +1334,16 @@ class Shrawler(SnafflerEngineMixin):
             "hosts_attempted": len(host_results),
             "host_statuses": dict(status_counts),
             "shares_enumerated": len(shares),
+            "shares_skipped": sum(
+                share.get("skip_reason") is not None for share in shares
+            ),
+            "share_skip_reasons": dict(
+                Counter(
+                    str(share["skip_reason"])
+                    for share in shares
+                    if share.get("skip_reason")
+                )
+            ),
             "readable_shares": sum(
                 bool(share.get("permissions", {}).get("read")) for share in shares
             ),
@@ -1294,9 +1411,10 @@ class Shrawler(SnafflerEngineMixin):
             logging.info(f"Total files downloaded: {self.download_count}")
             logging.info(f"Total bytes downloaded: {self.downloaded_bytes}")
 
+        snaffler_summary = None
         if self.snaffler_enabled:
             self._display_snaffler_summary()
-            self.scan_results["_snaffler_summary"] = {
+            snaffler_summary = {
                 "total_matches": len(self.snaffler_matches),
                 "unique_matched_files": len(self.snaffler_matched_file_keys),
                 "top_rules": [
@@ -1304,6 +1422,8 @@ class Shrawler(SnafflerEngineMixin):
                     for name, count in self.snaffler_match_counter.most_common(10)
                 ],
             }
+            if not self.store:
+                self.scan_results["_snaffler_summary"] = snaffler_summary
 
         if self.args.metrics:
             self._display_operation_metrics()
@@ -1313,19 +1433,38 @@ class Shrawler(SnafflerEngineMixin):
         if self.args.unique and self.unique_files_data and not self.args.spider:
             display_unique_files(find_unique_files_by_mtime(self.unique_files_data))
 
-        if self.csv_enabled:
-            files_written = self.write_csv_outputs()
-            if files_written:
-                logging.info(f"CSV files written: {', '.join(files_written)}")
-            else:
-                logging.info("No data to write to CSV files")
-        if self.json_enabled and self.scan_results:
-            try:
+        summary = self._build_scan_summary()
+        if summary.get("shares_skipped"):
+            logging.info(
+                "Shares skipped: %s (%s)",
+                summary["shares_skipped"],
+                ", ".join(
+                    f"{reason}: {count}"
+                    for reason, count in summary["share_skip_reasons"].items()
+                ),
+            )
+        if self.store:
+            self.store.finish(
+                "interrupted" if interrupted else "completed",
+                summary,
+                snaffler_summary,
+            )
+        try:
+            if self.csv_enabled:
+                files_written = self.write_csv_outputs()
+                if files_written:
+                    logging.info(f"CSV files written: {', '.join(files_written)}")
+                else:
+                    logging.info("No data to write to CSV files")
+            if self.json_enabled and (self.store or self.scan_results):
                 output_path = self.write_json_output()
                 logging.info(f"Scan results written to {output_path}")
-            except Exception as exc:
-                logging.warning(f"Failed to write scan results file: {exc}")
-        self._checkpoint_state()
+        except Exception as exc:
+            logging.warning(f"Failed to write scan output: {exc}")
+        finally:
+            self._checkpoint_state()
+            if self.store:
+                self.store.close()
 
     def get_shares(
         self,
@@ -1343,28 +1482,53 @@ class Shrawler(SnafflerEngineMixin):
 
         share_names = [str(share["shi1_netname"]).rstrip("\x00") for share in shares]
 
-        excluded_shares = set(default_shares)
+        excluded_lookup = {name.casefold(): name for name in default_shares}
+        explicit_exclusions = self._explicit_share_exclusions()
+        requested: Optional[Set[str]] = None
         if desired_share:
             requested = {
-                name.strip() for name in desired_share.split(",") if name.strip()
+                name.strip().casefold()
+                for name in desired_share.split(",")
+                if name.strip()
             }
-            missing_requested = sorted(requested.difference(set(share_names)))
+            available = {name.casefold() for name in share_names}
+            missing_requested = sorted(requested.difference(available))
             if missing_requested:
                 logging.warning(
                     f"Requested shares not found on {target}: {', '.join(missing_requested)}"
                 )
-            excluded_shares = set(share_names).difference(requested)
+
+        skipped = self.skipped_shares[target]
+        skipped.clear()
 
         for share in shares:
             share_name = str(share["shi1_netname"]).rstrip("\x00")
             share_comment = str(share["shi1_remark"]).rstrip("\x00")
             share_type = int(share["shi1_type"]) & STYPE_MASK
-            if share_name in excluded_shares:
+            folded_name = share_name.casefold()
+            reason = None
+            if folded_name in explicit_exclusions:
+                reason = "explicitly excluded"
+            elif requested is not None and folded_name not in requested:
+                reason = "not selected by --share/--shares"
+            elif requested is None and folded_name in excluded_lookup:
+                reason = "administrative share (default exclusion)"
+            if reason:
+                skipped.append((share_name, reason))
+                logging.info(f"Skipping share {target}\\{share_name}: {reason}")
+                self._record_skipped_share(
+                    target, share_name, share_comment, share_type, reason
+                )
                 continue
             existing_share = (
                 self.scan_results.get(target, {}).get("shares", {}).get(share_name, {})
             )
-            if existing_share.get("status") == "complete":
+            existing_status = (
+                self.store.share_status(target, share_name)
+                if self.store
+                else existing_share.get("status")
+            )
+            if existing_status == "complete":
                 logging.info(
                     f"Skipping completed share from resume state: {target}\\{share_name}"
                 )
@@ -1378,7 +1542,12 @@ class Shrawler(SnafflerEngineMixin):
                         share_name,
                     )
                     if discard_share:
-                        logging.debug(
+                        reason = "Snaffler share discard rule"
+                        skipped.append((share_name, reason))
+                        self._record_skipped_share(
+                            target, share_name, share_comment, share_type, reason
+                        )
+                        logging.info(
                             f"Skipping share {target}\\{share_name} due to Snaffler discard"
                         )
                         continue
@@ -1390,26 +1559,36 @@ class Shrawler(SnafflerEngineMixin):
                     share_type=share_type,
                 )
 
-                if target not in self.scan_results:
-                    self.scan_results[target] = {
-                        "scan_timestamp_utc": datetime.now(timezone.utc).isoformat(),
-                        "shares": {},
-                    }
-
-                self.scan_results[target]["shares"][share_name] = {
+                share_payload: Dict[str, Any] = {
                     "comment": share_comment,
                     "permissions": share_perms,
                     "share_type": share_type,
                     "unc_path": f"\\\\{target}\\{share_name}",
-                    "status": "scanning",
-                    "discovered_files": existing_share.get("discovered_files", []),
-                    "downloaded_files": existing_share.get("downloaded_files", []),
                 }
+                if self.store:
+                    self.store.upsert_share(
+                        target, share_name, "scanning", share_payload
+                    )
+                    self._thread_context.resume_paths = self.store.existing_paths(
+                        target, share_name
+                    )
+                else:
+                    if target not in self.scan_results:
+                        self.scan_results[target] = {
+                            "scan_timestamp_utc": datetime.now(
+                                timezone.utc
+                            ).isoformat(),
+                            "shares": {},
+                        }
+                    self.scan_results[target]["shares"][share_name] = {
+                        **share_payload,
+                        "status": "scanning",
+                        "discovered_files": existing_share.get("discovered_files", []),
+                        "downloaded_files": existing_share.get("downloaded_files", []),
+                    }
 
                 if share_snaffle_rules:
-                    self.scan_results[target]["shares"][share_name][
-                        "snaffler_share_rules"
-                    ] = [
+                    snaffler_share_rules_payload = [
                         {
                             "rule_name": rule.rule_name,
                             "triage": rule.triage,
@@ -1417,6 +1596,15 @@ class Shrawler(SnafflerEngineMixin):
                         }
                         for rule in share_snaffle_rules
                     ]
+                    share_payload["snaffler_share_rules"] = snaffler_share_rules_payload
+                    if self.store:
+                        self.store.upsert_share(
+                            target, share_name, "scanning", share_payload
+                        )
+                    else:
+                        self.scan_results[target]["shares"][share_name][
+                            "snaffler_share_rules"
+                        ] = snaffler_share_rules_payload
 
                     share_context = {
                         "host": target,
@@ -1431,7 +1619,7 @@ class Shrawler(SnafflerEngineMixin):
                 if share_snaffle_rules:
                     first_rule = share_snaffle_rules[0]
                     snaffler_share_marker = (
-                        f" {Fore.YELLOW}[SNAFFLER: {first_rule.rule_name}/{first_rule.triage}]"
+                        f" {Fore.YELLOW}[SNAFFLER: {escape_terminal(first_rule.rule_name)}/{escape_terminal(first_rule.triage)}]"
                         f"{Style.RESET_ALL}"
                     )
 
@@ -1441,6 +1629,8 @@ class Shrawler(SnafflerEngineMixin):
                             "host": target,
                             "share_name": share_name,
                             "comment": share_comment,
+                            "status": "complete",
+                            "skip_reason": "",
                             "read_permission": share_perms["read"],
                             "write_permission": share_perms["write"],
                             "write_status": share_perms.get("write_status"),
@@ -1493,15 +1683,66 @@ class Shrawler(SnafflerEngineMixin):
                                 snaffler_marker=snaffler_share_marker,
                             )
                         )
-                self.scan_results[target]["shares"][share_name]["status"] = "complete"
-                self.state_store.append(
-                    "share_finished", host=target, share=share_name, status="complete"
-                )
+                if self.store:
+                    self.store.flush()
+                    self.store.upsert_share(
+                        target, share_name, "complete", share_payload
+                    )
+                    self._thread_context.resume_paths = set()
+                else:
+                    self.scan_results[target]["shares"][share_name]["status"] = (
+                        "complete"
+                    )
                 self._checkpoint_state()
 
             except KeyboardInterrupt:
                 raise
         return display_shares
+
+    def _explicit_share_exclusions(self) -> Set[str]:
+        """Return explicitly excluded share names in case insensitive form."""
+        return {
+            share.strip().casefold()
+            for share in (getattr(self.args, "skip_share", "") or "").split(",")
+            if share.strip()
+        }
+
+    def _record_skipped_share(
+        self,
+        target: str,
+        share_name: str,
+        share_comment: str,
+        share_type: int,
+        reason: str,
+    ) -> None:
+        payload = {
+            "comment": share_comment,
+            "share_type": share_type,
+            "unc_path": f"\\\\{target}\\{share_name}",
+            "skip_reason": reason,
+        }
+        if self.store:
+            self.store.upsert_share(target, share_name, "skipped", payload)
+        else:
+            host_results = self.scan_results.setdefault(target, {"shares": {}})
+            host_results.setdefault("shares", {})[share_name] = {
+                **payload,
+                "status": "skipped",
+                "discovered_files": [],
+                "downloaded_files": [],
+            }
+        if self.csv_enabled and not self.store:
+            self.share_rows.append(
+                {
+                    "host": target,
+                    "share_name": share_name,
+                    "comment": share_comment,
+                    "status": "skipped",
+                    "skip_reason": reason,
+                    "unc_path": payload["unc_path"],
+                    "scan_timestamp_utc": datetime.now(timezone.utc).isoformat(),
+                }
+            )
 
     @staticmethod
     def _cleanup_succeeded(probe: Optional[Dict[str, Any]]) -> Optional[bool]:
@@ -1743,7 +1984,11 @@ class Shrawler(SnafflerEngineMixin):
 
         # Build the proper tree structure for directories
         connector = "└── " if last else "├── "
-        name = indent + connector + f"{Fore.BLUE}{directory}/{Style.RESET_ALL}"
+        name = (
+            indent
+            + connector
+            + f"{Fore.BLUE}{escape_terminal(directory)}/{Style.RESET_ALL}"
+        )
 
         if self.args.output_mode == "tree":
             print(self.format_table_row(size, mtime, name))
@@ -1877,37 +2122,35 @@ class Shrawler(SnafflerEngineMixin):
             "is_directory": False,
             "scan_timestamp_utc": datetime.now(timezone.utc).isoformat(),
         }
-        with self._state_lock:
-            host_result = self.scan_results.setdefault(
-                host,
-                {
-                    "scan_timestamp_utc": datetime.now(timezone.utc).isoformat(),
-                    "status": "scanning",
-                    "error": None,
-                    "shares": {},
-                },
-            )
-            share_result = host_result["shares"].setdefault(
-                share,
-                {"downloaded_files": [], "discovered_files": []},
-            )
-            share_result.setdefault("discovered_files", []).append(file_entry)
+        if self.store:
+            self.store.add_file(host, share, file_entry)
+        else:
+            with self._state_lock:
+                host_result = self.scan_results.setdefault(
+                    host,
+                    {
+                        "scan_timestamp_utc": datetime.now(timezone.utc).isoformat(),
+                        "status": "scanning",
+                        "error": None,
+                        "shares": {},
+                    },
+                )
+                share_result = host_result["shares"].setdefault(
+                    share,
+                    {"downloaded_files": [], "discovered_files": []},
+                )
+                share_result.setdefault("discovered_files", []).append(file_entry)
 
-            if self.csv_enabled:
-                csv_entry = dict(file_entry)
-                csv_entry.update({"can_read": None, "can_write": None})
-                self.file_rows.append(csv_entry)
-        self.state_store.append(
-            "file_discovered", host=host, share=share, file=file_entry
-        )
+                if self.csv_enabled:
+                    csv_entry = dict(file_entry)
+                    csv_entry.update({"can_read": None, "can_write": None})
+                    self.file_rows.append(csv_entry)
         return file_entry
 
     def _checkpoint_state(self) -> None:
-        """Publish an atomic snapshot suitable for a later --resume."""
-        with self._state_lock:
-            results = copy.deepcopy(self.scan_results)
-            summary = self._build_scan_summary()
-            self.state_store.checkpoint(results, summary)
+        """Commit persisted work at a scan durability boundary."""
+        if self.store:
+            self.store.flush()
 
     def _process_and_display_file(
         self,
@@ -1928,7 +2171,8 @@ class Shrawler(SnafflerEngineMixin):
         file_mtime_epoch = file_result.get_mtime_epoch()
         file_extension = os.path.splitext(next_filedir)[1].lower()
         unc_path = f"\\\\{host_for_ops}\\{share}\\{remote_file_path.lstrip('/')}"
-        if unc_path in self._resume_paths:
+        resume_paths = getattr(self._thread_context, "resume_paths", self._resume_paths)
+        if unc_path in resume_paths:
             return
         with self._state_lock:
             self.files_seen_count += 1
@@ -1996,7 +2240,11 @@ class Shrawler(SnafflerEngineMixin):
         mtime = self.readable_time_short(file_mtime_epoch)
 
         file_connector = "└── " if is_last else "├── "
-        name = indent + file_connector + f"{Fore.GREEN}{next_filedir}{Style.RESET_ALL}"
+        name = (
+            indent
+            + file_connector
+            + f"{Fore.GREEN}{escape_terminal(next_filedir)}{Style.RESET_ALL}"
+        )
         if unique_status:
             name += unique_status
         if download_status:
@@ -2009,7 +2257,9 @@ class Shrawler(SnafflerEngineMixin):
         elif self.args.output_mode == "matches" and (
             candidate_matches or download_status or is_unique
         ):
-            print(f"{unc_path}{unique_status}{download_status}{snaffler_status}")
+            print(
+                f"{escape_terminal(unc_path)}{unique_status}{download_status}{snaffler_status}"
+            )
 
     def spider_shares(
         self,
@@ -2184,7 +2434,7 @@ class Shrawler(SnafflerEngineMixin):
         mtime = self.readable_time_short(file_mtime_epoch)
 
         connector = "└── " if is_last else "├── "
-        name = connector + f"{Fore.GREEN}{filename}{Style.RESET_ALL}"
+        name = connector + f"{Fore.GREEN}{escape_terminal(filename)}{Style.RESET_ALL}"
         if unique_status:
             name += unique_status
         if download_status:
@@ -2197,7 +2447,9 @@ class Shrawler(SnafflerEngineMixin):
         elif self.args.output_mode == "matches" and (
             candidate_matches or download_status or is_unique
         ):
-            print(f"{unc_path}{unique_status}{download_status}{snaffler_status}")
+            print(
+                f"{escape_terminal(unc_path)}{unique_status}{download_status}{snaffler_status}"
+            )
 
     def readable_file_size(self, nbytes: float) -> str:
         "Convert into readable file sizes"
@@ -2302,27 +2554,38 @@ class Shrawler(SnafflerEngineMixin):
         """Scan one host using worker-local SMB state."""
         self.current_host = mach_ip
         existing = self.scan_results.get(mach_ip, {})
-        if existing.get("status") == "complete":
+        existing_status = (
+            self.store.host_status(mach_ip) if self.store else existing.get("status")
+        )
+        if existing_status == "complete":
             logging.info(f"Skipping completed host from resume state: {mach_ip}")
             return HostRenderResult(mach_ip, mach_name, "complete")
-        with self._state_lock:
-            host_state = self.scan_results.setdefault(mach_ip, {"shares": {}})
-            host_state.update(
-                {
-                    "scan_timestamp_utc": datetime.now(timezone.utc).isoformat(),
-                    "status": "scanning",
-                    "error": None,
-                }
-            )
-            host_state.setdefault("shares", {})
+        if self.store:
+            self.store.upsert_host(mach_ip, mach_name, "scanning")
+        else:
+            with self._state_lock:
+                host_state = self.scan_results.setdefault(mach_ip, {"shares": {}})
+                host_state.update(
+                    {
+                        "scan_timestamp_utc": datetime.now(timezone.utc).isoformat(),
+                        "status": "scanning",
+                        "error": None,
+                    }
+                )
+                host_state.setdefault("shares", {})
 
         smbclient: Any = None
         display_shares: List[ShareDisplay] = []
+        final_status = "scan_failed"
+        final_error: Optional[str] = None
         try:
             smbclient = self.init_smb_session(mach_ip)
             if smbclient is None:
-                self.scan_results[mach_ip]["status"] = "authentication_failed"
-                self.scan_results[mach_ip]["error"] = "SMB authentication failed"
+                final_status = "authentication_failed"
+                final_error = "SMB authentication failed"
+                if not self.store:
+                    self.scan_results[mach_ip]["status"] = final_status
+                    self.scan_results[mach_ip]["error"] = final_error
                 return HostRenderResult(
                     mach_ip,
                     mach_name,
@@ -2338,17 +2601,29 @@ class Shrawler(SnafflerEngineMixin):
                 self.args.spider,
                 self.args.shares,
             )
-            self.scan_results[mach_ip]["status"] = "complete"
+            final_status = "complete"
+            if not self.store:
+                self.scan_results[mach_ip]["status"] = "complete"
             return HostRenderResult(
-                mach_ip, mach_name, "complete", shares=display_shares
+                mach_ip,
+                mach_name,
+                "complete",
+                shares=display_shares,
+                skipped_shares=list(self.skipped_shares.get(mach_ip, [])),
             )
         except OSError as exc:
-            self.scan_results[mach_ip]["status"] = "connection_failed"
-            self.scan_results[mach_ip]["error"] = str(exc)
+            final_status = "connection_failed"
+            final_error = str(exc)
+            if not self.store:
+                self.scan_results[mach_ip]["status"] = final_status
+                self.scan_results[mach_ip]["error"] = final_error
             return HostRenderResult(mach_ip, mach_name, "connection_failed", str(exc))
         except Exception as exc:
-            self.scan_results[mach_ip]["status"] = "scan_failed"
-            self.scan_results[mach_ip]["error"] = str(exc)
+            final_status = "scan_failed"
+            final_error = str(exc)
+            if not self.store:
+                self.scan_results[mach_ip]["status"] = final_status
+                self.scan_results[mach_ip]["error"] = final_error
             return HostRenderResult(mach_ip, mach_name, "scan_failed", str(exc))
         finally:
             if smbclient is not None:
@@ -2356,11 +2631,9 @@ class Shrawler(SnafflerEngineMixin):
                     smbclient.logoff()
                 except Exception:
                     logging.debug(f"Failed to close SMB session for {mach_ip}")
-            self.state_store.append(
-                "host_finished",
-                host=mach_ip,
-                status=self.scan_results.get(mach_ip, {}).get("status", "unknown"),
-            )
+            if self.store:
+                self.store.flush()
+                self.store.upsert_host(mach_ip, mach_name, final_status, final_error)
             self._checkpoint_state()
 
     def _effective_worker_count(self, host_count: int) -> int:
@@ -2380,9 +2653,9 @@ class Shrawler(SnafflerEngineMixin):
 
     @staticmethod
     def render_host_block(result: HostRenderResult) -> str:
-        host_label = result.display_name
+        host_label = escape_terminal(result.display_name)
         if result.host != result.display_name:
-            host_label = f"{result.display_name} ({result.host})"
+            host_label = f"{escape_terminal(result.display_name)} ({escape_terminal(result.host)})"
         if result.status == "complete":
             marker = f"{Fore.GREEN}[+]{Style.RESET_ALL}"
         elif result.status in {
@@ -2396,7 +2669,9 @@ class Shrawler(SnafflerEngineMixin):
         lines = [f"{marker} {host_label}"]
         if result.error:
             status = result.status.replace("_", " ").capitalize()
-            lines.append(f"     {Fore.RED}{status}:{Style.RESET_ALL} {result.error}")
+            lines.append(
+                f"     {Fore.RED}{escape_terminal(status)}:{Style.RESET_ALL} {escape_terminal(result.error)}"
+            )
         elif result.shares:
             width = max(len(share.name) for share in result.shares)
             lines.extend(
@@ -2411,11 +2686,38 @@ class Shrawler(SnafflerEngineMixin):
             )
         else:
             lines.append(f"     {Fore.YELLOW}No shares displayed{Style.RESET_ALL}")
+        for share_name, reason in result.skipped_shares:
+            lines.append(
+                f"     {Fore.YELLOW}[SKIP]{Style.RESET_ALL} {escape_terminal(share_name)}: {escape_terminal(reason)}"
+            )
         return "\n".join(lines)
 
     def _render_host_result(self, result: HostRenderResult) -> None:
         if self.args.output_mode == "tree" and not self.args.spider:
             print(self.render_host_block(result), end="\n\n")
+
+    def _configure_share_exclusions(self) -> None:
+        """Build built in and explicit exclusions with predictable precedence."""
+        built_in_exclusions = list(self.normal_shares)
+        if getattr(self.args, "include_all_shares", False):
+            built_in_exclusions = []
+        if self.args.add_share:
+            additions = {
+                share.strip().casefold()
+                for share in self.args.add_share.split(",")
+                if share.strip()
+            }
+            built_in_exclusions = [
+                share
+                for share in built_in_exclusions
+                if share.casefold() not in additions
+            ]
+        explicit_exclusions = [
+            share.strip()
+            for share in (self.args.skip_share or "").split(",")
+            if share.strip()
+        ]
+        self.normal_shares = built_in_exclusions + explicit_exclusions
 
     def main(self) -> int:
         # Logging
@@ -2439,17 +2741,7 @@ class Shrawler(SnafflerEngineMixin):
             )
         auth = self._get_auth()
 
-        if self.args.skip_share:
-            shares = self.args.skip_share.split(",")
-            for share in shares:
-                self.normal_shares.append(share)
-
-        if self.args.add_share:
-            shares = self.args.add_share.split(",")
-            for share in shares:
-                share = share.strip()
-                if share in self.normal_shares:
-                    self.normal_shares.remove(share)
+        self._configure_share_exclusions()
 
         if self.args.hosts_file:
             machine_ip = self.get_ip_addrs(self.args.hosts_file)
@@ -2496,8 +2788,8 @@ class Shrawler(SnafflerEngineMixin):
                 progress.stop()
 
         self._checkpoint_state()
-        self.finalize()
         statuses = self._build_scan_summary()["host_statuses"]
+        self.finalize()
         return 0 if statuses and set(statuses) == {"complete"} else 1
 
 

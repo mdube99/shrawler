@@ -20,12 +20,21 @@ class ProgressReporter:
 
     def _line(self) -> str:
         with self.crawler._state_lock:
-            hosts = len([key for key in self.crawler.scan_results if not key.startswith("_")])
-            shares = sum(
-                len(value.get("shares", {}))
-                for key, value in self.crawler.scan_results.items()
-                if not key.startswith("_") and isinstance(value, dict)
-            )
+            if self.crawler.store:
+                hosts, shares = self.crawler.store.progress_counts()
+            else:
+                hosts = len(
+                    [
+                        key
+                        for key in self.crawler.scan_results
+                        if not key.startswith("_")
+                    ]
+                )
+                shares = sum(
+                    len(value.get("shares", {}))
+                    for key, value in self.crawler.scan_results.items()
+                    if not key.startswith("_") and isinstance(value, dict)
+                )
             files = self.crawler.files_seen_count
             matches = len(self.crawler.snaffler_matches)
             downloaded = self.crawler.downloaded_bytes

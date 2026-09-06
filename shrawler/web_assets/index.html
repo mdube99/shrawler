@@ -15,6 +15,7 @@
         <strong>Shrawler</strong><span>SMB inventory</span>
       </div>
       <div class="header-actions">
+        <a id="ranked-review-link" class="button" href="/triage">Ranked review</a>
         <div id="connection-status" class="connection-status" aria-live="polite">
           <span class="status-dot" aria-hidden="true"></span><span id="status">Connecting…</span>
         </div>
@@ -45,6 +46,10 @@
           <label><span>Host</span><select id="host"><option value="">Any host</option></select></label>
           <label><span>Share</span><select id="share"><option value="">Any share</option></select></label>
           <label><span>File type</span><select id="extension"><option value="">Any type</option></select></label>
+          <label><span>Rule</span><select id="rule"><option value="">Any rule</option></select></label>
+          <label><span>Triage</span><select id="triage"><option value="">Any triage</option></select></label>
+          <label><span>Share-root permission</span><select id="permission"><option value="">Any permission</option></select></label>
+          <label><span>Collection</span><select id="collection"><option value="">Any status</option></select></label>
           <button id="clear" class="text-button" type="button" hidden>Clear filters</button>
         </div>
       </div>
@@ -84,7 +89,7 @@
       </div>
 
       <div id="tree-container" class="tree-shell" hidden>
-        <div id="tree-loading" class="tree-loading" hidden><span class="spinner" aria-hidden="true"></span><span>Building complete hierarchy…</span></div>
+        <div id="tree-loading" class="tree-loading" hidden><span class="spinner" aria-hidden="true"></span><span>Loading hierarchy…</span></div>
         <ul id="tree" class="file-tree" role="tree" aria-label="Filtered file hierarchy"></ul>
       </div>
 

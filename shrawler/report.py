@@ -13,6 +13,7 @@ import requests
 import urllib3
 
 from .core import convert_unc_to_nemesis_path
+from .output import escape_terminal
 
 
 def _iter_downloads(results: Dict[str, Any]) -> Iterable[Dict[str, Any]]:
@@ -140,13 +141,18 @@ def _print_summary(results: Dict[str, Any]) -> None:
         status = str(entry.get("nemesis", {}).get("status", "unknown"))
         statuses[status] = statuses.get(status, 0) + 1
 
-    print(f"Hosts attempted: {summary.get('hosts_attempted', 'unknown')}")
-    print(f"Shares enumerated: {summary.get('shares_enumerated', 'unknown')}")
-    print(f"Files seen: {summary.get('files_seen', 'unknown')}")
+    print(
+        f"Hosts attempted: {escape_terminal(summary.get('hosts_attempted', 'unknown'))}"
+    )
+    print(
+        f"Shares enumerated: {escape_terminal(summary.get('shares_enumerated', 'unknown'))}"
+    )
+    print(f"Files seen: {escape_terminal(summary.get('files_seen', 'unknown'))}")
     print(f"Files downloaded: {len(downloads)}")
     if statuses:
         formatted = ", ".join(
-            f"{key}={value}" for key, value in sorted(statuses.items())
+            f"{escape_terminal(key)}={escape_terminal(value)}"
+            for key, value in sorted(statuses.items())
         )
         print(f"Nemesis: {formatted}")
 
@@ -263,7 +269,11 @@ def main(argv: Optional[List[str]] = None) -> int:
         _write_results(args.results, results)
         successes = sum(success for success, _ in completed)
         retry_failures = len(completed) - successes
-        print(f"Nemesis retry: {successes} uploaded, {retry_failures} failed")
+        print(
+            "Nemesis retry: "
+            f"{escape_terminal(successes)} uploaded, "
+            f"{escape_terminal(retry_failures)} failed"
+        )
 
     _print_summary(results)
     return 1 if retry_failures else 0

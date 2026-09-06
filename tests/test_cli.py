@@ -100,6 +100,10 @@ class CanonicalCliTests(unittest.TestCase):
         self.assertTrue(csv.csv_output)
         self.assertTrue(csv.json_output)
 
+    def test_default_workspace_is_shrawler_directory(self):
+        options = parse_scan_options("shares", ["user@host"], {})
+        self.assertEqual(options.output_dir, "shrawler")
+
     def test_removed_flags_are_rejected(self):
         removed = (
             "--json-output",
@@ -171,6 +175,25 @@ class CanonicalCliTests(unittest.TestCase):
         self.assertEqual(options.skip_share, "C")
         self.assertEqual(options.snaffler_rules_dir, "rules")
 
+    def test_include_all_shares_is_opt_in_and_configurable(self):
+        default = parse_scan_options("shares", ["user@host"], {})
+        self.assertFalse(default.include_all_shares)
+        cli = parse_scan_options("shares", ["user@host", "--include-all-shares"], {})
+        self.assertTrue(cli.include_all_shares)
+        configured = parse_scan_options(
+            "shares", ["user@host"], {"include_all_shares": True}
+        )
+        self.assertTrue(configured.include_all_shares)
+
+    def test_explicit_exclusions_are_retained_with_include_all(self):
+        options = parse_scan_options(
+            "shares",
+            ["user@host", "--include-all-shares", "--exclude-share", "C$"],
+            {},
+        )
+        self.assertTrue(options.include_all_shares)
+        self.assertEqual(options.skip_share, "C$")
+
     def test_help_is_complete_and_has_no_advanced_help(self):
         help_text = _scan_parser("snaffle").format_help()
         self.assertIn("target selection", help_text)
@@ -188,7 +211,7 @@ class CanonicalCliTests(unittest.TestCase):
         self.assertIn("default: balanced", normalized_help)
         self.assertIn("default: standard", normalized_help)
         self.assertIn("omit EXTENSIONS for all files", normalized_help)
-        self.assertIn("if omitted, use the current directory", normalized_help)
+        self.assertIn("omit SCAN_ID for the most recent", normalized_help)
 
     def test_scan_and_web_commands_share_authentication_options(self):
         expected = {"hashes", "no_pass", "k", "aesKey"}
@@ -206,16 +229,16 @@ class CanonicalCliTests(unittest.TestCase):
 
     def test_web_help_describes_authentication_as_auth_not_target(self):
         help_text = _web_parser().format_help()
-        self.assertIn("RESULTS AUTH", " ".join(help_text.split()))
+        self.assertIn("[AUTH] DATABASE", " ".join(help_text.split()))
         self.assertIn("authentication", help_text)
 
     def test_web_token_auth_is_opt_in(self):
         self.assertFalse(
-            _web_parser().parse_args(["results.json", "user@host"]).token_auth
+            _web_parser().parse_args(["user@host", "shrawler.db"]).token_auth
         )
         self.assertTrue(
             _web_parser()
-            .parse_args(["results.json", "user@host", "--token-auth"])
+            .parse_args(["user@host", "shrawler.db", "--token-auth"])
             .token_auth
         )
 

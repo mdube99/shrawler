@@ -82,8 +82,8 @@ class OperatingModeTests(unittest.TestCase):
                 cli.main(
                     [
                         "web",
-                        "results.json",
                         "DOMAIN/user@dc",
+                        "shrawler.db",
                         "-no-pass",
                         "--preview-max-size",
                         "2MiB",
@@ -92,7 +92,7 @@ class OperatingModeTests(unittest.TestCase):
 
         self.assertEqual(context.exception.code, 0)
         config, auth = run.call_args.args
-        self.assertEqual(config.results_path, Path("results.json"))
+        self.assertEqual(config.database_path, Path("shrawler.db"))
         self.assertEqual(config.preview_max_bytes, 2 * 1024**2)
         self.assertFalse(config.token_auth)
         self.assertEqual(auth.domain, "DOMAIN")

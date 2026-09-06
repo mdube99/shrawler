@@ -84,7 +84,7 @@ svg { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width:
 .field-clear { position: absolute; right: 36px; width: 28px; height: 28px; padding: 0; }
 .field-clear svg { width: 14px; height: 14px; }
 .small-spinner { width: 15px; height: 15px; border: 2px solid var(--line-strong); border-top-color: var(--amber); border-radius: 50%; animation: spin .7s linear infinite; }
-.filter-bar { display: flex; align-items: flex-end; gap: 8px; }
+.filter-bar { display: flex; flex: 1 1 auto; align-items: flex-end; flex-wrap: wrap; gap: 8px; }
 .filter-bar label { display: grid; gap: 4px; color: var(--text-muted); font-size: 11px; }
 select { height: 40px; min-width: 130px; padding: 0 30px 0 10px; border: 1px solid var(--line-strong); border-radius: var(--radius-sm); background: var(--surface-2); color: var(--text-secondary); }
 select:hover { border-color: var(--text-muted); }
@@ -128,6 +128,11 @@ body.compact .file-path { display: none; }
 .file-name, .file-path, .location-strip { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .file-name { color: var(--text); font-size: 13px; font-weight: 500; }
 .file-path { margin-top: 1px; color: var(--text-muted); font: 11px var(--font-data); }
+.file-evidence { display: flex; gap: 8px; margin-top: 3px; overflow: hidden; color: var(--text-muted); font: 10px var(--font-data); white-space: nowrap; }
+.finding-indicator { overflow: hidden; text-overflow: ellipsis; }
+.collection-indicator { color: var(--text-muted); }
+.collection-indicator.collected { color: var(--success); }
+.collection-indicator.not_collected { color: var(--amber-hover); }
 .location-strip, .size-value { color: var(--text-secondary); font: 12px var(--font-data); }
 .date-value { color: var(--text-secondary); font-size: 12px; white-space: nowrap; }
 .row-chevron { padding-left: 0 !important; padding-right: 10px !important; color: var(--text-muted); }
@@ -175,6 +180,7 @@ body.compact .file-path { display: none; }
 .tree-label.file-label span:last-child { overflow: hidden; text-overflow: ellipsis; }
 .tree-count { margin-left: 16px; color: var(--text-muted); font: 11px var(--font-data); white-space: nowrap; }
 .tree-file-meta { display: flex; gap: 20px; margin-left: 16px; color: var(--text-muted); font: 11px var(--font-data); white-space: nowrap; }
+.tree-file-meta .finding-indicator { max-width: 260px; overflow: hidden; text-overflow: ellipsis; }
 .tree-node.selected { background: var(--surface-2); box-shadow: inset 2px 0 var(--amber); }
 .tree-detail { margin: 0 12px 8px 42px; background: var(--surface-3); }
 .tree-detail .detail-panel { border: 1px solid var(--line); border-top: 2px solid var(--amber); }
@@ -213,6 +219,15 @@ dialog::backdrop { background: hsla(200, 30%, 4%, .72); backdrop-filter: blur(3p
 .toast.error { border-left-color: var(--danger); }
 .toast button { width: 30px; height: 30px; padding: 0; }
 .toast button svg { width: 14px; height: 14px; }
+
+@media (max-width: 980px) {
+  .filter-bar { align-items: stretch; }
+  .filter-bar label { flex: 1 1 120px; }
+  .filter-bar .text-button { align-self: flex-end; }
+  .file-evidence { max-width: 45vw; }
+  .tree-file-meta { gap: 8px; }
+  .tree-file-meta .finding-indicator { max-width: 160px; }
+}
 
 @keyframes spin { to { transform: rotate(360deg); } }
 @keyframes shimmer { to { background-position: -200% 0; } }

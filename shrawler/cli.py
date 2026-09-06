@@ -109,6 +109,12 @@ def _scan_parser(mode: str) -> argparse.ArgumentParser:
         metavar="NAME",
         help="skip this share; repeat to exclude multiple shares",
     )
+    shares.add_argument(
+        "--include-all-shares",
+        action="store_true",
+        default=None,
+        help="include normally skipped administrative shares (explicit exclusions still apply)",
+    )
     shares.add_argument("--add-share", help="comma-separated shares normally skipped")
     output = parser.add_argument_group("output")
     output.add_argument(
@@ -116,7 +122,7 @@ def _scan_parser(mode: str) -> argparse.ArgumentParser:
         "--output",
         dest="output",
         metavar="DIR",
-        help="results directory (default: current directory)",
+        help="shared workspace directory (default: ./shrawler)",
     )
     output.add_argument(
         "--format",
@@ -141,9 +147,9 @@ def _scan_parser(mode: str) -> argparse.ArgumentParser:
     output.add_argument(
         "--resume",
         nargs="?",
-        const=".",
-        metavar="DIR",
-        help="resume from DIR; if omitted, use the current directory",
+        const="",
+        metavar="SCAN_ID",
+        help="resume an incomplete scan; omit SCAN_ID for the most recent",
     )
     if mode in {"spider", "snaffle"}:
         spider = parser.add_argument_group("downloads and content analysis")
@@ -348,9 +354,7 @@ def _normalize(
     parsed.permission_check = pick("permission_check", "read-write")
     parsed.file_write_check = bool(parsed.file_write_check)
     parsed.output_mode = pick("view", "tree" if mode == "shares" else defaults[1])
-    parsed.output_dir = pick("output", ".")
-    if parsed.resume and parsed.output is None:
-        parsed.output_dir = parsed.resume
+    parsed.output_dir = pick("output", "shrawler")
     fmt = pick("format", "console")
     parsed.csv_output = fmt == "csv"
     parsed.json_output = True
@@ -365,6 +369,7 @@ def _normalize(
         parsed.exclude_share or (_config_value(config, "exclude_shares") or [])
     )
     parsed.skip_share = ",".join(excluded) if excluded else None
+    parsed.include_all_shares = bool(pick("include_all_shares", False))
     parsed.no_pass = bool(parsed.no_pass)
     parsed.k = bool(parsed.k)
     parsed.verbose = bool(parsed.verbose)
@@ -494,14 +499,25 @@ def _web_parser() -> argparse.ArgumentParser:
         prog="shrawler web",
         description="Search and retrieve files from a saved Shrawler inventory.",
     )
-    parser.add_argument("results", type=Path, metavar="RESULTS")
     parser.add_argument(
         "auth",
+        nargs="?",
         metavar="AUTH",
         help="SMB credentials and optional KDC: [[domain/]username[:password]@]<host>",
     )
+    parser.add_argument(
+        "database",
+        type=Path,
+        metavar="DATABASE",
+        help="path to the shared shrawler.db inventory",
+    )
     add_smb_auth_arguments(parser)
     web = parser.add_argument_group("web server")
+    web.add_argument(
+        "--offline",
+        action="store_true",
+        help="browse and rank saved metadata without SMB credentials or retrieval",
+    )
     web.add_argument("--port", type=int, default=8765)
     web.add_argument(
         "--token-auth",
@@ -539,6 +555,7 @@ commands:
   shares    Enumerate shares and assess permissions
   spider    Recursively inventory files on readable shares
   snaffle   Classify files using Snaffler rules
+  triage    Rank and explain saved inventory metadata offline
   report    Summarize saved results or retry Nemesis uploads
   web       Search saved results and retrieve indexed files locally
   config    Create and inspect persistent configuration
@@ -574,6 +591,10 @@ def main(argv: Optional[List[str]] = None) -> None:
         _print_top_level_help()
         return
     command = arguments[0]
+    if command == "triage":
+        from .triage.cli import main as triage_main
+
+        raise SystemExit(triage_main(arguments[1:]))
     if command == "config":
         action = _config_parser().parse_args(arguments[1:]).action
         path = config_path()
@@ -608,13 +629,20 @@ def main(argv: Optional[List[str]] = None) -> None:
             or options.download_max_size < 1
         ):
             parser.error("invalid WebUI limits or port")
-        _warn_plaintext_password(options.auth)
-        try:
-            auth = _create_auth(options, options.auth)
-        except ValueError as exc:
-            parser.error(str(exc))
+        auth = None
+        if options.offline:
+            if options.auth:
+                parser.error("--offline does not accept SMB credentials")
+        else:
+            if not options.auth:
+                parser.error("provide AUTH for live retrieval, or use --offline")
+            _warn_plaintext_password(options.auth)
+            try:
+                auth = _create_auth(options, options.auth)
+            except ValueError as exc:
+                parser.error(str(exc))
         config = WebConfig(
-            results_path=options.results,
+            database_path=options.database,
             port=options.port,
             token_auth=options.token_auth,
             preview_max_bytes=options.preview_max_size,

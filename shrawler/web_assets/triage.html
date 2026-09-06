@@ -1,0 +1,76 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark"><title>Shrawler · Ranked review</title>
+  <link rel="stylesheet" href="/assets/app.css"><link rel="stylesheet" href="/assets/triage.css">
+</head>
+<body>
+  <header class="app-header"><div class="header-inner">
+    <div class="brand"><strong>Shrawler</strong><span>Ranked review</span></div>
+    <a id="inventory-link" class="button" href="/">Inventory explorer</a>
+  </div></header>
+  <main class="workspace ranking-workspace">
+    <section class="intro"><div><h1>Ranked review</h1><p>Prioritize observed files using names and directory context. Scores guide review; they do not confirm sensitive content.</p></div><span id="mode" class="local-badge">Saved metadata only</span></section>
+    <p id="ranking-error" class="error-banner" role="alert" hidden></p>
+    <section class="ranking-panel" aria-labelledby="ranking-title">
+      <h2 id="ranking-title">Score an inventory</h2>
+      <div class="ranking-controls">
+        <label>Source scan<select id="scan"><option value="">Latest completed inventory scan</option></select></label>
+        <label class="checkbox-label"><input id="builtins" type="checkbox" checked> Include starter rules</label>
+      </div>
+      <details id="rule-builder"><summary>Customize rules</summary>
+        <p>Add a rule below, or edit TOML directly. Custom rules are combined with the starter rules when the checkbox above is selected.</p>
+        <form id="builder-form">
+          <div class="builder-grid">
+            <label>Rule ID<input id="builder-id" value="engagement.filename" required></label>
+            <label>Category<input id="builder-category" value="credentials" required></label>
+            <label>Signal group<input id="builder-group" value="credential-name" required></label>
+            <label>Weight<input id="builder-points" type="number" min="0" max="1000000" value="15" required></label>
+            <label>Filename contains any<input id="builder-fragments" placeholder="cred, pass, ssn"></label>
+            <label>Extensions (optional)<input id="builder-extensions" placeholder=".txt, .xlsx, .config"></label>
+            <label>Directory context<select id="builder-context"><option value="none">No context required</option><option value="named">Nearby directory names</option><option value="siblings">Sibling filename patterns</option><option value="subtree">Label an exact subtree</option></select></label>
+            <label id="builder-depth-label" hidden>Include levels below context<input id="builder-depth" type="number" min="0" max="64" value="1"></label>
+            <label id="builder-names-label" hidden>Directory names, exact<input id="builder-names" placeholder="deployments, release"></label>
+            <label id="builder-siblings-label" hidden>Sibling filename globs<input id="builder-siblings" placeholder="web.config, deploy.ps1, appsettings.*.json"></label>
+            <label id="builder-minimum-label" hidden>Distinct patterns and files required<input id="builder-minimum" type="number" min="1" max="64" value="2"></label>
+            <label id="builder-host-label" hidden>Recorded host<input id="builder-host" placeholder="fileserver"></label>
+            <label id="builder-share-label" hidden>Share<input id="builder-share" placeholder="Shared"></label>
+            <label id="builder-path-label" hidden>Subtree path within share<input id="builder-path" placeholder="/Orion"></label>
+          </div>
+          <button class="button" type="submit">Add to rule editor</button>
+        </form>
+        <label class="rule-editor-label" for="rules-toml">Custom rules (TOML)</label>
+        <textarea id="rules-toml" rows="12" spellcheck="false">version = 1
+</textarea>
+        <div class="ranking-controls"><button id="export-rules" class="button" type="button">Export custom TOML</button><label class="button">Import TOML<input id="import-rules" type="file" accept=".toml,text/plain" hidden></label></div>
+      </details>
+      <div class="ranking-controls ranking-actions">
+        <button id="preview-rules" class="button" type="button">Preview ranking</button>
+        <button id="save-ranking" class="button primary" type="button">Run and save ranking</button>
+        <button id="cancel-job" class="button" type="button" hidden>Cancel</button>
+        <span id="job-status" role="status" aria-live="polite">Scoring uses only saved metadata.</span>
+      </div>
+      <p id="job-summary" hidden></p>
+      <details id="match-counts" hidden><summary>Rule match counts and directory examples</summary><div id="counts-body"></div></details>
+    </section>
+    <section class="ranking-panel" aria-labelledby="candidates-title">
+      <h2 id="candidates-title">Review candidates</h2>
+      <div class="ranking-controls">
+        <label>Saved ranking<select id="ranking-run"><option value="">Select a saved ranking</option></select></label>
+        <label>Category<select id="ranking-category"><option value="">Highest category score</option></select></label>
+        <label>Minimum score<input id="ranking-min" type="number" min="0" value="0"></label>
+        <button id="refresh-rankings" class="button" type="button">Refresh</button>
+      </div>
+      <p id="ranking-summary" role="status">Run a ranking or select an existing run.</p>
+      <div class="table-shell"><table class="ranking-table"><thead><tr><th scope="col">Priority</th><th scope="col">File</th><th scope="col">Observed location</th><th scope="col">Reasons</th><th scope="col">Review</th></tr></thead><tbody id="ranked-files"></tbody></table></div>
+      <nav class="pagination" aria-label="Ranked file pages"><button id="ranking-prev" class="button" type="button" disabled>Previous</button><span id="ranking-page">Page 1</span><button id="ranking-next" class="button" type="button" disabled>Next</button></nav>
+    </section>
+  </main>
+  <dialog id="explanation-dialog" class="ranking-dialog">
+    <header><h2 id="explanation-title">Ranking explanation</h2><button id="close-explanation" class="button" type="button">Close</button></header>
+    <p id="explanation-path"></p><div id="explanation-body"></div>
+  </dialog>
+  <script src="/assets/triage.js"></script>
+</body>
+</html>
