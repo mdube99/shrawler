@@ -63,8 +63,25 @@
         <button id="refresh-rankings" class="button" type="button">Refresh</button>
       </div>
       <p id="ranking-summary" role="status">Run a ranking or select an existing run.</p>
-      <div class="table-shell"><table class="ranking-table"><thead><tr><th scope="col">Priority</th><th scope="col">File</th><th scope="col">Observed location</th><th scope="col">Reasons</th><th scope="col">Review</th></tr></thead><tbody id="ranked-files"></tbody></table></div>
-      <nav class="pagination" aria-label="Ranked file pages"><button id="ranking-prev" class="button" type="button" disabled>Previous</button><span id="ranking-page">Page 1</span><button id="ranking-next" class="button" type="button" disabled>Next</button></nav>
+      <div class="table-shell ranking-table-shell">
+        <table class="ranking-table">
+          <colgroup>
+            <col class="ranking-priority-column">
+            <col class="ranking-file-column">
+            <col class="ranking-location-column">
+            <col class="ranking-reasons-column">
+            <col class="ranking-review-column">
+          </colgroup>
+          <thead><tr><th scope="col">Priority</th><th scope="col">File</th><th scope="col">Observed location</th><th scope="col">Reasons</th><th scope="col">Review</th></tr></thead>
+          <tbody id="ranked-files"></tbody>
+        </table>
+      </div>
+      <nav class="pagination ranking-pagination" aria-label="Ranked file pages">
+        <span class="pagination-label">Candidate pages</span>
+        <button id="ranking-prev" class="button" type="button" disabled>← Previous</button>
+        <span id="ranking-page" aria-live="polite">Page 1</span>
+        <button id="ranking-next" class="button primary pagination-next" type="button" disabled>Next page →</button>
+      </nav>
     </section>
     <section class="ranking-panel" aria-labelledby="collection-title">
       <h2 id="collection-title">Collection queue</h2>
@@ -74,6 +91,8 @@
         <label>Per-file limit (bytes)<input id="collection-file-limit" type="number" min="1" value="52428800"></label>
         <label>Total limit (bytes)<input id="collection-total-limit" type="number" min="1" value="524288000"></label>
         <button id="collection-create" class="button" type="button">Save selected candidates</button>
+        <button id="collection-create-all" class="button primary" type="button">Add all matching to queue</button>
+        <button id="collection-create-supported" class="button" type="button" title="Queue candidates with a positive ranking score; excludes zero-score extension-only matches">Add all with supporting evidence</button>
       </div>
       <div class="ranking-controls">
         <label>Saved manifest<select id="collection-manifest"></select></label>
@@ -82,7 +101,13 @@
         <button id="collection-run" class="button primary" type="button">Collect / retry failed files</button>
       </div>
       <p id="collection-status" role="status"></p>
-      <div class="table-shell"><table><thead><tr><th>Source path</th><th>Expected bytes</th><th>Reasons</th><th>Outcome</th><th>Evidence / error</th></tr></thead><tbody id="collection-items"></tbody></table></div>
+      <div class="table-shell collection-table-shell">
+        <table class="collection-table">
+          <colgroup><col class="collection-path-column"><col class="collection-bytes-column"><col class="collection-reasons-column"><col class="collection-outcome-column"><col class="collection-evidence-column"></colgroup>
+          <thead><tr><th scope="col">Source path</th><th scope="col">Expected bytes</th><th scope="col">Reasons</th><th scope="col">Outcome</th><th scope="col">Evidence / error</th></tr></thead>
+          <tbody id="collection-items"></tbody>
+        </table>
+      </div>
     </section>
     <section class="ranking-panel" aria-labelledby="families-title">
       <h2 id="families-title">File families</h2>

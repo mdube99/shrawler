@@ -110,25 +110,27 @@
     $('ranked-files').replaceChildren();
     data.items.forEach(item => {
       const row = node('tr');
-      row.append(node('td', String(item.review_score), 'ranking-score'), node('td', item.file_name), node('td', item.unc_path, 'ranking-path'));
+      row.append(node('td', String(item.review_score), 'ranking-score'), node('td', item.file_name, 'ranking-file'), node('td', item.unc_path, 'ranking-path'));
       const positiveReasons = item.signals.filter(signal => signal.credited_points > 0).map(signal => signal.description);
       const fallbackReasons = item.signals.filter(signal => signal.category === 'extension-fallback').map(signal => signal.description);
-      row.append(node('td', (positiveReasons.length ? positiveReasons : fallbackReasons).join('; ') || 'No supporting signals', 'ranking-reasons'));
-      const cell = node('td');
-      const fileActions = node('a', 'View / download / Nemesis', 'button');
+      row.append(node('td', (positiveReasons.length ? positiveReasons : fallbackReasons).join('; ') || 'No supporting evidence', 'ranking-reasons'));
+      const cell = node('td', undefined, 'ranking-review');
+      const actions = node('div', undefined, 'ranking-row-actions');
+      const fileActions = node('a', 'Open file', 'button ranking-row-action ranking-open-file');
       fileActions.href = `/#file=${encodeURIComponent(item.file_id)}${token ? `&token=${encodeURIComponent(token)}` : ''}`;
-      cell.append(fileActions);
+      actions.append(fileActions);
+      const button = node('button', 'Explain', 'button ranking-row-action');
+      button.type = 'button'; button.addEventListener('click', () => showExplanation(item, isPreview)); actions.append(button);
       if (!isPreview) {
-        const label = node('label', ' Collect ');
+        const label = node('label', undefined, 'ranking-collect');
         const select = node('input'); select.type = 'checkbox'; select.checked = selectedFiles.has(item.file_id);
         select.addEventListener('change', () => { if (select.checked) selectedFiles.add(item.file_id); else selectedFiles.delete(item.file_id); });
-        label.prepend(select); cell.append(label);
+        label.append(select, node('span', 'Add to queue')); actions.append(label);
       }
-      const button = node('button', 'Explain', 'button');
-      button.type = 'button'; button.addEventListener('click', () => showExplanation(item, isPreview)); cell.append(button); row.append(cell);
+      cell.append(actions); row.append(cell);
       $('ranked-files').append(row);
     });
-    if (!data.items.length) { const row = node('tr'); const cell = node('td', 'No files match this ranking filter.'); cell.colSpan = 5; row.append(cell); $('ranked-files').append(row); }
+    if (!data.items.length) { const row = node('tr'); const cell = node('td', 'No files match this ranking filter.', 'ranking-empty'); cell.colSpan = 5; row.append(cell); $('ranked-files').append(row); }
     $('ranking-category').disabled = isPreview;
     $('ranking-min').disabled = isPreview;
     nextCursor = isPreview ? null : data.next_cursor;
@@ -249,9 +251,25 @@
     $('collection-status').textContent = `${manifest.expected_files} planned files · ${manifest.expected_bytes} expected bytes · ${manifest.consumed_bytes} received bytes · limits: ${manifest.max_file_size} per file / ${manifest.max_total_bytes} total. Previously collected files are skipped; status does not establish freshness.${retrievalEnabled ? '' : ' Offline session: retrieval disabled.'}`;
     manifest.items.forEach(item => {
       const row = node('tr');
-      [item.unc_path, item.size_bytes, item.reasons.join('; '), item.status, item.error || item.local_path || ''].forEach(value => row.append(node('td', String(value))));
+      row.append(node('td', item.unc_path, 'collection-path'));
+      row.append(node('td', Number(item.size_bytes).toLocaleString(), 'collection-bytes'));
+      row.append(node('td', item.reasons.join('; ') || 'No additional notes', 'collection-reasons'));
+      const status = String(item.status).replaceAll('_', '-');
+      const statusCell = node('td');
+      const statusBadge = node('span', String(item.status).replaceAll('_', ' '), 'collection-status-badge');
+      statusBadge.dataset.status = status;
+      statusCell.append(statusBadge);
+      row.append(statusCell);
+      row.append(node('td', item.error || item.local_path || '—', 'collection-evidence'));
       $('collection-items').append(row);
     });
+    if (!manifest.items.length) {
+      const row = node('tr');
+      const cell = node('td', 'This manifest has no eligible files.', 'collection-empty');
+      cell.colSpan = 5;
+      row.append(cell);
+      $('collection-items').append(row);
+    }
   }
   async function refreshCollection(preferred) {
     const selected = preferred || $('collection-manifest').value;
@@ -262,16 +280,34 @@
   }
   $('collection-manifest').addEventListener('change', showCollection);
   $('collection-refresh').addEventListener('click', () => refreshCollection().catch(exception => error(exception.message)));
+  async function createCollection(fileIds, minimumOverride) {
+    if (preview || !$('ranking-run').value) throw new Error('Select a saved ranking first.');
+    if (fileIds && !fileIds.length) throw new Error('Select candidates from the ranking first.');
+    const minimum = minimumOverride === undefined ? Number($('ranking-min').value) : minimumOverride;
+    const payload = {
+      run_id: $('ranking-run').value, category: $('ranking-category').value || null,
+      min_score: minimum, limit: 10000,
+      name: $('collection-name').value,
+      max_file_size: Number($('collection-file-limit').value), max_total_bytes: Number($('collection-total-limit').value)
+    };
+    if (fileIds) payload.file_ids = fileIds;
+    const manifest = await api('/api/collection/create', payload);
+    await refreshCollection(manifest.id); error('');
+  }
   $('collection-create').addEventListener('click', async () => {
     try {
-      if (preview || !selectedFiles.size) throw new Error('Select candidates from a saved ranking first.');
-      const manifest = await api('/api/collection/create', {
-        run_id: $('ranking-run').value, category: $('ranking-category').value || null,
-        min_score: Number($('ranking-min').value), limit: 10000,
-        file_ids: [...selectedFiles], name: $('collection-name').value,
-        max_file_size: Number($('collection-file-limit').value), max_total_bytes: Number($('collection-total-limit').value)
-      });
-      await refreshCollection(manifest.id); error('');
+      await createCollection([...selectedFiles]);
+    } catch (exception) { error(exception.message); }
+  });
+  $('collection-create-all').addEventListener('click', async () => {
+    try {
+      await createCollection();
+    } catch (exception) { error(exception.message); }
+  });
+  $('collection-create-supported').addEventListener('click', async () => {
+    try {
+      const minimum = Math.max(1, Number($('ranking-min').value));
+      await createCollection(undefined, minimum);
     } catch (exception) { error(exception.message); }
   });
   $('collection-run').addEventListener('click', async () => {
