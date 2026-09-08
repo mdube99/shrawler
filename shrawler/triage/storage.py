@@ -130,6 +130,7 @@ def rank(
         with closing(sqlite3.connect(destination)) as target:
             target.execute("PRAGMA foreign_keys=ON")
             target.execute("PRAGMA journal_mode=WAL")
+            target.execute("PRAGMA synchronous=NORMAL")
             target.execute("PRAGMA busy_timeout=5000")
             version = target.execute("PRAGMA user_version").fetchone()[0]
             if version not in (0, 1, 2):
@@ -181,6 +182,8 @@ def rank(
                 engine = Engine(rules, sibling_index.lookup)
                 if on_phase:
                     on_phase("scoring", 0)
+                file_rows = []
+                category_rows = []
                 for metadata in observations(source, scan["id"]):
                     if cancelled and cancelled():
                         raise KeyboardInterrupt
@@ -212,25 +215,27 @@ def rank(
                         summary["rule_matches"][signal["rule_id"]] = (
                             summary["rule_matches"].get(signal["rule_id"], 0) + 1
                         )
-                    target.execute(
-                        "INSERT INTO triage_files VALUES (?,?,?,?,?)",
-                        (
-                            run_id,
-                            metadata["file_id"],
-                            evaluated["priority"],
-                            serialized,
-                            json.dumps(evaluated, sort_keys=True),
-                        ),
+                    file_rows.append(
+                        (run_id, metadata["file_id"], evaluated["priority"], serialized,
+                         json.dumps(evaluated, sort_keys=True, separators=(",", ":")))
                     )
-                    target.executemany(
-                        "INSERT INTO triage_categories VALUES (?,?,?,?)",
-                        [
+                    category_rows.extend(
+                        (
                             (run_id, metadata["file_id"], category, score)
                             for category, score in evaluated["category_scores"].items()
-                        ],
+                        )
                     )
                     count += 1
                     if count % 1000 == 0:
+                        target.executemany(
+                            "INSERT INTO triage_files VALUES (?,?,?,?,?)", file_rows
+                        )
+                        target.executemany(
+                            "INSERT INTO triage_categories VALUES (?,?,?,?)",
+                            category_rows,
+                        )
+                        file_rows.clear()
+                        category_rows.clear()
                         target.execute(
                             "UPDATE triage_runs SET file_count=? WHERE id=?",
                             (count, run_id),
@@ -240,6 +245,12 @@ def rank(
                         progress(count)
                     if on_phase and count % 10000 == 0:
                         on_phase("scoring", count)
+                target.executemany(
+                    "INSERT INTO triage_files VALUES (?,?,?,?,?)", file_rows
+                )
+                target.executemany(
+                    "INSERT INTO triage_categories VALUES (?,?,?,?)", category_rows
+                )
                 target.execute(
                     "INSERT INTO triage_summaries VALUES (?,?)",
                     (run_id, json.dumps(summary)),

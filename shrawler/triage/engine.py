@@ -30,6 +30,19 @@ class Engine:
     ) -> None:
         self.rules = rules
         self.sibling_lookup = sibling_lookup
+        self._rules = []
+        self._needed_conditions = set()
+        for rule in self.rules.document.get("rules", []):
+            prepared = dict(rule)
+            prepared_when = {}
+            for condition, expected in rule["when"].items():
+                self._needed_conditions.add(condition)
+                if condition in {"min_size_bytes", "max_size_bytes", "context_any"}:
+                    prepared_when[condition] = expected
+                else:
+                    prepared_when[condition] = tuple(value.casefold() for value in expected)
+            prepared["when"] = prepared_when
+            self._rules.append(prepared)
         self._cache: OrderedDict[
             Tuple[str, str, Tuple[str, ...]], List[Dict[str, Any]]
         ] = OrderedDict()
@@ -101,22 +114,27 @@ class Engine:
         folded = name.casefold()
         # Treat .env itself as an extension-bearing candidate as well.
         extension = "." + folded.rsplit(".", 1)[1] if "." in folded else ""
-        values: Dict[str, Any] = {
-            "extension_any": [extension],
-            "filename_any": [folded],
-            "filename_glob_any": [folded],
-            "filename_token_any": tokens(name),
-            "filename_contains_any": [folded],
-            "parent_name_any": [parent[-1].casefold()] if parent else [],
-            "parent_name_contains_any": [parent[-1].casefold()] if parent else [],
-            "host_any": [str(metadata["host"]).casefold()],
-            "share_any": [str(metadata["share"]).casefold()],
-            "context_any": [item["tag"] for item in context],
-        }
+        values: Dict[str, Any] = {}
+        if "extension_any" in self._needed_conditions:
+            values["extension_any"] = [extension]
+        if {"filename_any", "filename_glob_any", "filename_contains_any"} & self._needed_conditions:
+            values.update({key: [folded] for key in ("filename_any", "filename_glob_any", "filename_contains_any") if key in self._needed_conditions})
+        if "filename_token_any" in self._needed_conditions:
+            values["filename_token_any"] = tokens(name)
+        parent_name = parent[-1].casefold() if parent else ""
+        for key in ("parent_name_any", "parent_name_contains_any"):
+            if key in self._needed_conditions:
+                values[key] = [parent_name] if parent else []
+        if "host_any" in self._needed_conditions:
+            values["host_any"] = [str(metadata["host"]).casefold()]
+        if "share_any" in self._needed_conditions:
+            values["share_any"] = [str(metadata["share"]).casefold()]
+        if "context_any" in self._needed_conditions:
+            values["context_any"] = [item["tag"] for item in context]
         signals: List[Dict[str, Any]] = []
         diagnostics: List[Dict[str, Any]] = []
         groups: Dict[Tuple[str, str], int] = {}
-        for rule in self.rules.document.get("rules", []):
+        for rule in self._rules:
             evidence: Dict[str, Any] = {}
             failures: List[str] = []
             for condition, expected in rule["when"].items():
@@ -129,26 +147,25 @@ class Engine:
                     )
                     evidence[condition] = actual
                 else:
-                    patterns = (
-                        expected
-                        if condition == "context_any"
-                        else [s.casefold() for s in expected]
-                    )
-                    hits = (
-                        [
-                            value
-                            for value in values[condition]
-                            if any(fnmatchcase(value, pattern) for pattern in patterns)
-                        ]
-                        if condition == "filename_glob_any"
-                        else [value for value in values[condition] if value in patterns]
-                    )
+                    patterns = expected
                     if condition.endswith("contains_any"):
                         hits = [
                             value
                             for value in values[condition]
                             if any(pattern in value for pattern in patterns)
                         ]
+                    elif condition == "filename_glob_any":
+                        hits = (
+                        [
+                            value
+                            for value in values[condition]
+                            if any(fnmatchcase(value, pattern) for pattern in patterns)
+                        ]
+                        )
+                    else:
+                        pattern_set = set(patterns)
+                        hits = [value for value in values[condition] if value in pattern_set]
+                    if condition.endswith("contains_any"):
                         evidence[condition + "_matched_terms"] = [
                             pattern
                             for pattern in patterns
@@ -162,6 +179,8 @@ class Engine:
                         ]
                 if not matched:
                     failures.append(condition)
+                    if not explain_all:
+                        break
             if explain_all:
                 diagnostics.append(
                     {
