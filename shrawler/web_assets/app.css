@@ -99,6 +99,11 @@ select:hover { border-color: var(--text-muted); }
 .results-section { margin-top: 24px; }
 .results-toolbar { position: sticky; top: calc(var(--header-height) + 65px); z-index: 20; display: flex; align-items: center; justify-content: space-between; min-height: 44px; padding: 5px 8px 5px 14px; border: 1px solid var(--line); border-bottom: 0; border-radius: var(--radius-md) var(--radius-md) 0 0; background: hsla(200, 11%, 16%, .97); }
 .results-toolbar p { margin: 0; color: var(--text-secondary); font-size: 13px; }
+.selection-toolbar { display: flex; align-items: center; justify-content: space-between; min-height: 48px; padding: 6px 12px; border: 1px solid var(--line); border-bottom: 0; background: var(--surface-1); }
+.selection-summary, .selection-actions { display: flex; align-items: center; gap: 12px; }
+.selection-summary strong { color: var(--text); font-size: 13px; }
+.selection-summary span { color: var(--text-muted); font: 11px var(--font-data); }
+.file-checkbox { width: 16px; height: 16px; margin: 0; accent-color: var(--amber); cursor: pointer; }
 .toolbar-actions, .tree-actions, .view-switcher, .pending-updates { display: flex; align-items: center; }
 .toolbar-actions { gap: 8px; }
 .pending-updates { gap: 9px; min-height: 32px; padding-left: 10px; border-left: 2px solid var(--amber); color: var(--amber-hover); font-size: 12px; }
@@ -119,7 +124,8 @@ select:hover { border-color: var(--text-muted); }
 .table-shell { overflow-x: auto; overflow-y: clip; }
 table { width: 100%; min-width: 1000px; border-collapse: collapse; table-layout: fixed; }
 th { position: sticky; top: 0; z-index: 10; height: 38px; padding: 0 12px; border-bottom: 1px solid var(--line); background: var(--surface-2); color: var(--text-muted); font-size: 11px; font-weight: 500; letter-spacing: .04em; text-align: left; text-transform: uppercase; }
-th:nth-child(1) { width: 72px; } th:nth-child(2) { width: 30%; } th:nth-child(3) { width: 25%; } th:nth-child(4) { width: 100px; } th:nth-child(5) { width: 92px; } th:nth-child(6) { width: 150px; } th:nth-child(7) { width: 36px; }
+th:nth-child(1) { width: 44px; } th:nth-child(2) { width: 72px; } th:nth-child(3) { width: 28%; } th:nth-child(4) { width: 24%; } th:nth-child(5) { width: 100px; } th:nth-child(6) { width: 92px; } th:nth-child(7) { width: 150px; } th:nth-child(8) { width: 36px; }
+.select-heading, .select-cell { padding-right: 4px !important; text-align: center; }
 th.numeric, td.numeric { text-align: right; }
 .sort-header { display: inline-flex; align-items: center; gap: 5px; width: 100%; height: 100%; padding: 0; border: 0; background: transparent; color: inherit; font: inherit; letter-spacing: inherit; text-align: inherit; text-transform: inherit; }
 th.numeric .sort-header { justify-content: flex-end; }
@@ -131,6 +137,7 @@ th[aria-sort="descending"] .sort-indicator { opacity: 1; transform: rotate(180de
 th[aria-sort="ascending"] .sort-indicator { opacity: 1; }
 .file-row { cursor: pointer; background: var(--surface-1); transition: background 120ms ease; }
 .file-row:hover, .file-row.selected { background: var(--surface-2); }
+.file-row.checked { background: hsla(34, 58%, 52%, .07); box-shadow: inset 2px 0 var(--amber); }
 .file-row > td { height: 48px; padding: 7px 12px; border-bottom: 1px solid var(--line); vertical-align: middle; }
 body.compact .file-row > td { height: 36px; padding-top: 3px; padding-bottom: 3px; }
 body.compact .file-path { display: none; }
@@ -195,6 +202,7 @@ body.compact .file-path { display: none; }
 .tree-file-meta { display: flex; gap: 20px; margin-left: 16px; color: var(--text-muted); font: 11px var(--font-data); white-space: nowrap; }
 .tree-file-meta .finding-indicator { max-width: 260px; overflow: hidden; text-overflow: ellipsis; }
 .tree-node.selected { background: var(--surface-2); box-shadow: inset 2px 0 var(--amber); }
+.tree-node.checked { background: hsla(34, 58%, 52%, .07); }
 .tree-detail { margin: 0 12px 8px 42px; background: var(--surface-3); }
 .tree-detail .detail-panel { border: 1px solid var(--line); border-top: 2px solid var(--amber); }
 .level-2 > .tree-node { padding-left: 26px; } .level-3 > .tree-node { padding-left: 42px; } .level-4 > .tree-node { padding-left: 58px; }

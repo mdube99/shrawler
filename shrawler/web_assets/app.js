@@ -19,6 +19,8 @@
     total: 0,
     hasNext: false,
     items: [],
+    selectedFiles: new Map(),
+    transferActive: false,
     selectedId: null,
     treeData: null,
     treeKey: '',
@@ -325,6 +327,37 @@
     return button;
   }
 
+  function selectionCheckbox(item, className = '') {
+    const checkbox = element('input', `file-checkbox ${className}`.trim());
+    checkbox.type = 'checkbox';
+    checkbox.checked = state.selectedFiles.has(item.id);
+    checkbox.setAttribute('aria-label', `Select ${item.file_name}`);
+    checkbox.addEventListener('click', event => event.stopPropagation());
+    checkbox.addEventListener('change', () => toggleSelection(item, checkbox.checked));
+    return checkbox;
+  }
+
+  function toggleSelection(item, selected) {
+    if (selected) state.selectedFiles.set(item.id, item);
+    else state.selectedFiles.delete(item.id);
+    state.view === 'tree' ? renderTree() : renderTable();
+    renderSelectionToolbar();
+  }
+
+  function renderSelectionToolbar() {
+    const files = [...state.selectedFiles.values()];
+    const count = files.length;
+    $('selection-count').textContent = `${count.toLocaleString()} selected`;
+    $('selection-size').textContent = count ? formatBytes(files.reduce((sum, item) => sum + (Number(item.size_bytes) || 0), 0)) : 'Select files to download or send';
+    $('clear-selection').disabled = !count || state.transferActive;
+    $('download-selection').disabled = !count || !state.retrievalEnabled || state.transferActive;
+    $('nemesis-selection').disabled = !count || !state.nemesisEnabled || state.transferActive;
+    $('nemesis-selection').title = state.nemesisEnabled ? '' : 'Configure Nemesis when starting Shrawler';
+    const pageSelected = state.items.filter(item => state.selectedFiles.has(item.id)).length;
+    $('select-page').checked = !!state.items.length && pageSelected === state.items.length;
+    $('select-page').indeterminate = pageSelected > 0 && pageSelected < state.items.length;
+  }
+
   function detailPanel(item, closeHandler) {
     const panel = element('div', 'detail-panel');
     panel.setAttribute('role', 'region');
@@ -416,7 +449,7 @@
     if (!state.items.length) {
       const row = document.createElement('tr');
       const cell = element('td', 'empty-message');
-      cell.colSpan = 7;
+      cell.colSpan = 8;
       cell.append(element('strong', '', 'No files match these filters.'), element('span', '', 'Try a broader search or clear an active filter.'));
       row.append(cell);
       body.append(row);
@@ -427,7 +460,10 @@
       const row = element('tr', 'file-row');
       const selected = state.selectedId === item.id;
       row.classList.toggle('selected', selected);
+      row.classList.toggle('checked', state.selectedFiles.has(item.id));
 
+      const selectCell = element('td', 'select-cell');
+      selectCell.append(selectionCheckbox(item));
       const tagCell = document.createElement('td');
       tagCell.append(specimenTag(item.extension));
       const fileCell = document.createElement('td');
@@ -459,7 +495,7 @@
       dateCell.append(time);
       const chevronCell = element('td', 'row-chevron');
       chevronCell.append(icon('chevron'));
-      row.append(tagCell, fileCell, locationCell, ratingCell, sizeCell, dateCell, chevronCell);
+      row.append(selectCell, tagCell, fileCell, locationCell, ratingCell, sizeCell, dateCell, chevronCell);
       row.addEventListener('click', event => { if (!event.target.closest('button')) toggleTableDetails(item); });
       body.append(row);
 
@@ -467,12 +503,13 @@
         const detailRow = element('tr', 'detail-row');
         detailRow.id = `details-${item.id}`;
         const detailCell = document.createElement('td');
-        detailCell.colSpan = 7;
+        detailCell.colSpan = 8;
         detailCell.append(detailPanel(item, () => toggleTableDetails(item)));
         detailRow.append(detailCell);
         body.append(detailRow);
       }
     });
+    renderSelectionToolbar();
   }
 
   function tableKeydown(event, index) {
@@ -519,7 +556,8 @@
     line.tabIndex = state.treeFocusKey === key ? 0 : -1;
 
     if (type === 'file') {
-      line.append(element('span'), icon('file'));
+      line.classList.toggle('checked', state.selectedFiles.has(node.id));
+      line.append(selectionCheckbox(node, 'tree-checkbox'), icon('file'));
       const label = element('span', 'tree-label file-label');
       label.append(specimenTag(node.extension), element('span', '', node.file_name));
       const meta = element('span', 'tree-file-meta');
@@ -939,6 +977,42 @@
     }
   }
 
+  async function downloadSelected() {
+    const files = [...state.selectedFiles.values()];
+    state.transferActive = true; renderSelectionToolbar();
+    let failed = 0;
+    for (let index = 0; index < files.length; index += 1) {
+      $('selection-size').textContent = `Downloading ${index + 1} of ${files.length}…`;
+      try {
+        const response = await api(`/api/files/${files[index].id}/download`);
+        const url = URL.createObjectURL(await response.blob());
+        const link = document.createElement('a');
+        link.href = url; link.download = files[index].file_name;
+        document.body.append(link); link.click(); link.remove();
+        setTimeout(() => URL.revokeObjectURL(url), 1000);
+        await new Promise(resolve => setTimeout(resolve, 150));
+      } catch (_) { failed += 1; }
+    }
+    state.transferActive = false; renderSelectionToolbar();
+    showToast(failed ? `${files.length - failed} downloads started · ${failed} failed` : `${files.length} downloads started`, !!failed);
+  }
+
+  async function sendSelectedToNemesis() {
+    const files = [...state.selectedFiles.values()];
+    state.transferActive = true; renderSelectionToolbar();
+    let failed = 0;
+    for (let index = 0; index < files.length; index += 1) {
+      $('selection-size').textContent = `Sending ${index + 1} of ${files.length}…`;
+      try {
+        const response = await api('/api/nemesis/send', {method: 'POST', headers: {'Content-Type': 'application/json', 'X-Shrawler-Request': '1'}, body: JSON.stringify({file_id: files[index].id})});
+        const result = await response.json();
+        if (result.status !== 'uploaded') throw new Error(result.error || 'Upload failed');
+      } catch (_) { failed += 1; }
+    }
+    state.transferActive = false; renderSelectionToolbar();
+    showToast(failed ? `${files.length - failed} uploaded · ${failed} failed` : `${files.length} uploaded to Nemesis`, !!failed);
+  }
+
   async function sendToNemesis(item, button) {
     button.disabled = true;
     button.textContent = 'Sending…';
@@ -967,6 +1041,7 @@
     state.latestFileCount = state.displayedFileCount;
     state.scanActive = status.scan_active === true;
     renderIndexOptimization(status.index_optimization);
+    renderSelectionToolbar();
     $('status').textContent = `Connected — ${status.file_count.toLocaleString()} files indexed`;
     $('connection-status').classList.add('ready');
     refreshFacets().catch(() => { /* Results remain usable while facets load. */ });
@@ -1024,6 +1099,13 @@
   document.querySelectorAll('.sort-header').forEach(button => button.addEventListener('click', () => setSort(button.dataset.sort)));
   $('clear-query').addEventListener('click', () => { $('query').value = ''; scheduleRefresh(); $('query').focus(); });
   $('clear').addEventListener('click', clearFilters);
+  $('select-page').addEventListener('change', () => {
+    state.items.forEach(item => $('select-page').checked ? state.selectedFiles.set(item.id, item) : state.selectedFiles.delete(item.id));
+    renderTable();
+  });
+  $('clear-selection').addEventListener('click', () => { state.selectedFiles.clear(); state.view === 'tree' ? renderTree() : renderTable(); renderSelectionToolbar(); });
+  $('download-selection').addEventListener('click', downloadSelected);
+  $('nemesis-selection').addEventListener('click', sendSelectedToNemesis);
   $('retry').addEventListener('click', refresh);
   $('show-updates').addEventListener('click', applyPendingUpdates);
   $('table-view').addEventListener('click', () => setView('table'));

@@ -84,6 +84,15 @@
         </div>
       </div>
 
+      <div id="selection-toolbar" class="selection-toolbar" role="region" aria-label="Selected file actions">
+        <div class="selection-summary"><strong id="selection-count">0 selected</strong><span id="selection-size">Select files to download or send</span></div>
+        <div class="selection-actions">
+          <button id="clear-selection" class="text-button" type="button" disabled>Clear</button>
+          <button id="download-selection" class="button" type="button" disabled><svg aria-hidden="true" viewBox="0 0 24 24"><use href="#icon-download"></use></svg>Download</button>
+          <button id="nemesis-selection" class="button primary" type="button" disabled><svg aria-hidden="true" viewBox="0 0 24 24"><use href="#icon-upload"></use></svg>Send to Nemesis</button>
+        </div>
+      </div>
+
       <div id="error-banner" class="error-banner" role="alert" hidden>
         <svg aria-hidden="true" viewBox="0 0 24 24"><use href="#icon-alert"></use></svg>
         <span id="error-message">Could not load inventory.</span>
@@ -92,7 +101,7 @@
 
       <div id="table-container" class="table-shell">
         <table>
-          <thead><tr><th class="tag-heading" scope="col"><button class="sort-header" type="button" data-sort="type">Type<span class="sort-indicator" aria-hidden="true"></span></button></th><th scope="col"><button class="sort-header" type="button" data-sort="file">File<span class="sort-indicator" aria-hidden="true"></span></button></th><th scope="col"><button class="sort-header" type="button" data-sort="location">Location<span class="sort-indicator" aria-hidden="true"></span></button></th><th class="numeric" scope="col"><button class="sort-header" type="button" data-sort="priority">Rating<span class="sort-indicator" aria-hidden="true"></span></button></th><th class="numeric" scope="col"><button class="sort-header" type="button" data-sort="size">Size<span class="sort-indicator" aria-hidden="true"></span></button></th><th class="numeric" scope="col"><button class="sort-header" type="button" data-sort="modified">Modified<span class="sort-indicator" aria-hidden="true"></span></button></th><th scope="col"><span class="sr-only">Details</span></th></tr></thead>
+          <thead><tr><th class="select-heading" scope="col"><input id="select-page" class="file-checkbox" type="checkbox" aria-label="Select all files on this page"></th><th class="tag-heading" scope="col"><button class="sort-header" type="button" data-sort="type">Type<span class="sort-indicator" aria-hidden="true"></span></button></th><th scope="col"><button class="sort-header" type="button" data-sort="file">File<span class="sort-indicator" aria-hidden="true"></span></button></th><th scope="col"><button class="sort-header" type="button" data-sort="location">Location<span class="sort-indicator" aria-hidden="true"></span></button></th><th class="numeric" scope="col"><button class="sort-header" type="button" data-sort="priority">Rating<span class="sort-indicator" aria-hidden="true"></span></button></th><th class="numeric" scope="col"><button class="sort-header" type="button" data-sort="size">Size<span class="sort-indicator" aria-hidden="true"></span></button></th><th class="numeric" scope="col"><button class="sort-header" type="button" data-sort="modified">Modified<span class="sort-indicator" aria-hidden="true"></span></button></th><th scope="col"><span class="sr-only">Details</span></th></tr></thead>
           <tbody id="results"></tbody>
         </table>
       </div>
