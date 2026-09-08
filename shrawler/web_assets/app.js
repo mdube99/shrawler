@@ -29,7 +29,13 @@
     rankingRuns: [],
     rankingSignature: '',
     sortDirection: 'asc',
-    revision: 0
+    revision: 0,
+    observedRevision: 0,
+    displayedFileCount: 0,
+    latestFileCount: 0,
+    pendingRankingRuns: null,
+    applyingUpdates: false,
+    scanActive: false
   };
 
   let searchTimer = null;
@@ -654,14 +660,16 @@
     finally { setSearching(false); }
   }
 
-  async function searchTable() {
+  async function searchTable({preserveContext = false} = {}) {
     if (tableController) tableController.abort();
     tableController = new AbortController();
     const request = tableController;
     setSearching(true);
     $('error-banner').hidden = true;
-    $('summary').textContent = 'Loading…';
-    renderSkeleton();
+    if (!preserveContext) {
+      $('summary').textContent = 'Loading…';
+      renderSkeleton();
+    }
     try {
       const data = await (await api(`/api/files?${filterParams(true)}`, {signal: request.signal})).json();
       state.items = data.items;
@@ -683,13 +691,13 @@
     }
   }
 
-  async function loadTree() {
+  async function loadTree({preserveContext = false} = {}) {
     if (treeController) treeController.abort();
     const key = filterParams(false).toString();
     state.treeKey = key;
     state.selectedId = null;
     $('error-banner').hidden = true;
-    if (treeCache.has(key)) {
+    if (treeCache.has(key) && !preserveContext) {
       state.treeData = treeCache.get(key);
       renderTree();
       renderTreeSummary();
@@ -698,15 +706,17 @@
     treeController = new AbortController();
     const request = treeController;
     setSearching(true);
-    $('tree').replaceChildren();
-    $('tree-loading').hidden = false;
-    $('summary').textContent = 'Loading hierarchy…';
+    if (!preserveContext) {
+      $('tree').replaceChildren();
+      $('tree-loading').hidden = false;
+      $('summary').textContent = 'Loading hierarchy…';
+    }
     try {
       const data = await (await api(`/api/tree?${key}`, {signal: request.signal})).json();
       treeCache.set(key, data);
       if (treeCache.size > 8) treeCache.delete(treeCache.keys().next().value);
       state.treeData = data;
-      state.expanded.clear();
+      if (!preserveContext) state.expanded.clear();
       renderTree();
       renderTreeSummary();
     } catch (error) {
@@ -738,6 +748,61 @@
     $('error-banner').hidden = false;
     $('summary').textContent = 'Inventory unavailable';
     setSearching(false);
+  }
+
+  function renderPendingUpdates(scanActive = state.scanActive) {
+    const pending = state.observedRevision !== state.revision || state.pendingRankingRuns !== null;
+    $('pending-updates').hidden = !pending;
+    if (!pending) return;
+    const added = Math.max(0, state.latestFileCount - state.displayedFileCount);
+    $('pending-updates-label').textContent = added
+      ? `${added.toLocaleString()} new capture${added === 1 ? '' : 's'} available`
+      : `${scanActive ? 'New captures available' : 'Scan complete · updates available'}`;
+  }
+
+  async function refreshFacets() {
+    const updatedFacets = await (await api('/api/facets')).json();
+    appendOptions('host', updatedFacets.hosts);
+    appendOptions('share', updatedFacets.shares);
+    appendOptions('extension', updatedFacets.extensions);
+    appendOptions('rule', updatedFacets.rules || []);
+    appendOptions('triage', updatedFacets.triages || []);
+    appendOptions('permission', updatedFacets.permissions || []);
+    appendOptions('collection', updatedFacets.collections || []);
+  }
+
+  async function applyPendingUpdates() {
+    if (state.applyingUpdates) return;
+    state.applyingUpdates = true;
+    const appliedRevision = state.observedRevision;
+    const appliedFileCount = state.latestFileCount;
+    const pendingRuns = state.pendingRankingRuns;
+    const button = $('show-updates');
+    button.disabled = true;
+    button.replaceChildren(element('span', 'small-spinner'), document.createTextNode('Updating…'));
+    try {
+      if (pendingRuns !== null) {
+        state.rankingRuns = pendingRuns;
+        state.rankingSignature = JSON.stringify(pendingRuns.map(run => [run.id, run.status, run.file_count]));
+        appendRankingOptions(state.rankingRuns);
+      }
+      await refreshFacets();
+      treeCache.clear();
+      const scrollTop = window.scrollY;
+      if (state.view === 'tree') await loadTree({preserveContext: true});
+      else await searchTable({preserveContext: true});
+      state.revision = appliedRevision;
+      state.displayedFileCount = appliedFileCount;
+      if (state.pendingRankingRuns === pendingRuns) state.pendingRankingRuns = null;
+      window.scrollTo({top: scrollTop, behavior: 'auto'});
+    } catch (error) {
+      showToast(error.message, true);
+    } finally {
+      state.applyingUpdates = false;
+      button.disabled = false;
+      button.textContent = 'Show updates';
+      renderPendingUpdates(state.scanActive);
+    }
   }
 
   function refresh() {
@@ -881,6 +946,10 @@
     state.retrievalEnabled = status.retrieval_enabled !== false;
     state.nemesisEnabled = status.nemesis_enabled === true;
     state.revision = status.revision || 0;
+    state.observedRevision = state.revision;
+    state.displayedFileCount = status.file_count || 0;
+    state.latestFileCount = state.displayedFileCount;
+    state.scanActive = status.scan_active === true;
     $('status').textContent = `Connected — ${status.file_count.toLocaleString()} files indexed`;
     $('connection-status').classList.add('ready');
     appendOptions('host', facets.hosts);
@@ -906,32 +975,23 @@
         document.body.append(dialog); dialog.showModal();
       }).catch(error => showToast(error.message, true));
     }
+    let statusPolling = false;
     setInterval(async () => {
+      if (statusPolling) return;
+      statusPolling = true;
       try {
         const latest = await (await api('/api/status')).json();
+        state.latestFileCount = latest.file_count || 0;
+        state.observedRevision = latest.revision || 0;
+        state.scanActive = latest.scan_active === true;
         $('status').textContent = `Connected — ${latest.file_count.toLocaleString()} files indexed${latest.scan_active ? ' · scanning' : ''}`;
         const rankingSignature = JSON.stringify((latest.ranking_runs || []).map(run => [run.id, run.status, run.file_count]));
         if (rankingSignature !== state.rankingSignature) {
-          state.rankingRuns = latest.ranking_runs || [];
-          state.rankingSignature = rankingSignature;
-          appendRankingOptions(state.rankingRuns);
-          treeCache.clear();
-          refresh();
+          state.pendingRankingRuns = latest.ranking_runs || [];
         }
-        if ((latest.revision || 0) !== state.revision) {
-          state.revision = latest.revision || 0;
-          treeCache.clear();
-          const updatedFacets = await (await api('/api/facets')).json();
-          appendOptions('host', updatedFacets.hosts);
-          appendOptions('share', updatedFacets.shares);
-          appendOptions('extension', updatedFacets.extensions);
-          appendOptions('rule', updatedFacets.rules || []);
-          appendOptions('triage', updatedFacets.triages || []);
-          appendOptions('permission', updatedFacets.permissions || []);
-          appendOptions('collection', updatedFacets.collections || []);
-          refresh();
-        }
+        renderPendingUpdates(latest.scan_active);
       } catch (_) { /* The normal request UI reports actionable errors. */ }
+      finally { statusPolling = false; }
     }, 2000);
   }).catch(error => {
     $('status').textContent = error.message;
@@ -953,6 +1013,7 @@
   $('clear-query').addEventListener('click', () => { $('query').value = ''; scheduleRefresh(); $('query').focus(); });
   $('clear').addEventListener('click', clearFilters);
   $('retry').addEventListener('click', refresh);
+  $('show-updates').addEventListener('click', applyPendingUpdates);
   $('table-view').addEventListener('click', () => setView('table'));
   $('tree-view').addEventListener('click', () => setView('tree'));
   $('density').addEventListener('click', () => {

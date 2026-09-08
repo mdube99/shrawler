@@ -97,8 +97,11 @@ select:hover { border-color: var(--text-muted); }
 .results-section { margin-top: 24px; }
 .results-toolbar { position: sticky; top: calc(var(--header-height) + 65px); z-index: 20; display: flex; align-items: center; justify-content: space-between; min-height: 44px; padding: 5px 8px 5px 14px; border: 1px solid var(--line); border-bottom: 0; border-radius: var(--radius-md) var(--radius-md) 0 0; background: hsla(200, 11%, 16%, .97); }
 .results-toolbar p { margin: 0; color: var(--text-secondary); font-size: 13px; }
-.toolbar-actions, .tree-actions, .view-switcher { display: flex; align-items: center; }
+.toolbar-actions, .tree-actions, .view-switcher, .pending-updates { display: flex; align-items: center; }
 .toolbar-actions { gap: 8px; }
+.pending-updates { gap: 9px; min-height: 32px; padding-left: 10px; border-left: 2px solid var(--amber); color: var(--amber-hover); font-size: 12px; }
+.update-button { min-height: 30px; padding: 4px 9px; border-color: hsl(34, 45%, 42%); color: var(--amber-hover); background: hsla(34, 58%, 52%, .08); }
+.update-button .small-spinner { position: static; border-top-color: var(--amber-hover); }
 .tree-actions { gap: 8px; margin-right: 4px; }
 .density-button span { font-size: 12px; }
 .view-switcher { padding: 2px; border: 1px solid var(--line); border-radius: var(--radius-sm); background: var(--bg); }
