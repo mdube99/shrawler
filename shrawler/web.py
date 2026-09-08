@@ -506,21 +506,37 @@ class DatabaseIndex:
                 raise ValueError(f"unsupported Shrawler database schema {version}")
             connection.execute("SELECT 1 FROM files LIMIT 1").fetchone()
 
-    def ensure_sort_indexes(self) -> None:
+    SORT_INDEXES = (
+        ("path", "files_path_sort_idx", "CREATE INDEX IF NOT EXISTS files_path_sort_idx ON files(host COLLATE NOCASE, share COLLATE NOCASE, remote_path COLLATE NOCASE, file_name COLLATE NOCASE, public_id)"),
+        ("filename", "files_name_sort_idx", "CREATE INDEX IF NOT EXISTS files_name_sort_idx ON files(file_name COLLATE NOCASE, remote_path COLLATE NOCASE, public_id)"),
+        ("file type", "files_type_sort_idx", "CREATE INDEX IF NOT EXISTS files_type_sort_idx ON files(extension COLLATE NOCASE, file_name COLLATE NOCASE, public_id)"),
+        ("size", "files_size_sort_idx", "CREATE INDEX IF NOT EXISTS files_size_sort_idx ON files(size_bytes, file_name COLLATE NOCASE, public_id)"),
+        ("modified date", "files_modified_sort_idx", "CREATE INDEX IF NOT EXISTS files_modified_sort_idx ON files(mtime_utc, file_name COLLATE NOCASE, public_id)"),
+    )
+
+    def missing_sort_indexes(self) -> List[Tuple[str, str]]:
+        with self._connect() as connection:
+            existing = {
+                str(row[0])
+                for row in connection.execute(
+                    "SELECT name FROM sqlite_master WHERE type='index'"
+                )
+            }
+        return [(label, statement) for label, name, statement in self.SORT_INDEXES if name not in existing]
+
+    def ensure_sort_indexes(
+        self, progress: Optional[Callable[[str, int, int], None]] = None
+    ) -> None:
         """Install optional WebUI indexes on existing inventories."""
-        statements = (
-            "CREATE INDEX IF NOT EXISTS files_path_sort_idx ON files(host COLLATE NOCASE, share COLLATE NOCASE, remote_path COLLATE NOCASE, file_name COLLATE NOCASE, public_id)",
-            "CREATE INDEX IF NOT EXISTS files_name_sort_idx ON files(file_name COLLATE NOCASE, remote_path COLLATE NOCASE, public_id)",
-            "CREATE INDEX IF NOT EXISTS files_type_sort_idx ON files(extension COLLATE NOCASE, file_name COLLATE NOCASE, public_id)",
-            "CREATE INDEX IF NOT EXISTS files_size_sort_idx ON files(size_bytes, file_name COLLATE NOCASE, public_id)",
-            "CREATE INDEX IF NOT EXISTS files_modified_sort_idx ON files(mtime_utc, file_name COLLATE NOCASE, public_id)",
-        )
+        statements = self.missing_sort_indexes()
         connection = sqlite3.connect(self.path, timeout=60)
         try:
             connection.execute("PRAGMA busy_timeout=60000")
-            for statement in statements:
+            for position, (label, statement) in enumerate(statements, 1):
+                if progress:
+                    progress(label, position, len(statements))
                 connection.execute(statement)
-            connection.commit()
+                connection.commit()
         finally:
             connection.close()
 
@@ -1252,6 +1268,9 @@ class WebState:
     triage: Optional[TriageService] = None
     nemesis: Optional[NemesisConfig] = None
     nemesis_max: int = 50 * 1024**2
+    index_status: Dict[str, Any] = field(
+        default_factory=lambda: {"status": "idle", "completed": 0, "total": 0}
+    )
 
 
 @dataclass(frozen=True)
@@ -1392,6 +1411,7 @@ class WebHandler(BaseHTTPRequestHandler):
                     "triage_enabled": state.triage is not None,
                     "nemesis_enabled": state.nemesis is not None,
                     "nemesis_max_bytes": state.nemesis_max,
+                    "index_optimization": dict(state.index_status),
                 }
             )
             self._json(status)
@@ -1750,7 +1770,6 @@ class WebHandler(BaseHTTPRequestHandler):
 def run(config: WebConfig, auth: Optional[SMBAuth]) -> int:
     """Run the local WebUI with validated configuration and authentication."""
     index = DatabaseIndex(config.database_path, config.page_size)
-    index.ensure_sort_indexes()
     runtime = Path(tempfile.mkdtemp(prefix="shrawler-web-"))
     os.chmod(runtime, 0o700)
     token = secrets.token_hex(32) if config.token_auth else ""
@@ -1773,6 +1792,32 @@ def run(config: WebConfig, auth: Optional[SMBAuth]) -> int:
     print(
         f"Loaded {index.status()['file_count']} files from {escape_terminal(index.path)}"
     )
+    missing = index.missing_sort_indexes()
+    if missing:
+        state.index_status.update(status="pending", completed=0, total=len(missing))
+
+        def optimize() -> None:
+            started = time.monotonic()
+
+            def progress(label: str, position: int, total: int) -> None:
+                state.index_status.update(
+                    status="running", current=label, completed=position - 1, total=total
+                )
+                print(f"Optimizing inventory [{position}/{total}]: building {label} sort index…", flush=True)
+
+            try:
+                index.ensure_sort_indexes(progress)
+                state.index_status.update(
+                    status="completed", current="", completed=len(missing), total=len(missing),
+                    elapsed_seconds=round(time.monotonic() - started, 1),
+                )
+                print(f"Inventory optimization complete in {time.monotonic() - started:.1f}s.", flush=True)
+            except (OSError, sqlite3.Error) as exc:
+                state.index_status.update(status="failed", error=str(exc))
+                print(f"Inventory optimization failed: {escape_terminal(exc)}", flush=True)
+
+        threading.Thread(target=optimize, name="shrawler-indexer", daemon=True).start()
+        print(f"Optimizing inventory in background: {len(missing)} sort indexes pending.", flush=True)
     print("Local WebUI: " + url)
     if not token:
         print("WebUI token authentication is disabled; use --token-auth to enable it.")

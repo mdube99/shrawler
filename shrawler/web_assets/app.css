@@ -50,6 +50,8 @@ svg { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width:
 .brand-mark svg { width: 19px; height: 19px; }
 .header-actions { gap: 20px; }
 .connection-status { gap: 8px; color: var(--text-secondary); font-size: 12px; }
+.index-optimization { max-width: 340px; padding-left: 12px; border-left: 1px solid var(--line); color: var(--amber-hover); font-size: 12px; white-space: nowrap; }
+.index-optimization.failed { color: var(--danger); }
 .status-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--amber); }
 .connection-status.ready .status-dot { background: var(--success); box-shadow: 0 0 0 3px hsla(140, 30%, 54%, .12); }
 .connection-status.error .status-dot { background: var(--danger); }

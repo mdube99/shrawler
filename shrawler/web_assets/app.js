@@ -760,6 +760,21 @@
       : `${scanActive ? 'New captures available' : 'Scan complete · updates available'}`;
   }
 
+  function renderIndexOptimization(value) {
+    const notice = $('index-optimization');
+    if (!value || ['idle', 'completed'].includes(value.status)) {
+      notice.hidden = true;
+      return;
+    }
+    notice.hidden = false;
+    notice.classList.toggle('failed', value.status === 'failed');
+    notice.textContent = value.status === 'failed'
+      ? `Inventory optimization failed · ${value.error || 'see terminal'}`
+      : value.status === 'running'
+        ? `Optimizing ${value.current} index · ${value.completed} of ${value.total} ready`
+        : `Inventory optimization queued · ${value.total} indexes`;
+  }
+
   async function refreshFacets() {
     const updatedFacets = await (await api('/api/facets')).json();
     appendOptions('host', updatedFacets.hosts);
@@ -951,6 +966,7 @@
     state.displayedFileCount = status.file_count || 0;
     state.latestFileCount = state.displayedFileCount;
     state.scanActive = status.scan_active === true;
+    renderIndexOptimization(status.index_optimization);
     $('status').textContent = `Connected — ${status.file_count.toLocaleString()} files indexed`;
     $('connection-status').classList.add('ready');
     appendOptions('host', facets.hosts);
@@ -985,6 +1001,7 @@
         state.latestFileCount = latest.file_count || 0;
         state.observedRevision = latest.revision || 0;
         state.scanActive = latest.scan_active === true;
+        renderIndexOptimization(latest.index_optimization);
         $('status').textContent = `Connected — ${latest.file_count.toLocaleString()} files indexed${latest.scan_active ? ' · scanning' : ''}`;
         const rankingSignature = JSON.stringify((latest.ranking_runs || []).map(run => [run.id, run.status, run.file_count]));
         if (rankingSignature !== state.rankingSignature) {
