@@ -27,6 +27,14 @@ def _json(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
 
 
+def _path_key(value: Any) -> str:
+    return "/" + "/".join(
+        part
+        for part in str(value or "").replace("\\", "/").casefold().split("/")
+        if part
+    )
+
+
 class WorkspaceBusyError(RuntimeError):
     """Raised when another scanner owns the workspace."""
 
@@ -198,12 +206,14 @@ class ScanStore:
                 id INTEGER PRIMARY KEY,
                 scan_id TEXT NOT NULL REFERENCES scans(id) ON DELETE CASCADE,
                 share_id INTEGER NOT NULL REFERENCES shares(id) ON DELETE CASCADE,
+                remote_path_key TEXT,
                 payload_json TEXT NOT NULL
             );
             CREATE TABLE IF NOT EXISTS snaffler_matches (
                 id INTEGER PRIMARY KEY,
                 scan_id TEXT NOT NULL REFERENCES scans(id) ON DELETE CASCADE,
                 share_id INTEGER REFERENCES shares(id) ON DELETE CASCADE,
+                remote_path_key TEXT,
                 payload_json TEXT NOT NULL
             );
             CREATE INDEX IF NOT EXISTS files_host_idx ON files(host COLLATE NOCASE);
@@ -227,6 +237,8 @@ class ScanStore:
             CREATE INDEX IF NOT EXISTS scan_files_file_idx ON scan_files(file_id);
             CREATE INDEX IF NOT EXISTS matches_scan_share_idx ON snaffler_matches(scan_id, share_id);
             CREATE INDEX IF NOT EXISTS downloads_scan_share_idx ON downloads(scan_id, share_id);
+            CREATE INDEX IF NOT EXISTS matches_lookup_idx ON snaffler_matches(scan_id, share_id, remote_path_key);
+            CREATE INDEX IF NOT EXISTS downloads_lookup_idx ON downloads(scan_id, share_id, remote_path_key);
             """
         )
         self.connection.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
@@ -416,8 +428,8 @@ class ScanStore:
         stored = {key: value for key, value in payload.items() if key != "_store_id"}
         with self._lock:
             cursor = self.connection.execute(
-                "INSERT INTO downloads(scan_id, share_id, payload_json) VALUES (?, ?, ?)",
-                (self.scan_id, self._share_id(host, share), _json(stored)),
+                "INSERT INTO downloads(scan_id, share_id, remote_path_key, payload_json) VALUES (?, ?, ?, ?)",
+                (self.scan_id, self._share_id(host, share), _path_key(stored.get("remote_path")), _json(stored)),
             )
             self._touch()
             if cursor.lastrowid is None:
@@ -428,8 +440,8 @@ class ScanStore:
         stored = {key: value for key, value in payload.items() if key != "_store_id"}
         with self._lock:
             self.connection.execute(
-                "UPDATE downloads SET payload_json=? WHERE id=? AND scan_id=?",
-                (_json(stored), download_id, self.scan_id),
+                "UPDATE downloads SET remote_path_key=?, payload_json=? WHERE id=? AND scan_id=?",
+                (_path_key(stored.get("remote_path")), _json(stored), download_id, self.scan_id),
             )
             self._touch()
 
@@ -443,9 +455,9 @@ class ScanStore:
                 except ValueError:
                     pass
             self.connection.execute(
-                """INSERT INTO snaffler_matches(scan_id, share_id, payload_json)
-                   VALUES (?, ?, ?)""",
-                (self.scan_id, share_id, _json(payload)),
+                """INSERT INTO snaffler_matches(scan_id, share_id, remote_path_key, payload_json)
+                   VALUES (?, ?, ?, ?)""",
+                (self.scan_id, share_id, _path_key(payload.get("remote_path")), _json(payload)),
             )
             self._touch()
 

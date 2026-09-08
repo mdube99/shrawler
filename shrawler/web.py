@@ -532,11 +532,37 @@ class DatabaseIndex:
         statements = self.missing_sort_indexes()
         connection = sqlite3.connect(self.path, timeout=60)
         try:
+            connection.create_function("path_key", 1, self._path_key, deterministic=True)
             connection.execute("PRAGMA busy_timeout=60000")
             for position, (label, statement) in enumerate(statements, 1):
                 if progress:
                     progress(label, position, len(statements))
                 connection.execute(statement)
+                connection.commit()
+        finally:
+            connection.close()
+
+    def ensure_evidence_indexes(
+        self, progress: Optional[Callable[[str, int, int], None]] = None
+    ) -> None:
+        """Backfill indexed evidence paths for databases created before this feature."""
+        connection = sqlite3.connect(self.path, timeout=60)
+        try:
+            connection.create_function("path_key", 1, self._path_key, deterministic=True)
+            connection.execute("PRAGMA busy_timeout=60000")
+            for position, table in enumerate(("snaffler_matches", "downloads"), 1):
+                columns = {row[1] for row in connection.execute(f"PRAGMA table_info({table})")}
+                if "remote_path_key" not in columns:
+                    connection.execute(f"ALTER TABLE {table} ADD COLUMN remote_path_key TEXT")
+                    connection.commit()
+                if progress:
+                    progress(f"{table} evidence", position, 2)
+                connection.execute(
+                    f"UPDATE {table} SET remote_path_key=path_key(json_extract(payload_json, '$.remote_path')) WHERE remote_path_key IS NULL"
+                )
+                connection.execute(
+                    f"CREATE INDEX IF NOT EXISTS {table}_lookup_idx ON {table}(scan_id, share_id, remote_path_key)"
+                )
                 connection.commit()
         finally:
             connection.close()
@@ -600,8 +626,7 @@ class DatabaseIndex:
                        AND sf.rowid={cls._latest_observation()}
                    JOIN {table} evidence ON evidence.scan_id=sf.scan_id
                        AND evidence.share_id=sf.share_id
-                       AND path_key(json_extract(evidence.payload_json, '$.remote_path'))
-                           =path_key(files.remote_path)"""
+                        AND evidence.remote_path_key=path_key(files.remote_path)"""
 
     def _enrich(self, records: List[FileRecord]) -> List[FileRecord]:
         """Load only the selected files' latest evidence in bounded SQL batches."""
@@ -1799,8 +1824,16 @@ def run(config: WebConfig, auth: Optional[SMBAuth]) -> int:
         f"Loaded {index.status()['file_count']} files from {escape_terminal(index.path)}"
     )
     missing = index.missing_sort_indexes()
-    if missing:
-        state.index_status.update(status="pending", completed=0, total=len(missing))
+    evidence_missing = False
+    with index._connect() as connection:
+        evidence_missing = any(
+            "remote_path_key" not in {row[1] for row in connection.execute(f"PRAGMA table_info({table})")}
+            or connection.execute(f"SELECT 1 FROM {table} WHERE remote_path_key IS NULL LIMIT 1").fetchone()
+            for table in ("snaffler_matches", "downloads")
+        )
+    if missing or evidence_missing:
+        total_work = len(missing) + (2 if evidence_missing else 0)
+        state.index_status.update(status="pending", completed=0, total=total_work)
 
         def optimize() -> None:
             started = time.monotonic()
@@ -1812,9 +1845,11 @@ def run(config: WebConfig, auth: Optional[SMBAuth]) -> int:
                 print(f"Optimizing inventory [{position}/{total}]: building {label} sort index…", flush=True)
 
             try:
+                if evidence_missing:
+                    index.ensure_evidence_indexes(progress)
                 index.ensure_sort_indexes(progress)
                 state.index_status.update(
-                    status="completed", current="", completed=len(missing), total=len(missing),
+                    status="completed", current="", completed=total_work, total=total_work,
                     elapsed_seconds=round(time.monotonic() - started, 1),
                 )
                 print(f"Inventory optimization complete in {time.monotonic() - started:.1f}s.", flush=True)
@@ -1823,7 +1858,7 @@ def run(config: WebConfig, auth: Optional[SMBAuth]) -> int:
                 print(f"Inventory optimization failed: {escape_terminal(exc)}", flush=True)
 
         threading.Thread(target=optimize, name="shrawler-indexer", daemon=True).start()
-        print(f"Optimizing inventory in background: {len(missing)} sort indexes pending.", flush=True)
+        print(f"Optimizing inventory in background: {total_work} maintenance steps pending.", flush=True)
     print("Local WebUI: " + url)
     if not token:
         print("WebUI token authentication is disabled; use --token-auth to enable it.")
