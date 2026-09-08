@@ -786,11 +786,12 @@
         state.rankingSignature = JSON.stringify(pendingRuns.map(run => [run.id, run.status, run.file_count]));
         appendRankingOptions(state.rankingRuns);
       }
-      await refreshFacets();
       treeCache.clear();
       const scrollTop = window.scrollY;
-      if (state.view === 'tree') await loadTree({preserveContext: true});
-      else await searchTable({preserveContext: true});
+      await Promise.all([
+        refreshFacets(),
+        state.view === 'tree' ? loadTree({preserveContext: true}) : searchTable({preserveContext: true})
+      ]);
       state.revision = appliedRevision;
       state.displayedFileCount = appliedFileCount;
       if (state.pendingRankingRuns === pendingRuns) state.pendingRankingRuns = null;

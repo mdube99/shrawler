@@ -211,6 +211,10 @@ class ScanStore:
             CREATE INDEX IF NOT EXISTS files_ext_idx ON files(extension, id);
             CREATE INDEX IF NOT EXISTS files_parent_idx
                 ON files(host, share, parent_path, id);
+            CREATE INDEX IF NOT EXISTS files_path_sort_idx
+                ON files(host COLLATE NOCASE, share COLLATE NOCASE,
+                         remote_path COLLATE NOCASE, file_name COLLATE NOCASE,
+                         public_id);
             CREATE INDEX IF NOT EXISTS scan_files_scan_idx ON scan_files(scan_id, share_id);
             CREATE INDEX IF NOT EXISTS scan_files_file_idx ON scan_files(file_id);
             CREATE INDEX IF NOT EXISTS matches_scan_share_idx ON snaffler_matches(scan_id, share_id);

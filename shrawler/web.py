@@ -9,6 +9,7 @@ import shutil
 import sqlite3
 import tempfile
 import threading
+import time
 import urllib.parse
 from dataclasses import asdict, dataclass, field
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -496,6 +497,9 @@ class DatabaseIndex:
             raise ValueError(f"DATABASE does not exist: {self.path}")
         self.page_size = min(max(page_size, 1), 500)
         self.skipped = 0
+        self._facets_cache: Tuple[float, Dict[str, List[str]]] | None = None
+        self._status_cache: Tuple[float, int, int] | None = None
+        self._total_cache: Dict[Tuple[Any, ...], int] = {}
         with self._connect() as connection:
             version = int(connection.execute("PRAGMA user_version").fetchone()[0])
             if version != SCHEMA_VERSION:
@@ -686,8 +690,11 @@ class DatabaseIndex:
         return (" WHERE " + " AND ".join(clauses) if clauses else "", values)
 
     def facets(self) -> Dict[str, List[str]]:
+        now = time.monotonic()
+        if self._facets_cache and now - self._facets_cache[0] < 10:
+            return self._facets_cache[1]
         with self._connect() as connection:
-            return {
+            facets = {
                 "hosts": [
                     str(row[0])
                     for row in connection.execute(
@@ -728,24 +735,33 @@ class DatabaseIndex:
                     "write_owner",
                 ],
             }
+        self._facets_cache = (now, facets)
+        return facets
 
     def status(self) -> Dict[str, Any]:
         with self._connect() as connection:
             revision = connection.execute(
                 "SELECT value FROM metadata WHERE key='revision'"
             ).fetchone()
-            counts = connection.execute(
-                "SELECT COUNT(*), COUNT(DISTINCT host) FROM files"
-            ).fetchone()
             active = connection.execute(
                 "SELECT EXISTS(SELECT 1 FROM scans WHERE status='running')"
             ).fetchone()
+            revision_value = int(revision[0]) if revision else 0
+            now = time.monotonic()
+            if self._status_cache and now - self._status_cache[0] < 10:
+                file_count, host_count = self._status_cache[1:]
+            else:
+                counts = connection.execute(
+                    "SELECT COUNT(*), COUNT(DISTINCT host) FROM files"
+                ).fetchone()
+                file_count, host_count = int(counts[0]), int(counts[1])
+                self._status_cache = (now, file_count, host_count)
         return {
             "results_name": self.path.name,
             "schema_version": 3,
-            "file_count": int(counts[0]),
-            "host_count": int(counts[1]),
-            "revision": int(revision[0]) if revision else 0,
+            "file_count": file_count,
+            "host_count": host_count,
+            "revision": revision_value,
             "scan_active": bool(active[0]),
             "ranking_runs": self.ranking_catalog().get("runs", []),
         }
@@ -881,12 +897,26 @@ class DatabaseIndex:
         per_page = min(max(per_page, 1), self.page_size, 500)
         page = max(page, 1)
         start = (page - 1) * per_page
+        revision = 0
         with self._connect() as connection:
-            total = int(
-                connection.execute(
-                    "SELECT COUNT(*) FROM files" + joins + where, values
-                ).fetchone()[0]
+            revision_row = connection.execute(
+                "SELECT value FROM metadata WHERE key='revision'"
+            ).fetchone()
+            revision = int(revision_row[0]) if revision_row else 0
+            total_key = (
+                revision, q, host, share, extension, rule, triage, permission,
+                collection, ranking_run, ranking_category, ranking_min,
             )
+            total = self._total_cache.get(total_key)
+            if total is None:
+                total = int(
+                    connection.execute(
+                        "SELECT COUNT(*) FROM files" + joins + where, values
+                    ).fetchone()[0]
+                )
+                if len(self._total_cache) >= 64:
+                    self._total_cache.clear()
+                self._total_cache[total_key] = total
             rows = connection.execute(
                 "SELECT files.*, "
                 + ranking_projection
