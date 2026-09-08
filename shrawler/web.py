@@ -868,6 +868,7 @@ class DatabaseIndex:
         ranking_min: int = 0,
         sort: str = "path",
         direction: str = "asc",
+        include_total: bool = True,
     ) -> Dict[str, Any]:
         where, where_values = self._where(
             q,
@@ -953,31 +954,16 @@ class DatabaseIndex:
                     self._total_cache.clear()
                 self._total_cache[total_key] = total
             fetch_limit = per_page if include_total else per_page + 1
-            if sort == "priority" and ranking_run and not ranking_category:
-                priority_where = where
-                priority_values = values
-                rows = connection.execute(
-                    "SELECT files.*, ranking.run_id AS ranking_run_id, "
-                    "ranking.priority AS ranking_priority, ranking.priority AS ranking_score "
-                    "FROM triage.triage_files ranking INDEXED BY triage_priority "
-                    "JOIN files ON files.public_id=ranking.file_id "
-                    + priority_where
-                    + f" ORDER BY ranking.priority {direction.upper()}, "
-                    + f"files.file_name COLLATE NOCASE {direction.upper()}, "
-                    + f"files.public_id {direction.upper()} LIMIT ? OFFSET ?",
-                    (*priority_values, fetch_limit, start),
-                )
-            else:
-                rows = connection.execute(
-                    "SELECT files.*, "
-                    + ranking_projection
-                    + " FROM files"
-                    + joins
-                    + where
-                    + order
-                    + " LIMIT ? OFFSET ?",
-                    (*values, fetch_limit, start),
-                )
+            rows = connection.execute(
+                "SELECT files.*, "
+                + ranking_projection
+                + " FROM files"
+                + joins
+                + where
+                + order
+                + " LIMIT ? OFFSET ?",
+                (*values, fetch_limit, start),
+            )
             rows = list(rows)
             has_next = len(rows) > per_page if not include_total else start + per_page < total
             rows = rows[:per_page]
@@ -1507,13 +1493,13 @@ class WebHandler(BaseHTTPRequestHandler):
             if ranking_min < 0 or ranking_min > 100000:
                 self._error(400, "Invalid ranking minimum", "invalid_query")
                 return
-                ranking_args = (
+            ranking_args = (
                 filters[8],
                 filters[9],
                 ranking_min,
                 filters[11] or "path",
-                    filters[12] or ("desc" if filters[11] == "priority" else "asc"),
-                )
+                filters[12] or ("desc" if filters[11] == "priority" else "asc"),
+            )
             if parsed.path == "/api/tree/branch":
                 try:
                     self._json(
