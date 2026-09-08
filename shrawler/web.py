@@ -506,6 +506,24 @@ class DatabaseIndex:
                 raise ValueError(f"unsupported Shrawler database schema {version}")
             connection.execute("SELECT 1 FROM files LIMIT 1").fetchone()
 
+    def ensure_sort_indexes(self) -> None:
+        """Install optional WebUI indexes on existing inventories."""
+        statements = (
+            "CREATE INDEX IF NOT EXISTS files_path_sort_idx ON files(host COLLATE NOCASE, share COLLATE NOCASE, remote_path COLLATE NOCASE, file_name COLLATE NOCASE, public_id)",
+            "CREATE INDEX IF NOT EXISTS files_name_sort_idx ON files(file_name COLLATE NOCASE, remote_path COLLATE NOCASE, public_id)",
+            "CREATE INDEX IF NOT EXISTS files_type_sort_idx ON files(extension COLLATE NOCASE, file_name COLLATE NOCASE, public_id)",
+            "CREATE INDEX IF NOT EXISTS files_size_sort_idx ON files(size_bytes, file_name COLLATE NOCASE, public_id)",
+            "CREATE INDEX IF NOT EXISTS files_modified_sort_idx ON files(mtime_utc, file_name COLLATE NOCASE, public_id)",
+        )
+        connection = sqlite3.connect(self.path, timeout=60)
+        try:
+            connection.execute("PRAGMA busy_timeout=60000")
+            for statement in statements:
+                connection.execute(statement)
+            connection.commit()
+        finally:
+            connection.close()
+
     def _connect(self) -> sqlite3.Connection:
         connection = sqlite3.connect(self.path, timeout=5)
         connection.row_factory = sqlite3.Row
@@ -892,7 +910,7 @@ class DatabaseIndex:
             + ", ".join(
                 f"{column} {direction.upper()}" for column in sort_columns[sort]
             )
-            + ", files.public_id"
+            + f", files.public_id {direction.upper()}"
         )
         per_page = min(max(per_page, 1), self.page_size, 500)
         page = max(page, 1)
@@ -1732,6 +1750,7 @@ class WebHandler(BaseHTTPRequestHandler):
 def run(config: WebConfig, auth: Optional[SMBAuth]) -> int:
     """Run the local WebUI with validated configuration and authentication."""
     index = DatabaseIndex(config.database_path, config.page_size)
+    index.ensure_sort_indexes()
     runtime = Path(tempfile.mkdtemp(prefix="shrawler-web-"))
     os.chmod(runtime, 0o700)
     token = secrets.token_hex(32) if config.token_auth else ""

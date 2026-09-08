@@ -28,7 +28,7 @@
     nemesisEnabled: false,
     rankingRuns: [],
     rankingSignature: '',
-    sortDirection: 'asc',
+    sortDirection: 'desc',
     revision: 0,
     observedRevision: 0,
     displayedFileCount: 0,
@@ -198,7 +198,7 @@
     $('sort').querySelector('option[value="priority"]').disabled = !run;
     document.querySelector('.sort-header[data-sort="priority"]').disabled = !run;
     if (!run && $('sort').value === 'priority') {
-      $('sort').value = 'path';
+      $('sort').value = 'file';
       state.sortDirection = 'asc';
     }
   }

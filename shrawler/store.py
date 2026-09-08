@@ -215,6 +215,14 @@ class ScanStore:
                 ON files(host COLLATE NOCASE, share COLLATE NOCASE,
                          remote_path COLLATE NOCASE, file_name COLLATE NOCASE,
                          public_id);
+            CREATE INDEX IF NOT EXISTS files_name_sort_idx
+                ON files(file_name COLLATE NOCASE, remote_path COLLATE NOCASE, public_id);
+            CREATE INDEX IF NOT EXISTS files_type_sort_idx
+                ON files(extension COLLATE NOCASE, file_name COLLATE NOCASE, public_id);
+            CREATE INDEX IF NOT EXISTS files_size_sort_idx
+                ON files(size_bytes, file_name COLLATE NOCASE, public_id);
+            CREATE INDEX IF NOT EXISTS files_modified_sort_idx
+                ON files(mtime_utc, file_name COLLATE NOCASE, public_id);
             CREATE INDEX IF NOT EXISTS scan_files_scan_idx ON scan_files(scan_id, share_id);
             CREATE INDEX IF NOT EXISTS scan_files_file_idx ON scan_files(file_id);
             CREATE INDEX IF NOT EXISTS matches_scan_share_idx ON snaffler_matches(scan_id, share_id);
