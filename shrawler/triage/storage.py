@@ -294,10 +294,15 @@ def rank(
 def select_run(
     connection: sqlite3.Connection, database: Path, run_id: Optional[str]
 ) -> sqlite3.Row:
+    with closing(connect_readonly(database)) as source:
+        scan_ids = {str(row[0]) for row in source.execute("SELECT id FROM scans")}
+    if not scan_ids:
+        raise ValueError("no completed ranking run found for this inventory")
     clause = " AND id=?" if run_id else ""
-    values = (str(database.resolve()), run_id) if run_id else (str(database.resolve()),)
+    placeholders = ",".join("?" for _ in scan_ids)
+    values: Tuple[Any, ...] = (*scan_ids, run_id) if run_id else tuple(scan_ids)
     row = connection.execute(
-        "SELECT * FROM triage_runs WHERE source_path=? AND status='completed'"
+        f"SELECT * FROM triage_runs WHERE scan_id IN ({placeholders}) AND status='completed'"
         + clause
         + " ORDER BY started_at DESC, rowid DESC LIMIT 1",
         values,
@@ -387,13 +392,15 @@ def catalog(database: Path) -> Dict[str, Any]:
                 "WHERE mode IN ('spider','snaffle') ORDER BY started_at_utc DESC, rowid DESC LIMIT 200"
             )
         ]
+    scan_ids = {str(scan["id"]) for scan in scans}
     runs: List[Dict[str, Any]] = []
-    if result_path(database).exists():
+    if result_path(database).exists() and scan_ids:
         with closing(connect_readonly(result_path(database))) as connection:
+            placeholders = ",".join("?" for _ in scan_ids)
             for row in connection.execute(
                 "SELECT id,scan_id,status,started_at,file_count,rules_hash,rules_json,scan_json FROM triage_runs "
-                "WHERE source_path=? ORDER BY started_at DESC,rowid DESC LIMIT 200",
-                (str(database.resolve()),),
+                f"WHERE scan_id IN ({placeholders}) ORDER BY started_at DESC,rowid DESC LIMIT 200",
+                tuple(scan_ids),
             ):
                 entry = dict(row)
                 rules = json.loads(entry.pop("rules_json"))
