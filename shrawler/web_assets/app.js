@@ -678,9 +678,9 @@
       state.hasNext = data.has_next;
       renderTable();
       renderPagination();
-      const start = data.total ? (state.page - 1) * state.perPage + 1 : 0;
-      const end = Math.min(state.page * state.perPage, data.total);
-      $('summary').textContent = data.total ? `${start.toLocaleString()}–${end.toLocaleString()} of ${data.total.toLocaleString()} files` : 'No matching files';
+      const start = data.items.length ? (state.page - 1) * state.perPage + 1 : 0;
+      const end = start ? start + data.items.length - 1 : 0;
+      $('summary').textContent = start ? `${start.toLocaleString()}–${end.toLocaleString()} files${data.has_next ? ' · more available' : ''}` : 'No matching files';
     } catch (error) {
       if (error.name !== 'AbortError') showError(error.message);
     } finally {
@@ -958,7 +958,7 @@
     }
   }
 
-  Promise.all([api('/api/status').then(response => response.json()), api('/api/facets').then(response => response.json())]).then(([status, facets]) => {
+  api('/api/status').then(response => response.json()).then(status => {
     state.retrievalEnabled = status.retrieval_enabled !== false;
     state.nemesisEnabled = status.nemesis_enabled === true;
     state.revision = status.revision || 0;
@@ -969,13 +969,7 @@
     renderIndexOptimization(status.index_optimization);
     $('status').textContent = `Connected — ${status.file_count.toLocaleString()} files indexed`;
     $('connection-status').classList.add('ready');
-    appendOptions('host', facets.hosts);
-    appendOptions('share', facets.shares);
-    appendOptions('extension', facets.extensions);
-    appendOptions('rule', facets.rules || []);
-    appendOptions('triage', facets.triages || []);
-    appendOptions('permission', facets.permissions || []);
-    appendOptions('collection', facets.collections || []);
+    refreshFacets().catch(() => { /* Results remain usable while facets load. */ });
     state.rankingRuns = status.ranking_runs || [];
     state.rankingSignature = JSON.stringify(state.rankingRuns.map(run => [run.id, run.status, run.file_count]));
     appendRankingOptions(state.rankingRuns);

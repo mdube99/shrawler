@@ -352,6 +352,7 @@ class FileIndex:
         ranking_min: int = 0,
         sort: str = "path",
         direction: str = "asc",
+        include_total: bool = True,
     ) -> Dict[str, Any]:
         matches = self._matching(
             q, host, share, extension, rule, triage, permission, collection
@@ -941,8 +942,8 @@ class DatabaseIndex:
                 revision, q, host, share, extension, rule, triage, permission,
                 collection, ranking_run, ranking_category, ranking_min,
             )
-            total = self._total_cache.get(total_key)
-            if total is None:
+            total = self._total_cache.get(total_key) if include_total else None
+            if include_total and total is None:
                 total = int(
                     connection.execute(
                         "SELECT COUNT(*) FROM files" + joins + where, values
@@ -951,17 +952,35 @@ class DatabaseIndex:
                 if len(self._total_cache) >= 64:
                     self._total_cache.clear()
                 self._total_cache[total_key] = total
-            rows = connection.execute(
-                "SELECT files.*, "
-                + ranking_projection
-                + " FROM files"
-                + joins
-                + where
-                + order
-                + " LIMIT ? OFFSET ?",
-                (*values, per_page, start),
-            )
+            fetch_limit = per_page if include_total else per_page + 1
+            if sort == "priority" and ranking_run and not ranking_category:
+                priority_where = where
+                priority_values = values
+                rows = connection.execute(
+                    "SELECT files.*, ranking.run_id AS ranking_run_id, "
+                    "ranking.priority AS ranking_priority, ranking.priority AS ranking_score "
+                    "FROM triage.triage_files ranking INDEXED BY triage_priority "
+                    "JOIN files ON files.public_id=ranking.file_id "
+                    + priority_where
+                    + f" ORDER BY ranking.priority {direction.upper()}, "
+                    + f"files.file_name COLLATE NOCASE {direction.upper()}, "
+                    + f"files.public_id {direction.upper()} LIMIT ? OFFSET ?",
+                    (*priority_values, fetch_limit, start),
+                )
+            else:
+                rows = connection.execute(
+                    "SELECT files.*, "
+                    + ranking_projection
+                    + " FROM files"
+                    + joins
+                    + where
+                    + order
+                    + " LIMIT ? OFFSET ?",
+                    (*values, fetch_limit, start),
+                )
             rows = list(rows)
+            has_next = len(rows) > per_page if not include_total else start + per_page < total
+            rows = rows[:per_page]
             records = [self._record(row) for row in rows]
             self._apply_ranking(records, rows, ranking_category)
             items = [record.public() for record in self._enrich(records)]
@@ -970,7 +989,7 @@ class DatabaseIndex:
             "page": page,
             "per_page": per_page,
             "total": total,
-            "has_next": start + per_page < total,
+            "has_next": has_next,
         }
 
     def tree(
@@ -1488,13 +1507,13 @@ class WebHandler(BaseHTTPRequestHandler):
             if ranking_min < 0 or ranking_min > 100000:
                 self._error(400, "Invalid ranking minimum", "invalid_query")
                 return
-            ranking_args = (
+                ranking_args = (
                 filters[8],
                 filters[9],
                 ranking_min,
                 filters[11] or "path",
-                filters[12] or ("desc" if filters[11] == "priority" else "asc"),
-            )
+                    filters[12] or ("desc" if filters[11] == "priority" else "asc"),
+                )
             if parsed.path == "/api/tree/branch":
                 try:
                     self._json(
@@ -1519,6 +1538,7 @@ class WebHandler(BaseHTTPRequestHandler):
                         int(query.get("per_page", [str(state.index.page_size)])[0]),
                         *filters[4:8],
                         *ranking_args,
+                        query.get("include_total", ["0"])[0] == "1",
                     )
                 )
             except (ValueError, OverflowError):
