@@ -19,6 +19,7 @@
     total: 0,
     hasNext: false,
     items: [],
+    tableKey: '',
     selectedFiles: new Map(),
     transferActive: false,
     selectedId: null,
@@ -700,6 +701,7 @@
 
   async function searchTable({preserveContext = false} = {}) {
     if (tableController) tableController.abort();
+    const key = filterParams(true).toString();
     tableController = new AbortController();
     const request = tableController;
     setSearching(true);
@@ -709,11 +711,12 @@
       renderSkeleton();
     }
     try {
-      const data = await (await api(`/api/files?${filterParams(true)}`, {signal: request.signal})).json();
+      const data = await (await api(`/api/files?${key}`, {signal: request.signal})).json();
       state.items = data.items;
       state.total = data.total;
       state.perPage = data.per_page;
       state.hasNext = data.has_next;
+      state.tableKey = key;
       renderTable();
       renderPagination();
       const start = data.items.length ? (state.page - 1) * state.perPage + 1 : 0;
@@ -875,6 +878,7 @@
   }
 
   function setView(view) {
+    const changed = state.view !== view;
     if (view === 'tree' && tableController) tableController.abort();
     if (view === 'table' && treeController) treeController.abort();
     state.view = view;
@@ -887,7 +891,24 @@
     $('pagination').hidden = view !== 'table';
     $('tree-actions').hidden = view !== 'tree';
     $('density').hidden = view !== 'table';
-    refresh();
+    renderFilters();
+    renderSortHeaders();
+    if (!changed) {
+      refresh();
+    } else if (view === 'tree' && state.treeData && state.treeKey === filterParams(false).toString()) {
+      renderTree();
+      renderTreeSummary();
+      setSearching(false);
+    } else if (view === 'table' && state.items.length && state.tableKey === filterParams(true).toString()) {
+      renderTable();
+      renderPagination();
+      const start = (state.page - 1) * state.perPage + 1;
+      const end = start + state.items.length - 1;
+      $('summary').textContent = `${start.toLocaleString()}–${end.toLocaleString()} files${state.hasNext ? ' · more available' : ''}`;
+      setSearching(false);
+    } else {
+      view === 'tree' ? loadTree() : searchTable();
+    }
   }
 
   function closeObject() {
