@@ -530,6 +530,12 @@ def _web_parser() -> argparse.ArgumentParser:
     )
     web.add_argument("--port", type=int, default=8765)
     web.add_argument(
+        "--bind",
+        default="127.0.0.1",
+        metavar="ADDRESS",
+        help="address to listen on (default: 127.0.0.1; use 0.0.0.0 for all IPv4 interfaces)",
+    )
+    web.add_argument(
         "--token-auth",
         action="store_true",
         help="require a random bearer token for WebUI API requests (default: off)",
@@ -691,6 +697,7 @@ def main(argv: Optional[List[str]] = None) -> None:
             nemesis=nemesis,
             nemesis_max_bytes=options.nemesis_max_size,
             page_size=options.page_size,
+            bind=options.bind,
         )
         raise SystemExit(run(config, auth))
     if command in SCAN_MODES:

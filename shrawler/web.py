@@ -1351,6 +1351,7 @@ class WebConfig:
     preview_max_bytes: int
     download_max_bytes: int
     page_size: int
+    bind: str = "127.0.0.1"
     nemesis: Optional[NemesisConfig] = None
     nemesis_max_bytes: int = 50 * 1024**2
 
@@ -1358,8 +1359,14 @@ class WebConfig:
 class WebServer(ThreadingHTTPServer):
     daemon_threads = True
 
-    def __init__(self, address: Tuple[str, int], state: WebState) -> None:
+    def __init__(
+        self,
+        address: Tuple[str, int],
+        state: WebState,
+        allowed_hosts: Optional[Set[str]] = None,
+    ) -> None:
         self.state = state
+        self.allowed_hosts = allowed_hosts
         super().__init__(address, WebHandler)
 
 
@@ -1396,11 +1403,18 @@ class WebHandler(BaseHTTPRequestHandler):
     def _valid_host(self) -> bool:
         expected = str(self.server.server_port)
         raw = self.headers.get("Host", "")
-        return raw in {
+        loopback = {
             "127.0.0.1:" + expected,
             "localhost:" + expected,
             "[::1]:" + expected,
         }
+        if self.server.allowed_hosts is None:
+            return raw in loopback
+        try:
+            hostname, port = urllib.parse.urlsplit("//" + raw).hostname, urllib.parse.urlsplit("//" + raw).port
+        except ValueError:
+            return False
+        return port == self.server.server_port and hostname in self.server.allowed_hosts
 
     def _authorized(self) -> bool:
         if not self.server.state.token:
@@ -1410,7 +1424,7 @@ class WebHandler(BaseHTTPRequestHandler):
         )
 
     def _guard(self) -> bool:
-        if self.server.server_address[0] != "127.0.0.1" or not self._valid_host():
+        if not self._valid_host():
             self._error(400, "Invalid Host header", "invalid_host")
             return False
         if not self._authorized():
@@ -1856,8 +1870,14 @@ def run(config: WebConfig, auth: Optional[SMBAuth]) -> int:
         config.nemesis,
         config.nemesis_max_bytes,
     )
-    server = WebServer(("127.0.0.1", config.port), state)
-    url = f"http://127.0.0.1:{server.server_port}/"
+    allowed_hosts = None
+    if config.bind not in {"127.0.0.1", "localhost", "::1"}:
+        allowed_hosts = {config.bind}
+        if config.bind in {"0.0.0.0", "::"}:
+            allowed_hosts = None
+    server = WebServer((config.bind, config.port), state, allowed_hosts)
+    display_host = "127.0.0.1" if config.bind in {"0.0.0.0", "::"} else config.bind
+    url = f"http://{display_host}:{server.server_port}/"
     if token:
         url += f"#token={token}"
     print(
@@ -1899,7 +1919,10 @@ def run(config: WebConfig, auth: Optional[SMBAuth]) -> int:
 
         threading.Thread(target=optimize, name="shrawler-indexer", daemon=True).start()
         print(f"Optimizing inventory in background: {total_work} maintenance steps pending.", flush=True)
-    print("Local WebUI: " + url)
+    print(f"WebUI listening on {escape_terminal(config.bind)}:{server.server_port}")
+    print("Open WebUI: " + url)
+    if config.bind in {"0.0.0.0", "::"}:
+        print("Remote clients should replace 127.0.0.1 with this server's IP address or hostname.")
     if not token:
         print("WebUI token authentication is disabled; use --token-auth to enable it.")
     print(
