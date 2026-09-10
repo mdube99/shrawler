@@ -2,7 +2,7 @@
 
 import re
 from collections import OrderedDict
-from fnmatch import fnmatchcase
+from fnmatch import translate
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from .rules import RuleSet
@@ -39,10 +39,34 @@ class Engine:
                 self._needed_conditions.add(condition)
                 if condition in {"min_size_bytes", "max_size_bytes", "context_any"}:
                     prepared_when[condition] = expected
+                elif condition == "filename_glob_any":
+                    prepared_when[condition] = tuple(
+                        re.compile(translate(value.casefold())).match
+                        for value in expected
+                    )
+                elif condition.endswith("contains_any"):
+                    prepared_when[condition] = tuple(
+                        value.casefold() for value in expected
+                    )
                 else:
-                    prepared_when[condition] = tuple(value.casefold() for value in expected)
+                    prepared_when[condition] = frozenset(
+                        value.casefold() for value in expected
+                    )
             prepared["when"] = prepared_when
             self._rules.append(prepared)
+        self._contexts = []
+        for context in self.rules.document.get("contexts", []):
+            prepared = dict(context)
+            for key in ("directory_name_any", "directory_name_contains_any"):
+                if key in context:
+                    prepared[key] = tuple(value.casefold() for value in context[key])
+            if "host" in context:
+                prepared["host"] = context["host"].casefold()
+                prepared["share"] = context["share"].casefold()
+                prepared["path"] = tuple(
+                    part.casefold() for part in segments(context["path"])
+                )
+            self._contexts.append(prepared)
         self._cache: OrderedDict[
             Tuple[str, str, Tuple[str, ...]], List[Dict[str, Any]]
         ] = OrderedDict()
@@ -55,18 +79,18 @@ class Engine:
             self._cache.move_to_end(key)
             return self._cache[key]
         evidence: List[Dict[str, Any]] = []
-        for context in self.rules.document.get("contexts", []):
+        for context in self._contexts:
             depth = context["apply_to_descendants"]
             for distance in range(min(depth, len(parent)) + 1):
                 ancestor = parent[: len(parent) - distance]
                 witnesses: List[Dict[str, Any]] = []
                 if "directory_name_any" in context:
-                    match = bool(ancestor) and ancestor[-1].casefold() in {
-                        name.casefold() for name in context["directory_name_any"]
-                    }
+                    match = bool(ancestor) and ancestor[-1].casefold() in context[
+                        "directory_name_any"
+                    ]
                 elif "directory_name_contains_any" in context:
                     match = bool(ancestor) and any(
-                        term.casefold() in ancestor[-1].casefold()
+                        term in ancestor[-1].casefold()
                         for term in context["directory_name_contains_any"]
                     )
                 elif "sibling_name_any" in context:
@@ -75,10 +99,10 @@ class Engine:
                     match = bool(witnesses)
                 else:
                     match = (
-                        host.casefold() == context["host"].casefold()
-                        and share.casefold() == context["share"].casefold()
+                        host.casefold() == context["host"]
+                        and share.casefold() == context["share"]
                         and tuple(p.casefold() for p in ancestor)
-                        == tuple(p.casefold() for p in segments(context["path"]))
+                        == context["path"]
                     )
                 if match:
                     evidence.append(
@@ -155,16 +179,13 @@ class Engine:
                             if any(pattern in value for pattern in patterns)
                         ]
                     elif condition == "filename_glob_any":
-                        hits = (
-                        [
+                        hits = [
                             value
                             for value in values[condition]
-                            if any(fnmatchcase(value, pattern) for pattern in patterns)
+                            if any(pattern(value) for pattern in patterns)
                         ]
-                        )
                     else:
-                        pattern_set = set(patterns)
-                        hits = [value for value in values[condition] if value in pattern_set]
+                        hits = [value for value in values[condition] if value in patterns]
                     if condition.endswith("contains_any"):
                         evidence[condition + "_matched_terms"] = [
                             pattern

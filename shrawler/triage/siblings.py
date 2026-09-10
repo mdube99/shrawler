@@ -16,6 +16,9 @@ class SiblingIndex:
             for context in rules.document.get("contexts", [])
             if "sibling_name_any" in context
         ]
+        self._cache: Dict[
+            Tuple[str, str, Tuple[str, ...], str], List[Dict[str, Any]]
+        ] = {}
         connection.execute("PRAGMA temp_store=FILE")
         connection.execute("""CREATE TEMP TABLE sibling_markers (
             host TEXT, share TEXT, parent TEXT, context_id TEXT, pattern INTEGER,
@@ -56,12 +59,15 @@ class SiblingIndex:
     def lookup(
         self, host: str, share: str, parent: Tuple[str, ...], context: Dict[str, Any]
     ) -> List[Dict[str, Any]]:
+        key = (host.casefold(), share.casefold(), parent, context["id"])
+        if key in self._cache:
+            return self._cache[key]
         rows = self.connection.execute(
             "SELECT pattern,file_id,file_name FROM sibling_markers "
             "WHERE host=? AND share=? AND parent=? AND context_id=? ORDER BY pattern,file_id",
             (
-                host.casefold(),
-                share.casefold(),
+                key[0],
+                key[1],
                 "/" + "/".join(p.casefold() for p in parent),
                 context["id"],
             ),
@@ -88,11 +94,14 @@ class SiblingIndex:
         for index in candidates:
             assign(index, set())
             if len(assignments) >= context["minimum_distinct_patterns"]:
-                return [
+                evidence = [
                     {
                         "pattern": context["sibling_name_any"][pattern],
                         "file_name": names[identity],
                     }
                     for identity, pattern in sorted(assignments.items())
                 ]
+                self._cache[key] = evidence
+                return evidence
+        self._cache[key] = []
         return []

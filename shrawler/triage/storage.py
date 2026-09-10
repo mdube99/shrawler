@@ -7,6 +7,7 @@ import uuid
 from contextlib import closing
 from datetime import datetime, timezone
 from pathlib import Path
+from time import perf_counter
 from typing import Any, Callable, Dict, Iterator, List, Optional, Set, Tuple
 
 from .engine import ENGINE_VERSION, Engine
@@ -23,6 +24,8 @@ WEB_SORT_INDEXES = (
         "CREATE INDEX IF NOT EXISTS triage_category_web ON triage_categories(run_id, category, score DESC, file_id DESC)",
     ),
 )
+
+BATCH_SIZE = 10_000
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS triage_runs (
@@ -133,6 +136,8 @@ def rank(
     digest = hashlib.sha256()
     summary: Dict[str, Any] = {"positive_files": 0, "rule_matches": {}, "samples": []}
     sample_groups: Set[Tuple[str, str, str]] = set()
+    timings: Dict[str, float] = {}
+    started = perf_counter()
     # BEGIN pins all scan observations to a single SQLite read snapshot.
     with closing(connect_readonly(database)) as source:
         source.execute("BEGIN")
@@ -188,11 +193,13 @@ def rank(
                             raise KeyboardInterrupt
                         sibling_index.observe(metadata)
                         inventory_signals.observe(metadata)
-                        if indexed % 1000 == 0:
+                        if indexed % BATCH_SIZE == 0:
                             target.commit()
                         if on_phase and indexed % 10000 == 0:
                             on_phase("indexing sibling names", indexed)
+                timings["indexing_seconds"] = perf_counter() - started
                 engine = Engine(rules, sibling_index.lookup)
+                scoring_started = perf_counter()
                 if on_phase:
                     on_phase("scoring", 0)
                 file_rows = []
@@ -239,7 +246,7 @@ def rank(
                         )
                     )
                     count += 1
-                    if count % 1000 == 0:
+                    if count % BATCH_SIZE == 0:
                         target.executemany(
                             "INSERT INTO triage_files VALUES (?,?,?,?,?)", file_rows
                         )
@@ -273,6 +280,9 @@ def rank(
                     (utc_now(), count, digest.hexdigest(), run_id),
                 )
                 target.commit()
+                timings["scoring_and_saving_seconds"] = (
+                    perf_counter() - scoring_started
+                )
             except BaseException as exc:
                 target.rollback()
                 persisted = target.execute(
@@ -301,6 +311,7 @@ def rank(
         "inventory_hash": digest.hexdigest(),
         "results_database": str(destination),
         "summary": summary,
+        "timings": timings,
     }
 
 

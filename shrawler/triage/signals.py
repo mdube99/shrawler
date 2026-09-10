@@ -1,6 +1,5 @@
 """Snapshot-backed directory rarity and analyst feedback for offline ranking."""
 
-import json
 from collections import OrderedDict
 from contextlib import closing
 from pathlib import Path
@@ -14,15 +13,13 @@ class InventorySignals:
         self.db = db
         self.builtins = builtins
         self._directory_cache = OrderedDict()
-        self._review_cache = OrderedDict()
+        self._file_reviews = {}
+        self._family_reviews = {}
         db.executescript("""
             CREATE TEMP TABLE IF NOT EXISTS directory_extensions (
                 host TEXT,share TEXT,parent TEXT,extension TEXT,n INTEGER,
                 PRIMARY KEY(host,share,parent,extension));
             DELETE FROM directory_extensions;
-            CREATE TEMP TABLE IF NOT EXISTS review_snapshot (
-                scope TEXT,target TEXT,payload TEXT,PRIMARY KEY(scope,target));
-            DELETE FROM review_snapshot;
         """)
         review = database.with_name(database.stem + ".review.db")
         if review.exists():
@@ -30,13 +27,13 @@ class InventorySignals:
                 rows = source.execute("""SELECT * FROM review_events WHERE id IN
                     (SELECT MAX(id) FROM review_events WHERE undone=0 GROUP BY scope,target)""")
                 for row in rows:
-                    db.execute(
-                        "INSERT INTO review_snapshot VALUES (?,?,?)",
-                        (row["scope"], row["target"], json.dumps(dict(row))),
+                    event = dict(row)
+                    destination = (
+                        self._file_reviews
+                        if row["scope"] == "file"
+                        else self._family_reviews
                     )
-        self.has_reviews = bool(
-            db.execute("SELECT 1 FROM review_snapshot LIMIT 1").fetchone()
-        )
+                    destination[row["target"]] = event
 
     @staticmethod
     def key(metadata: Dict[str, Any]):
@@ -70,14 +67,17 @@ class InventorySignals:
                     directory,
                 ).fetchall()
                 counts = {row[0]: row[1] for row in rows}
+                counts[None] = (
+                    sum(counts.values()),
+                    max(counts.values(), default=0),
+                )
                 self._directory_cache[directory] = counts
                 if len(self._directory_cache) > 4096:
                     self._directory_cache.popitem(last=False)
             else:
                 self._directory_cache.move_to_end(directory)
-            total = sum(counts.values())
+            total, dominant = counts[None]
             matching = counts.get(key[3], 0)
-            dominant = max(counts.values(), default=0)
             if total >= 20 and matching * 20 <= total and dominant * 5 >= total * 4:
                 result["signals"].append(
                     {
@@ -102,24 +102,9 @@ class InventorySignals:
         result["family_id"] = family
         # An explicit file decision overrides a family decision. Undo exposes
         # the prior active decision; snapshots keep old rankings reproducible.
-        event = None
-        if self.has_reviews:
-            for scope, target in (("file", metadata["file_id"]), ("family", family)):
-                cache_key = (scope, target)
-                if cache_key in self._review_cache:
-                    event = self._review_cache[cache_key]
-                    self._review_cache.move_to_end(cache_key)
-                else:
-                    row = self.db.execute(
-                        "SELECT payload FROM review_snapshot WHERE scope=? AND target=?",
-                        cache_key,
-                    ).fetchone()
-                    event = json.loads(row[0]) if row else None
-                    self._review_cache[cache_key] = event
-                    if len(self._review_cache) > 8192:
-                        self._review_cache.popitem(last=False)
-                if event:
-                    break
+        event = self._file_reviews.get(metadata["file_id"])
+        if event is None:
+            event = self._family_reviews.get(family)
         result["review"] = event
         if event:
             result["unreviewed_priority"] = result["priority"]
