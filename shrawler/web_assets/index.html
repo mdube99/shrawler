@@ -122,15 +122,16 @@
   <dialog id="preview-dialog" class="preview-dialog">
     <div class="dialog-frame">
       <header class="dialog-header">
-        <div class="preview-heading"><span id="preview-tag" class="specimen-tag neutral">FILE</span><div><span class="dialog-label">Safe preview</span><h2 id="preview-title">File preview</h2></div></div>
-        <button id="close-preview" class="dialog-close" type="button" aria-label="Close preview"><svg aria-hidden="true" viewBox="0 0 24 24"><use href="#icon-close"></use></svg></button>
+        <div class="preview-heading"><span id="preview-tag" class="specimen-tag neutral">FILE</span><div><span class="dialog-label">Safe preview</span><h2 id="preview-title">File preview</h2><code id="preview-path"></code></div></div>
+        <div class="preview-window-actions"><button id="expand-preview" class="button" type="button">Expand</button><button id="close-preview" class="dialog-close" type="button" aria-label="Close preview"><svg aria-hidden="true" viewBox="0 0 24 24"><use href="#icon-close"></use></svg></button></div>
       </header>
+      <div id="preview-toolbar" class="preview-toolbar" hidden><label class="preview-search"><span class="sr-only">Find in file</span><input id="preview-find" type="search" placeholder="Find in file…" autocomplete="off"></label><span id="preview-find-status" aria-live="polite">No matches</span><button id="preview-find-prev" class="button" type="button" aria-label="Previous match">↑</button><button id="preview-find-next" class="button" type="button" aria-label="Next match">↓</button><span class="toolbar-spacer"></span><button id="preview-wrap" class="button active" type="button" aria-pressed="true">Wrap</button><button id="preview-font-down" class="button" type="button" aria-label="Decrease text size">A−</button><button id="preview-font-up" class="button" type="button" aria-label="Increase text size">A+</button></div>
       <div class="preview-stage">
         <div id="preview-loading" class="preview-loading"><span class="spinner" aria-hidden="true"></span><span>Loading preview…</span></div>
         <div id="preview-error" class="preview-error" hidden><strong>Preview failed</strong><p id="preview-message"></p><span>You can still download this file.</span></div>
-        <pre id="preview-text" hidden></pre><img id="preview-image" alt="File preview" hidden><iframe id="preview-pdf" title="PDF preview" sandbox hidden></iframe>
+        <ol id="preview-text" hidden></ol><div id="preview-image-shell" hidden><img id="preview-image" alt="File preview"><div class="image-controls"><button id="image-fit" class="button" type="button">Fit</button><button id="image-zoom-out" class="button" type="button" aria-label="Zoom out">−</button><span id="image-zoom">100%</span><button id="image-zoom-in" class="button" type="button" aria-label="Zoom in">+</button></div></div><iframe id="preview-pdf" title="PDF preview" sandbox hidden></iframe>
       </div>
-      <footer class="dialog-footer"><span id="preview-meta"></span><button id="preview-download" class="button primary" type="button"><svg aria-hidden="true" viewBox="0 0 24 24"><use href="#icon-download"></use></svg>Download</button></footer>
+      <footer class="dialog-footer"><span id="preview-meta"></span><div><button id="preview-copy" class="button" type="button" hidden>Copy text</button><button id="preview-download" class="button primary" type="button"><svg aria-hidden="true" viewBox="0 0 24 24"><use href="#icon-download"></use></svg>Download</button></div></footer>
     </div>
   </dialog>
 

@@ -49,6 +49,11 @@
   let objectUrl = null;
   let previewItem = null;
   let modalOpener = null;
+  let previewContent = '';
+  let previewMatches = [];
+  let previewMatchIndex = -1;
+  let previewFontSize = 12;
+  let imageZoom = 1;
   const treeCache = new Map();
 
   function localValue(key, fallback) {
@@ -364,6 +369,13 @@
     panel.setAttribute('role', 'region');
     panel.setAttribute('aria-label', `Details for ${item.file_name}`);
 
+    const header = element('header', 'detail-header');
+    const identity = element('div', 'detail-identity');
+    identity.append(specimenTag(item.extension), element('div', 'detail-title', item.file_name));
+    identity.append(element('div', 'detail-subtitle', `${item.readable_size || formatBytes(item.size_bytes)} · Modified ${formatDate(item.mtime_utc)}`));
+    const close = element('button', 'panel-close');
+    close.type = 'button'; close.setAttribute('aria-label', 'Close file details'); close.append(icon('close')); close.addEventListener('click', closeHandler);
+    header.append(identity, close);
     const paths = element('div', 'detail-paths');
     const uncField = element('div', 'metadata-field');
     uncField.append(element('dt', '', 'UNC path'));
@@ -379,18 +391,16 @@
     paths.append(uncField, metadataField('Remote path', item.remote_path));
 
     const evidence = element('div', 'detail-evidence');
-    evidence.append(metadataField('Indexed', formatDate(item.scan_timestamp_utc)));
     const matchNames = (item.rule_matches || []).map(match => `${match.rule_name || 'unnamed'}${match.triage ? ` · ${match.triage}` : ''}`);
+    evidence.append(metadataField('Ranking', item.ranking_run_id ? ratingText(item) : 'No ranking selected'));
     evidence.append(metadataField('Collection', statusLabel(item.collection_status)));
-    evidence.append(metadataField('Ranking', ratingText(item)));
-    evidence.append(metadataField('Evidence observation', formatDate(item.metadata_scan_timestamp_utc || item.scan_timestamp_utc)));
-    evidence.append(metadataField('Share-root listing', permissionLabel(item.permissions, 'read')));
-    evidence.append(metadataField('Share-root write-related access', permissionLabel(item.permissions, 'write')));
-    evidence.append(metadataField('Share add file', permissionLabel(item.permissions, 'add_file')));
-    evidence.append(metadataField('Share add directory', permissionLabel(item.permissions, 'add_subdirectory')));
-    evidence.append(metadataField('Share write DAC', permissionLabel(item.permissions, 'write_dac')));
-    evidence.append(metadataField('Share write owner', permissionLabel(item.permissions, 'write_owner')));
-    evidence.append(metadataField('Snaffler rules', matchNames.join(', ') || 'None'));
+    const rules = element('section', 'detail-rules');
+    rules.append(element('h3', '', 'Matched rules'), element('p', '', matchNames.join(' · ') || 'No Snaffler rules matched this file.'));
+    const technical = element('details', 'detail-technical');
+    technical.append(element('summary', '', 'Permissions and scan metadata'));
+    const technicalGrid = element('div', 'detail-technical-grid');
+    technicalGrid.append(metadataField('Indexed', formatDate(item.scan_timestamp_utc)), metadataField('Evidence observation', formatDate(item.metadata_scan_timestamp_utc || item.scan_timestamp_utc)), metadataField('List share root', permissionLabel(item.permissions, 'read')), metadataField('Write-related access', permissionLabel(item.permissions, 'write')), metadataField('Create files', permissionLabel(item.permissions, 'add_file')), metadataField('Create directories', permissionLabel(item.permissions, 'add_subdirectory')), metadataField('Modify ACL', permissionLabel(item.permissions, 'write_dac')), metadataField('Change owner', permissionLabel(item.permissions, 'write_owner')));
+    technical.append(technicalGrid);
 
     const actions = element('div', 'detail-actions');
     const canPreview = state.retrievalEnabled && previewable.has(item.extension);
@@ -404,11 +414,6 @@
     } else actions.append(previewButton);
     let downloadButton;
     downloadButton = actionButton('Download', 'download', 'primary', () => download(item, downloadButton));
-    const close = element('button', 'panel-close');
-    close.type = 'button';
-    close.setAttribute('aria-label', 'Close file details');
-    close.append(icon('close'));
-    close.addEventListener('click', closeHandler);
     previewButton.hidden = !state.retrievalEnabled;
     downloadButton.hidden = !state.retrievalEnabled;
     if (!state.retrievalEnabled && !state.nemesisEnabled) actions.prepend(element('span', 'unavailable-note', 'Offline session: remote retrieval disabled.'));
@@ -416,8 +421,8 @@
     nemesisButton = actionButton('Send to Nemesis', 'upload', 'button', () => sendToNemesis(item, nemesisButton));
     nemesisButton.disabled = !state.nemesisEnabled;
     nemesisButton.title = state.nemesisEnabled ? 'Retrieve and send this file; no browser download' : 'Configure Nemesis when starting Shrawler';
-    actions.append(downloadButton, nemesisButton, close);
-    panel.append(paths, evidence, actions);
+    actions.append(downloadButton, nemesisButton);
+    panel.append(header, paths, actions, evidence, rules, technical);
     return panel;
   }
 
@@ -921,15 +926,58 @@
   function resetPreview(item) {
     closeObject();
     $('preview-title').textContent = item.file_name;
+    $('preview-path').textContent = item.unc_path || item.remote_path || '';
     $('preview-tag').textContent = extensionLabel(item.extension);
     $('preview-tag').className = `specimen-tag ${riskTier(item.extension)}`;
     $('preview-meta').textContent = `${item.readable_size || formatBytes(item.size_bytes)}   ${formatDate(item.mtime_utc)}`;
     $('preview-text').textContent = '';
+    $('preview-toolbar').hidden = true;
+    $('preview-copy').hidden = true;
+    $('preview-find').value = '';
+    $('preview-find-status').textContent = 'No matches';
+    previewContent = ''; previewMatches = []; previewMatchIndex = -1;
+    previewFontSize = 12; imageZoom = 1;
     $('preview-text').hidden = true;
     $('preview-image').hidden = true;
+    $('preview-image-shell').hidden = true;
     $('preview-pdf').hidden = true;
     $('preview-error').hidden = true;
     $('preview-loading').hidden = false;
+  }
+
+  function renderPreviewText() {
+    const lines = previewContent.split('\n');
+    const fragment = document.createDocumentFragment();
+    lines.forEach(line => fragment.append(element('li', '', line || ' ')));
+    $('preview-text').replaceChildren(fragment);
+    $('preview-text').style.fontSize = `${previewFontSize}px`;
+  }
+
+  function findPreview(step = 0) {
+    const query = $('preview-find').value;
+    previewMatches = [];
+    if (query) {
+      const needle = query.toLocaleLowerCase();
+      [...$('preview-text').children].forEach((line, index) => {
+        if (line.textContent.toLocaleLowerCase().includes(needle)) previewMatches.push(index);
+      });
+    }
+    if (!previewMatches.length) previewMatchIndex = -1;
+    else if (step) previewMatchIndex = (previewMatchIndex + step + previewMatches.length) % previewMatches.length;
+    else previewMatchIndex = 0;
+    [...$('preview-text').children].forEach(line => line.classList.remove('search-match'));
+    if (previewMatchIndex >= 0) {
+      const line = $('preview-text').children[previewMatches[previewMatchIndex]];
+      line.classList.add('search-match'); line.scrollIntoView({block: 'center'});
+    }
+    $('preview-find-status').textContent = previewMatches.length ? `${previewMatchIndex + 1} of ${previewMatches.length}` : query ? 'No matches' : 'No search';
+  }
+
+  function setImageZoom(value) {
+    imageZoom = Math.min(4, Math.max(.25, value));
+    $('preview-image').style.width = `${imageZoom * 100}%`;
+    $('preview-image').style.maxWidth = imageZoom === 1 ? '100%' : 'none';
+    $('image-zoom').textContent = `${Math.round(imageZoom * 100)}%`;
   }
 
   async function openPreview(item) {
@@ -946,12 +994,15 @@
       const type = response.headers.get('content-type') || '';
       $('preview-loading').hidden = true;
       if (type.startsWith('application/json')) {
-        $('preview-text').textContent = (await response.json()).content;
+        previewContent = (await response.json()).content;
+        renderPreviewText();
         $('preview-text').hidden = false;
+        $('preview-toolbar').hidden = false;
+        $('preview-copy').hidden = false;
       } else {
         objectUrl = URL.createObjectURL(await response.blob());
         if (type === 'application/pdf') { $('preview-pdf').src = objectUrl; $('preview-pdf').hidden = false; }
-        else { $('preview-image').src = objectUrl; $('preview-image').alt = `Preview of ${item.file_name}`; $('preview-image').hidden = false; }
+        else { $('preview-image').src = objectUrl; $('preview-image').alt = `Preview of ${item.file_name}`; $('preview-image').hidden = false; $('preview-image-shell').hidden = false; setImageZoom(1); }
       }
     } catch (error) {
       if (error.name === 'AbortError') return;
@@ -967,6 +1018,8 @@
     if (previewController) previewController.abort();
     previewController = null;
     closeObject();
+    $('preview-dialog').classList.remove('expanded');
+    $('expand-preview').textContent = 'Expand';
     if (modalOpener && modalOpener.isConnected) modalOpener.focus();
     modalOpener = null;
   }
@@ -1143,6 +1196,27 @@
   $('expand-tree').addEventListener('click', expandAllBranches);
   $('collapse-tree').addEventListener('click', () => { state.expanded.clear(); state.selectedId = null; renderTree(); });
   $('close-preview').addEventListener('click', closePreview);
+  $('expand-preview').addEventListener('click', () => {
+    const expanded = $('preview-dialog').classList.toggle('expanded');
+    $('expand-preview').textContent = expanded ? 'Restore' : 'Expand';
+  });
+  $('preview-find').addEventListener('input', () => findPreview());
+  $('preview-find').addEventListener('keydown', event => {
+    if (event.key === 'Enter') { event.preventDefault(); findPreview(event.shiftKey ? -1 : 1); }
+  });
+  $('preview-find-prev').addEventListener('click', () => findPreview(-1));
+  $('preview-find-next').addEventListener('click', () => findPreview(1));
+  $('preview-wrap').addEventListener('click', () => {
+    const wrapped = !$('preview-text').classList.toggle('nowrap');
+    $('preview-wrap').classList.toggle('active', wrapped);
+    $('preview-wrap').setAttribute('aria-pressed', String(wrapped));
+  });
+  $('preview-font-down').addEventListener('click', () => { previewFontSize = Math.max(10, previewFontSize - 2); renderPreviewText(); });
+  $('preview-font-up').addEventListener('click', () => { previewFontSize = Math.min(18, previewFontSize + 2); renderPreviewText(); });
+  $('preview-copy').addEventListener('click', async () => { try { await navigator.clipboard.writeText(previewContent); showToast('Preview text copied'); } catch (_) { showToast('Clipboard unavailable', true); } });
+  $('image-fit').addEventListener('click', () => setImageZoom(1));
+  $('image-zoom-out').addEventListener('click', () => setImageZoom(imageZoom - .25));
+  $('image-zoom-in').addEventListener('click', () => setImageZoom(imageZoom + .25));
   $('preview-dialog').addEventListener('click', event => { if (event.target === $('preview-dialog')) closePreview(); });
   $('preview-dialog').addEventListener('close', cleanupPreview);
   $('preview-download').addEventListener('click', () => { if (previewItem) download(previewItem, $('preview-download')); });
@@ -1150,6 +1224,7 @@
   $('toast').addEventListener('mouseenter', () => clearTimeout(toastTimer));
   $('toast').addEventListener('mouseleave', () => { toastTimer = setTimeout(hideToast, 2000); });
   document.addEventListener('keydown', event => {
+    if ((event.ctrlKey || event.metaKey) && event.key.toLocaleLowerCase() === 'f' && $('preview-dialog').open && !$('preview-toolbar').hidden) { event.preventDefault(); $('preview-find').focus(); $('preview-find').select(); }
     if (event.key === '/' && !['INPUT', 'TEXTAREA', 'SELECT'].includes(document.activeElement.tagName) && !$('preview-dialog').open) { event.preventDefault(); $('query').focus(); }
     if (event.key === 'Escape' && state.selectedId && !$('preview-dialog').open) {
       const id = state.selectedId;
