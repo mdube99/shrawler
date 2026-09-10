@@ -26,6 +26,7 @@ WEB_SORT_INDEXES = (
 )
 
 BATCH_SIZE = 10_000
+SCHEMA_VERSION = 3
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS triage_runs (
@@ -149,12 +150,12 @@ def rank(
             target.execute("PRAGMA synchronous=NORMAL")
             target.execute("PRAGMA busy_timeout=5000")
             version = target.execute("PRAGMA user_version").fetchone()[0]
-            if version not in (0, 1, 2):
+            if version not in (0, 1, 2, 3):
                 raise ValueError(f"unsupported triage database version: {version}")
             target.executescript(SCHEMA)
             for _, statement in WEB_SORT_INDEXES:
                 target.execute(statement)
-            target.execute("PRAGMA user_version=2")
+            target.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
             target.execute(
                 "INSERT INTO triage_runs(id,source_path,scan_id,started_at,status,engine_version,rules_hash,rules_json,scan_json) "
                 "VALUES (?,?,?,?,?,?,?,?,?)",
@@ -236,8 +237,15 @@ def rank(
                             summary["rule_matches"].get(signal["rule_id"], 0) + 1
                         )
                     file_rows.append(
-                        (run_id, metadata["file_id"], evaluated["priority"], serialized,
-                         json.dumps(evaluated, sort_keys=True, separators=(",", ":")))
+                        (
+                            run_id,
+                            metadata["file_id"],
+                            evaluated["priority"],
+                            "" if output is None else serialized,
+                            json.dumps(
+                                evaluated, sort_keys=True, separators=(",", ":")
+                            ),
+                        )
                     )
                     category_rows.extend(
                         (
@@ -349,21 +357,28 @@ def list_results(
         raise ValueError("limit must be 1..10000 and minimum score must be nonnegative")
     with closing(connect_readonly(output or result_path(database))) as connection:
         run = select_run(connection, database, run_id)
+        connection.execute("ATTACH DATABASE ? AS inventory", (str(database.resolve()),))
         score = "c.score" if category else "f.priority"
         identifier = "c.file_id" if category else "f.file_id"
         query = (
             (
-                "SELECT f.*, c.score AS review_score FROM triage_categories c "
+                "SELECT f.*, COALESCE(NULLIF(f.metadata_json,''),json_set(sf.payload_json,'$.host',i.host,'$.share',i.share,'$.file_id',i.public_id)) AS resolved_metadata_json, c.score AS review_score FROM triage_categories c "
                 "JOIN triage_files f ON f.run_id=c.run_id AND f.file_id=c.file_id "
+                "LEFT JOIN inventory.files i ON i.public_id=f.file_id "
+                "LEFT JOIN inventory.scan_files sf ON sf.scan_id=? AND sf.file_id=i.id "
                 "WHERE c.run_id=? AND c.category=? AND c.score>=?"
             )
             if category
             else (
-                "SELECT f.*, f.priority AS review_score FROM triage_files f WHERE f.run_id=? AND f.priority>=?"
+                "SELECT f.*, COALESCE(NULLIF(f.metadata_json,''),json_set(sf.payload_json,'$.host',i.host,'$.share',i.share,'$.file_id',i.public_id)) AS resolved_metadata_json, f.priority AS review_score FROM triage_files f "
+                "LEFT JOIN inventory.files i ON i.public_id=f.file_id "
+                "LEFT JOIN inventory.scan_files sf ON sf.scan_id=? AND sf.file_id=i.id WHERE f.run_id=? AND f.priority>=?"
             )
         )
         values: List[Any] = (
-            [run["id"], category, min_score] if category else [run["id"], min_score]
+            [run["scan_id"], run["id"], category, min_score]
+            if category
+            else [run["scan_id"], run["id"], min_score]
         )
         if category == "extension-fallback":
             # Category membership is supplied by the zero-point extension rule.
@@ -380,7 +395,7 @@ def list_results(
         rows = list(connection.execute(query, (*values, limit + 1)))
         items = [
             {
-                **json.loads(row["metadata_json"]),
+                **json.loads(row["resolved_metadata_json"]),
                 **json.loads(row["result_json"]),
                 "review_score": row["review_score"],
             }
@@ -445,13 +460,17 @@ def explain(
 
     with closing(connect_readonly(result_path(database))) as connection:
         run = select_run(connection, database, run_id)
+        connection.execute("ATTACH DATABASE ? AS inventory", (str(database.resolve()),))
         row = connection.execute(
-            "SELECT * FROM triage_files WHERE run_id=? AND file_id=?",
-            (run["id"], file_id),
+            "SELECT f.*,COALESCE(NULLIF(f.metadata_json,''),json_set(sf.payload_json,'$.host',i.host,'$.share',i.share,'$.file_id',i.public_id)) AS resolved_metadata_json "
+            "FROM triage_files f LEFT JOIN inventory.files i ON i.public_id=f.file_id "
+            "LEFT JOIN inventory.scan_files sf ON sf.scan_id=? AND sf.file_id=i.id "
+            "WHERE f.run_id=? AND f.file_id=?",
+            (run["scan_id"], run["id"], file_id),
         ).fetchone()
         if row is None:
             raise ValueError("file ID was not present in the selected ranking run")
-        metadata = json.loads(row["metadata_json"])
+        metadata = json.loads(row["resolved_metadata_json"])
         result = json.loads(row["result_json"])
         # Stored results remain authoritative if an engine upgrade changes behavior.
         if run["engine_version"] == ENGINE_VERSION:
