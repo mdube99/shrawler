@@ -13,6 +13,17 @@ from .engine import ENGINE_VERSION, Engine
 from .rules import RuleSet
 from .siblings import SiblingIndex
 
+WEB_SORT_INDEXES = (
+    (
+        "triage_priority_web",
+        "CREATE INDEX IF NOT EXISTS triage_priority_web ON triage_files(run_id, priority DESC, file_id DESC)",
+    ),
+    (
+        "triage_category_web",
+        "CREATE INDEX IF NOT EXISTS triage_category_web ON triage_categories(run_id, category, score DESC, file_id DESC)",
+    ),
+)
+
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS triage_runs (
  id TEXT PRIMARY KEY, source_path TEXT NOT NULL, scan_id TEXT NOT NULL,
@@ -136,6 +147,8 @@ def rank(
             if version not in (0, 1, 2):
                 raise ValueError(f"unsupported triage database version: {version}")
             target.executescript(SCHEMA)
+            for _, statement in WEB_SORT_INDEXES:
+                target.execute(statement)
             target.execute("PRAGMA user_version=2")
             target.execute(
                 "INSERT INTO triage_runs(id,source_path,scan_id,started_at,status,engine_version,rules_hash,rules_json,scan_json) "

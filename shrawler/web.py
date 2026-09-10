@@ -19,11 +19,18 @@ from typing import Any, Callable, Dict, List, Optional, Tuple, cast
 from .collection import CollectionBusyError, CollectionQueue, smb_retriever
 from .nemesis import DeliveryStore, NemesisConfig
 from .output import escape_terminal
+from .search_index import (
+    available as search_index_available,
+    candidates as search_candidates,
+    ensure as ensure_search_index,
+    supported as search_index_supported,
+)
 from .smb import SMBAuth, close_smb, connect_smb
 from .store import SCHEMA_VERSION
 from .triage.review import ReviewStore
 from .triage.service import TriageBusyError, TriageService
 from .triage.storage import (
+    WEB_SORT_INDEXES,
     catalog as triage_catalog,
     explain as triage_explain,
     list_results as triage_list,
@@ -567,6 +574,39 @@ class DatabaseIndex:
         finally:
             connection.close()
 
+    def ensure_search_index(self) -> None:
+        connection = sqlite3.connect(self.path, timeout=60)
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            ensure_search_index(connection)
+            connection.commit()
+        finally:
+            connection.close()
+
+    def missing_ranking_indexes(self) -> List[Tuple[str, str]]:
+        with self._connect() as connection:
+            if not triage_result_path(self.path).is_file():
+                return []
+            existing = {
+                row[0]
+                for row in connection.execute(
+                    "SELECT name FROM triage.sqlite_master WHERE type='index'"
+                )
+            }
+        return [(name, sql) for name, sql in WEB_SORT_INDEXES if name not in existing]
+
+    def ensure_ranking_indexes(self) -> None:
+        missing = self.missing_ranking_indexes()
+        if not missing:
+            return
+        connection = sqlite3.connect(triage_result_path(self.path), timeout=60)
+        try:
+            for _, statement in missing:
+                connection.execute(statement)
+            connection.commit()
+        finally:
+            connection.close()
+
     def _connect(self) -> sqlite3.Connection:
         connection = sqlite3.connect(self.path, timeout=5)
         connection.row_factory = sqlite3.Row
@@ -921,7 +961,18 @@ class DatabaseIndex:
         if ranking_run and ranking_min > 0:
             where = where.replace("ranking_score >= ?", f"{ranking_score} >= ?")
         ranking_source = "files" + joins
+        ranking_order_id = "files.public_id"
         if sort == "priority" and ranking_run and direction == "desc":
+            # These are inner joins: the indexed score is never NULL. Using
+            # COALESCE or the inventory's ID in ORDER BY forces a temporary sort.
+            indexed_score = (
+                "ranking_category.score" if ranking_category else "ranking.priority"
+            )
+            where = where.replace(ranking_score, indexed_score)
+            ranking_order_id = (
+                "ranking_category.file_id" if ranking_category else "ranking.file_id"
+            )
+            ranking_score = indexed_score
             if ranking_category:
                 ranking_source = (
                     "triage.triage_categories ranking_category "
@@ -975,13 +1026,36 @@ class DatabaseIndex:
             + ", ".join(
                 f"{column} {direction.upper()}" for column in sort_columns[sort]
             )
-            + f", files.public_id {direction.upper()}"
+            + f", {ranking_order_id} {direction.upper()}"
         )
         per_page = min(max(per_page, 1), self.page_size, 500)
         page = max(page, 1)
         start = (page - 1) * per_page
         revision = 0
         with self._connect() as connection:
+            # The candidate probe and result query must observe the same scan
+            # revision, including while the scanner commits new files.
+            connection.execute("BEGIN")
+            candidate_ids = search_candidates(connection, q)
+            if candidate_ids is not None:
+                if ranking_order_id != "files.public_id":
+                    # SQLite otherwise favors walking the entire score index,
+                    # even for a handful of candidate IDs. CROSS JOIN pins the
+                    # bounded inventory lookups as the outer loop.
+                    ranking_source = (
+                        "files CROSS JOIN triage.triage_files ranking"
+                        " ON ranking.file_id=files.public_id"
+                    )
+                    if ranking_category:
+                        ranking_source += (
+                            " CROSS JOIN triage.triage_categories ranking_category"
+                            " ON ranking_category.run_id=ranking.run_id"
+                            " AND ranking_category.file_id=ranking.file_id"
+                        )
+                where += (" AND " if where else " WHERE ") + (
+                    "files.id IN (SELECT value FROM json_each(?))"
+                )
+                values.append(json.dumps(candidate_ids))
             revision_row = connection.execute(
                 "SELECT value FROM metadata WHERE key='revision'"
             ).fetchone()
@@ -994,7 +1068,7 @@ class DatabaseIndex:
             if include_total and total is None:
                 total = int(
                     connection.execute(
-                        "SELECT COUNT(*) FROM files" + joins + where, values
+                        "SELECT COUNT(*) FROM " + ranking_source + where, values
                     ).fetchone()[0]
                 )
                 if len(self._total_cache) >= 64:
@@ -1012,7 +1086,9 @@ class DatabaseIndex:
                 (*values, fetch_limit, start),
             )
             rows = list(rows)
-            has_next = len(rows) > per_page if not include_total else start + per_page < total
+            has_next = (
+                len(rows) > per_page if total is None else start + per_page < total
+            )
             rows = rows[:per_page]
             records = [self._record(row) for row in rows]
             self._apply_ranking(records, rows, ranking_category)
@@ -1884,15 +1960,27 @@ def run(config: WebConfig, auth: Optional[SMBAuth]) -> int:
         f"Loaded {index.status()['file_count']} files from {escape_terminal(index.path)}"
     )
     missing = index.missing_sort_indexes()
+    ranking_missing = index.missing_ranking_indexes()
     evidence_missing = False
     with index._connect() as connection:
+        search_missing = not search_index_available(connection)
         evidence_missing = any(
             "remote_path_key" not in {row[1] for row in connection.execute(f"PRAGMA table_info({table})")}
             or connection.execute(f"SELECT 1 FROM {table} WHERE remote_path_key IS NULL LIMIT 1").fetchone()
             for table in ("snaffler_matches", "downloads")
         )
-    if missing or evidence_missing:
-        total_work = len(missing) + (2 if evidence_missing else 0)
+    if search_missing and not search_index_supported():
+        search_missing = False
+        print(
+            "Substring search indexing unavailable: SQLite needs FTS5 with the trigram tokenizer. Using scan-based search."
+        )
+    if missing or evidence_missing or search_missing or ranking_missing:
+        total_work = (
+            len(missing)
+            + (2 if evidence_missing else 0)
+            + int(search_missing)
+            + len(ranking_missing)
+        )
         state.index_status.update(status="pending", completed=0, total=total_work)
 
         def optimize() -> None:
@@ -1902,12 +1990,25 @@ def run(config: WebConfig, auth: Optional[SMBAuth]) -> int:
                 state.index_status.update(
                     status="running", current=label, completed=position - 1, total=total
                 )
-                print(f"Optimizing inventory [{position}/{total}]: building {label} sort index…", flush=True)
+                print(
+                    f"Optimizing inventory [{position}/{total}]: building {label} index…",
+                    flush=True,
+                )
 
             try:
                 if evidence_missing:
                     index.ensure_evidence_indexes(progress)
                 index.ensure_sort_indexes(progress)
+                if ranking_missing:
+                    progress(
+                        "ranking order", total_work - int(search_missing), total_work
+                    )
+                    index.ensure_ranking_indexes()
+                if search_missing:
+                    progress(
+                        "substring search (one-time backfill)", total_work, total_work
+                    )
+                    index.ensure_search_index()
                 state.index_status.update(
                     status="completed", current="", completed=total_work, total=total_work,
                     elapsed_seconds=round(time.monotonic() - started, 1),

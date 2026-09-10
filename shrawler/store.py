@@ -15,6 +15,7 @@ from typing import Any, Dict, Iterable, List, Optional, Set, Tuple, cast
 
 from .coverage import DirectoryCoverage
 from .output import safe_csv_row
+from .search_index import ensure as ensure_search_index, supported as search_supported
 
 SCHEMA_VERSION = 1
 
@@ -243,6 +244,13 @@ class ScanStore:
         )
         self.connection.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
         self.connection.commit()
+        # New inventories stay indexed as they grow. Existing large inventories
+        # are backfilled by the WebUI's background maintenance worker.
+        if (
+            not self.connection.execute("SELECT 1 FROM files LIMIT 1").fetchone()
+            and search_supported()
+        ):
+            ensure_search_index(self.connection)
 
     def _select_resume(self, value: str, mode: str) -> Tuple[str, str, str]:
         if value:
