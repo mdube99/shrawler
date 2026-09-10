@@ -1363,7 +1363,7 @@ class WebServer(ThreadingHTTPServer):
         self,
         address: Tuple[str, int],
         state: WebState,
-        allowed_hosts: Optional[Set[str]] = None,
+        allowed_hosts: Optional[set[str]] = None,
     ) -> None:
         self.state = state
         self.allowed_hosts = allowed_hosts
