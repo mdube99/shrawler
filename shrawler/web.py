@@ -920,6 +920,28 @@ class DatabaseIndex:
         values = join_values + where_values
         if ranking_run and ranking_min > 0:
             where = where.replace("ranking_score >= ?", f"{ranking_score} >= ?")
+        ranking_source = "files" + joins
+        if sort == "priority" and ranking_run and direction == "desc":
+            if ranking_category:
+                ranking_source = (
+                    "triage.triage_categories ranking_category "
+                    "JOIN triage.triage_files ranking"
+                    " ON ranking.run_id=ranking_category.run_id"
+                    " AND ranking.file_id=ranking_category.file_id "
+                    "JOIN files ON files.public_id=ranking.file_id"
+                )
+                values = [ranking_run, ranking_category, *where_values]
+            else:
+                ranking_source = (
+                    "triage.triage_files ranking "
+                    "JOIN files ON files.public_id=ranking.file_id"
+                )
+                values = [ranking_run, *where_values]
+            where = (
+                " WHERE ranking.run_id=?"
+                + (" AND ranking_category.category=?" if ranking_category else "")
+                + (" AND " + where[7:] if where else "")
+            )
         sort_columns = {
             "path": [
                 "files.host COLLATE NOCASE",
@@ -940,7 +962,7 @@ class DatabaseIndex:
                 "files.share COLLATE NOCASE",
                 "files.remote_path COLLATE NOCASE",
             ],
-            "priority": [ranking_score, "files.remote_path COLLATE NOCASE"],
+            "priority": [ranking_score],
             "size": ["files.size_bytes", "files.file_name COLLATE NOCASE"],
             "modified": ["files.mtime_utc", "files.file_name COLLATE NOCASE"],
         }
@@ -982,8 +1004,8 @@ class DatabaseIndex:
             rows = connection.execute(
                 "SELECT files.*, "
                 + ranking_projection
-                + " FROM files"
-                + joins
+                + " FROM "
+                + ranking_source
                 + where
                 + order
                 + " LIMIT ? OFFSET ?",
@@ -1036,6 +1058,9 @@ class DatabaseIndex:
         joins, join_values, ranking_score = self._ranking_join(
             ranking_run, ranking_category
         )
+        omit_ranking_join = ranking_run and ranking_min == 0 and not ranking_category
+        if omit_ranking_join:
+            joins, join_values = "", []
         values = join_values + where_values
         if ranking_run and ranking_min > 0:
             where = where.replace("ranking_score >= ?", f"{ranking_score} >= ?")
@@ -1108,15 +1133,20 @@ class DatabaseIndex:
         if ranking_run and ranking_min > 0:
             where = where.replace("ranking_score >= ?", f"{ranking_score} >= ?")
         if not share:
+            aggregate_joins = joins
+            aggregate_values = values
+            if ranking_run and ranking_min == 0 and not ranking_category:
+                aggregate_joins = ""
+                aggregate_values = where_values
             with self._connect() as connection:
                 rows = list(
                     connection.execute(
                         "SELECT files.share AS name, COUNT(*) AS file_count, "
                         "COALESCE(SUM(size_bytes), 0) AS size_bytes FROM files"
-                        + joins
+                        + aggregate_joins
                         + where
                         + " GROUP BY share ORDER BY share COLLATE NOCASE",
-                        values,
+                        aggregate_values,
                     )
                 )
             return {
@@ -1136,6 +1166,16 @@ class DatabaseIndex:
 
         normalized_parent = parent.replace("\\", "/").rstrip("/") or "/"
         prefix = "/" if normalized_parent == "/" else normalized_parent + "/"
+        subtree_clause = (
+            "(files.parent_path=? OR files.parent_path LIKE ? ESCAPE '\\')"
+        )
+        escaped_parent = (
+            normalized_parent.replace("\\", "\\\\")
+            .replace("%", "\\%")
+            .replace("_", "\\_")
+        )
+        where += (" AND " if where else " WHERE ") + subtree_clause
+        values.extend((normalized_parent, escaped_parent.rstrip("/") + "/%"))
         folders: Dict[str, Dict[str, Any]] = {}
         files: List[FileRecord] = []
         with self._connect() as connection:
