@@ -121,6 +121,29 @@ class Engine:
             self._cache.popitem(last=False)
         return evidence
 
+    @staticmethod
+    def _condition_matches(
+        condition: str,
+        expected: Any,
+        values: Dict[str, Any],
+        metadata: Dict[str, Any],
+    ) -> bool:
+        """Boolean-only condition check; evidence is rebuilt later for matched rules."""
+        if condition in {"min_size_bytes", "max_size_bytes"}:
+            actual = metadata["size_bytes"]
+            return actual >= expected if condition == "min_size_bytes" else actual <= expected
+        if condition.endswith("contains_any"):
+            for value in values[condition]:
+                for pattern in expected:
+                    if pattern in value:
+                        return True
+            return False
+        if condition == "filename_glob_any":
+            value = values[condition][0]
+            return any(pattern(value) for pattern in expected)
+        # Set membership (single value, or multiple tags in context_any).
+        return any(value in expected for value in values[condition])
+
     def evaluate(
         self,
         metadata: Dict[str, Any],
@@ -159,46 +182,14 @@ class Engine:
         diagnostics: List[Dict[str, Any]] = []
         groups: Dict[Tuple[str, str], int] = {}
         for rule in self._rules:
-            evidence: Dict[str, Any] = {}
+            # Cheap boolean pass first; most rules fail early and never pay
+            # for evidence construction below.
             failures: List[str] = []
             for condition, expected in rule["when"].items():
-                if condition in {"min_size_bytes", "max_size_bytes"}:
-                    actual = metadata["size_bytes"]
-                    matched = (
-                        actual >= expected
-                        if condition == "min_size_bytes"
-                        else actual <= expected
-                    )
-                    evidence[condition] = actual
-                else:
-                    patterns = expected
-                    if condition.endswith("contains_any"):
-                        hits = [
-                            value
-                            for value in values[condition]
-                            if any(pattern in value for pattern in patterns)
-                        ]
-                    elif condition == "filename_glob_any":
-                        hits = [
-                            value
-                            for value in values[condition]
-                            if any(pattern(value) for pattern in patterns)
-                        ]
-                    else:
-                        hits = [value for value in values[condition] if value in patterns]
-                    if condition.endswith("contains_any"):
-                        evidence[condition + "_matched_terms"] = [
-                            pattern
-                            for pattern in patterns
-                            if any(pattern in value for value in hits)
-                        ]
-                    matched = bool(hits)
-                    evidence[condition] = hits
-                    if condition == "context_any":
-                        evidence["context_sources"] = [
-                            c for c in context if c["tag"] in hits
-                        ]
-                if not matched:
+                failure = not self._condition_matches(
+                    condition, expected, values, metadata
+                )
+                if failure:
                     failures.append(condition)
                     if not explain_all:
                         break
@@ -212,6 +203,35 @@ class Engine:
                 )
             if failures:
                 continue
+            evidence: Dict[str, Any] = {}
+            for condition, expected in rule["when"].items():
+                if condition in {"min_size_bytes", "max_size_bytes"}:
+                    evidence[condition] = metadata["size_bytes"]
+                elif condition.endswith("contains_any"):
+                    hits = [
+                        value
+                        for value in values[condition]
+                        if any(pattern in value for pattern in expected)
+                    ]
+                    evidence[condition] = hits
+                    evidence[condition + "_matched_terms"] = [
+                        pattern
+                        for pattern in expected
+                        if any(pattern in value for value in hits)
+                    ]
+                elif condition == "filename_glob_any":
+                    value = values[condition][0]
+                    evidence[condition] = [
+                        value
+                    ] if any(pattern(value) for pattern in expected) else []
+                else:
+                    value_list = values[condition]
+                    hits = [value for value in value_list if value in expected]
+                    evidence[condition] = hits
+                    if condition == "context_any":
+                        evidence["context_sources"] = [
+                            c for c in context if c["tag"] in hits
+                        ]
             group = (rule["category"], rule["signal_group"])
             groups[group] = max(groups.get(group, 0), rule["points"])
             signals.append(

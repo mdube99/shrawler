@@ -66,6 +66,10 @@ def connect_readonly(path: Path) -> sqlite3.Connection:
     connection = sqlite3.connect(path.resolve().as_uri() + "?mode=ro", uri=True)
     connection.row_factory = sqlite3.Row
     connection.execute("PRAGMA query_only=ON")
+    # Large streamed joins (observations, review build) benefit directly.
+    connection.execute("PRAGMA cache_size=-262144")  # 256 MiB page cache
+    connection.execute("PRAGMA mmap_size=1073741824")
+    connection.execute("PRAGMA temp_store=MEMORY")
     return connection
 
 
@@ -94,7 +98,13 @@ def select_scan(
     return rows[0]
 
 
-def observations(source: sqlite3.Connection, scan_id: str) -> Iterator[Dict[str, Any]]:
+def observables(
+    source: sqlite3.Connection, scan_id: str, skip: int = 0
+) -> Iterator[Tuple[Dict[str, Any], str]]:
+    """Stream (metadata, raw payload) pairs; raw bytes feed the digest without a re-serialize.
+
+    `skip` discards the first N rows (already staged elsewhere) without parsing them.
+    """
     rows = source.execute(
         "SELECT f.public_id, h.host, s.name AS share, sf.payload_json "
         "FROM scan_files sf JOIN files f ON f.id=sf.file_id "
@@ -103,13 +113,14 @@ def observations(source: sqlite3.Connection, scan_id: str) -> Iterator[Dict[str,
         (scan_id,),
     )
     for row in rows:
-        payload = json.loads(row["payload_json"])
-        metadata = {
-            **payload,
-            "host": row["host"],
-            "share": row["share"],
-            "file_id": row["public_id"],
-        }
+        if skip:
+            skip -= 1
+            continue
+        payload = row["payload_json"]
+        metadata = json.loads(payload)
+        metadata.update(
+            {"host": row["host"], "share": row["share"], "file_id": row["public_id"]}
+        )
         for field in ("file_name", "remote_path", "unc_path"):
             if not isinstance(metadata.get(field), str):
                 raise ValueError(f"invalid scan observation: missing {field}")
@@ -117,7 +128,49 @@ def observations(source: sqlite3.Connection, scan_id: str) -> Iterator[Dict[str,
             raise ValueError(
                 "invalid scan observation: size_bytes must be a nonnegative integer"
             )
+        yield metadata, payload
+
+
+def observations(source: sqlite3.Connection, scan_id: str) -> Iterator[Dict[str, Any]]:
+    for metadata, _raw in observables(source, scan_id):
         yield metadata
+
+
+def digest_value(metadata: Dict[str, Any], raw: str) -> bytes:
+    """Deterministic run digest: stored payload plus the injected keys, no re-serialize."""
+    return (
+        " ".join(
+            (
+                metadata["host"],
+                metadata["share"],
+                metadata["file_id"],
+                raw,
+            )
+        ).encode()
+        + b"\n"
+    )
+
+
+def _lean_zero_result(evaluated: Dict[str, Any]) -> str:
+    """Minimal, valid result JSON for priority-0 files with no signals of their own.
+
+    Derived snapshots stay rebuildable; the web views merge these keys exactly
+    like a full result, and a later review event still lands via json_set.
+    """
+    return json.dumps(
+        {
+            "priority": 0,
+            "category_scores": {},
+            "evidence_type": "metadata_only",
+            "signals": [],
+            "contexts": [],
+            "family_id": evaluated["family_id"],
+            "review": evaluated["review"],
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+
 
 
 def rank(
@@ -184,34 +237,19 @@ def rank(
                         for rule in rules.document.get("rules", [])
                     ),
                 )
-                if sibling_index.contexts or inventory_signals.builtins:
-                    if on_phase:
-                        on_phase("indexing sibling names", 0)
-                    for indexed, metadata in enumerate(
-                        observations(source, scan["id"]), 1
-                    ):
-                        if cancelled and cancelled():
-                            raise KeyboardInterrupt
-                        sibling_index.observe(metadata)
-                        inventory_signals.observe(metadata)
-                        if indexed % BATCH_SIZE == 0:
-                            target.commit()
-                        if on_phase and indexed % 10000 == 0:
-                            on_phase("indexing sibling names", indexed)
-                timings["indexing_seconds"] = perf_counter() - started
+                indexing_needed = bool(
+                    sibling_index.contexts or inventory_signals.builtins
+                )
+                if indexing_needed and on_phase:
+                    on_phase("indexing sibling names", 0)
+
                 engine = Engine(rules, sibling_index.lookup)
-                scoring_started = perf_counter()
-                if on_phase:
-                    on_phase("scoring", 0)
-                file_rows = []
-                category_rows = []
-                for metadata in observations(source, scan["id"]):
+
+                def score(metadata: Dict[str, Any], raw: str) -> None:
+                    nonlocal count
                     if cancelled and cancelled():
                         raise KeyboardInterrupt
-                    serialized = json.dumps(
-                        metadata, sort_keys=True, separators=(",", ":")
-                    )
-                    digest.update(serialized.encode() + b"\n")
+                    digest.update(digest_value(metadata, raw))
                     evaluated = engine.evaluate(metadata)
                     inventory_signals.apply(metadata, evaluated)
                     if evaluated["priority"] > 0:
@@ -236,43 +274,98 @@ def rank(
                         summary["rule_matches"][signal["rule_id"]] = (
                             summary["rule_matches"].get(signal["rule_id"], 0) + 1
                         )
+                    if evaluated["priority"] == 0 and not evaluated["signals"]:
+                        result_json = _lean_zero_result(evaluated)
+                    else:
+                        result_json = json.dumps(
+                            evaluated, sort_keys=True, separators=(",", ":")
+                        )
                     file_rows.append(
                         (
                             run_id,
                             metadata["file_id"],
                             evaluated["priority"],
-                            "" if output is None else serialized,
-                            json.dumps(
-                                evaluated, sort_keys=True, separators=(",", ":")
+                            ""
+                            if output is None
+                            else json.dumps(
+                                metadata, sort_keys=True, separators=(",", ":")
                             ),
+                            result_json,
                         )
                     )
                     category_rows.extend(
                         (
-                            (run_id, metadata["file_id"], category, score)
-                            for category, score in evaluated["category_scores"].items()
+                            (run_id, metadata["file_id"], category, score_value)
+                            for category, score_value in evaluated[
+                                "category_scores"
+                            ].items()
                         )
                     )
                     count += 1
                     if count % BATCH_SIZE == 0:
-                        target.executemany(
-                            "INSERT INTO triage_files VALUES (?,?,?,?,?)", file_rows
-                        )
-                        target.executemany(
-                            "INSERT INTO triage_categories VALUES (?,?,?,?)",
-                            category_rows,
-                        )
-                        file_rows.clear()
-                        category_rows.clear()
-                        target.execute(
-                            "UPDATE triage_runs SET file_count=? WHERE id=?",
-                            (count, run_id),
-                        )
-                        target.commit()
-                    if progress and count % 10000 == 0:
-                        progress(count)
-                    if on_phase and count % 10000 == 0:
-                        on_phase("scoring", count)
+                        batch_write()
+                        if progress:
+                            progress(count)
+                        if on_phase:
+                            on_phase("scoring", count)
+
+                if on_phase:
+                    on_phase("scoring", 0)
+                file_rows = []
+                category_rows = []
+
+                def batch_write() -> None:
+                    target.executemany(
+                        "INSERT INTO triage_files VALUES (?,?,?,?,?)", file_rows
+                    )
+                    target.executemany(
+                        "INSERT INTO triage_categories VALUES (?,?,?,?)",
+                        category_rows,
+                    )
+                    file_rows.clear()
+                    category_rows.clear()
+                    target.execute(
+                        "UPDATE triage_runs SET file_count=? WHERE id=?",
+                        (count, run_id),
+                    )
+                    target.commit()
+
+                scoring_started = perf_counter()
+                stream = observables(source, scan["id"])
+                if indexing_needed:
+                    if on_phase:
+                        on_phase("indexing sibling names", 0)
+                    # Single pass: observations are consumed once for indexing
+                    # and score in the same stream; the leading batch stays
+                    # alive in memory so it is not parsed a second time.
+                    staged: List[Tuple[Dict[str, Any], str]] = []
+                    for indexed, (metadata, raw) in enumerate(stream, 1):
+                        if cancelled and cancelled():
+                            raise KeyboardInterrupt
+                        sibling_index.observe(metadata)
+                        inventory_signals.observe(metadata)
+                        if len(staged) < BATCH_SIZE:
+                            staged.append((metadata, raw))
+                        if indexed % BATCH_SIZE == 0:
+                            sibling_index.flush()
+                            inventory_signals.flush()
+                            target.commit()
+                        if on_phase and indexed % 10000 == 0:
+                            on_phase("indexing sibling names", indexed)
+                    sibling_index.flush()
+                    inventory_signals.flush()
+                    target.commit()
+                    timings["indexing_seconds"] = perf_counter() - started
+                    for metadata, raw in staged:
+                        score(metadata, raw)
+                    # Second cursor; the staged prefix is skipped unparsed.
+                    for metadata, raw in observables(
+                        source, scan["id"], skip=BATCH_SIZE
+                    ):
+                        score(metadata, raw)
+                else:
+                    for metadata, raw in stream:
+                        score(metadata, raw)
                 target.executemany(
                     "INSERT INTO triage_files VALUES (?,?,?,?,?)", file_rows
                 )

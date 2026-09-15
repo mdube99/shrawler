@@ -67,7 +67,7 @@ class DirectoryCoverage:
                 "INSERT OR IGNORE INTO scan_scope VALUES (?,?)",
                 (self.store.scan_id, json.dumps(values)),
             )
-            self.store._touch(force=True)
+            self.store._touch()
 
     def mark(
         self,
@@ -94,7 +94,10 @@ class DirectoryCoverage:
                     utc_now(),
                 ),
             )
-            self.store._touch(force=True)
+            # Durability: the writer's 1 s commit thread plus explicit
+            # flush() at host/share boundaries cover this; one commit per
+            # SMB directory listing was measurable overhead only.
+            self.store._touch()
 
     def cached(self, host: str, share: str, path: str) -> Optional[List[SavedEntry]]:
         with self.store._lock:
@@ -125,7 +128,10 @@ class DirectoryCoverage:
             for e in entries
             if e.get_longname() not in (".", "..")
         ]
-        # Listing and discovered child work commit together before file processing.
+        # Listing and discovered child work commit together before file
+        # processing — resume must never re-list a completed directory after
+        # an interrupt, so this stays an explicit durable commit. The pending
+        # child inserts ride along in the same transaction, batched.
         with self.store._lock:
             self.store.connection.execute(
                 """INSERT INTO directory_work VALUES (?,?,?,?,?,'listed',?,NULL,?)
@@ -141,20 +147,22 @@ class DirectoryCoverage:
                     utc_now(),
                 ),
             )
-            for entry in payload:
-                if entry["directory"]:
-                    self.store.connection.execute(
-                        """INSERT OR IGNORE INTO directory_work
-                        VALUES (?,?,?,?,?,'pending',NULL,NULL,?)""",
-                        (
-                            self.store.scan_id,
-                            host,
-                            share,
-                            canonical(path + "/" + entry["name"]),
-                            depth + 1,
-                            utc_now(),
-                        ),
+            self.store.connection.executemany(
+                """INSERT OR IGNORE INTO directory_work
+                VALUES (?,?,?,?,?,'pending',NULL,NULL,?)""",
+                (
+                    (
+                        self.store.scan_id,
+                        host,
+                        share,
+                        canonical(path + "/" + entry["name"]),
+                        depth + 1,
+                        utc_now(),
                     )
+                    for entry in payload
+                    if entry["directory"]
+                ),
+            )
             self.store._touch(force=True)
 
     def outstanding(

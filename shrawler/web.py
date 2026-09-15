@@ -7,6 +7,7 @@ import re
 import secrets
 import shutil
 import sqlite3
+import sys
 import tempfile
 import threading
 import time
@@ -1434,6 +1435,13 @@ class WebConfig:
 
 class WebServer(ThreadingHTTPServer):
     daemon_threads = True
+
+    def handle_error(self, request: Any, client_address: Tuple[str, int]) -> None:
+        _type, error, _traceback = sys.exc_info()
+        if isinstance(error, (BrokenPipeError, ConnectionResetError)):
+            logging.debug("Client disconnected while sending response to %s:%s", *client_address)
+            return
+        super().handle_error(request, client_address)
 
     def __init__(
         self,

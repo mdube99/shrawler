@@ -7,7 +7,7 @@ import re
 import sqlite3
 from contextlib import closing
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from ..output import escape_terminal
 from .storage import connect_readonly, observations, select_scan, utc_now
@@ -61,12 +61,24 @@ class ReviewStore:
             scan = select_scan(source, scan_id)
             db.execute("DELETE FROM family_members WHERE scan_id=?", (scan["id"],))
             count = 0
+            buffer: List[Tuple[Any, ...]] = []
             for item in observations(source, scan["id"]):
-                db.execute(
-                    "INSERT INTO family_members VALUES (?,?,?,?)",
-                    (scan["id"], family_key(item), item["file_id"], json.dumps(item)),
+                buffer.append(
+                    (
+                        scan["id"],
+                        family_key(item),
+                        item["file_id"],
+                        json.dumps(item),
+                    )
                 )
                 count += 1
+                if len(buffer) >= 10_000:
+                    db.executemany(
+                        "INSERT INTO family_members VALUES (?,?,?,?)", buffer
+                    )
+                    buffer.clear()
+            if buffer:
+                db.executemany("INSERT INTO family_members VALUES (?,?,?,?)", buffer)
             return {
                 "scan_id": scan["id"],
                 "files": count,
@@ -103,12 +115,17 @@ class ReviewStore:
                 (scan_id, limit, offset),
             )
             items = [dict(row) for row in rows]
+            # Correlated latest event per family in one pass (indexed by
+            # review_lookup); avoids one query per listed family.
+            events = db.execute(
+                """SELECT e.* FROM review_events e WHERE e.scope='family'
+                   AND e.undone=0 AND e.id IN (
+                     SELECT MAX(id) FROM review_events
+                     WHERE scope='family' AND undone=0 GROUP BY target)"""
+            ).fetchall()
+            latest = {row["target"]: dict(row) for row in events}
             for item in items:
-                event = db.execute(
-                    "SELECT * FROM review_events WHERE scope='family' AND target=? AND undone=0 ORDER BY id DESC LIMIT 1",
-                    (item["family_id"],),
-                ).fetchone()
-                item["review"] = dict(event) if event else None
+                item["review"] = latest.get(item["family_id"])
             return {"scan_id": scan_id, "items": items, "provisional": True}
 
     def decide(

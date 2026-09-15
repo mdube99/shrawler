@@ -3,9 +3,13 @@
 from collections import OrderedDict
 from contextlib import closing
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any, Dict, Tuple
 
 from .storage import connect_readonly
+
+# (host, share, parent, extension) pending counts staged in Python between
+# flushes; avoids one upsert statement per observed file.
+_PendingKey = Tuple[str, str, str, str]
 
 
 class InventorySignals:
@@ -13,6 +17,7 @@ class InventorySignals:
         self.db = db
         self.builtins = builtins
         self._directory_cache = OrderedDict()
+        self._pending: Dict[_PendingKey, int] = {}
         self._file_reviews = {}
         self._family_reviews = {}
         db.executescript("""
@@ -48,11 +53,34 @@ class InventorySignals:
 
     def observe(self, metadata: Dict[str, Any]) -> None:
         if self.builtins:
-            self.db.execute(
-                """INSERT INTO directory_extensions VALUES (?,?,?,?,1)
-                ON CONFLICT(host,share,parent,extension) DO UPDATE SET n=n+1""",
-                self.key(metadata),
-            )
+            key = self.key(metadata)
+            self._pending[key] = self._pending.get(key, 0) + 1
+
+    def flush(self) -> None:
+        """Persist staged counts; pending counts always overlay query results."""
+        if not self._pending:
+            return
+        self.db.executemany(
+            """INSERT INTO directory_extensions VALUES (?,?,?,?,?)
+            ON CONFLICT(host,share,parent,extension) DO UPDATE SET n=n+1""",
+            [(*key, value) for key, value in self._pending.items()],
+        )
+        self._pending.clear()
+
+    def _directory_counts(self, directory: Tuple[str, str, str]) -> Dict[str, int]:
+        rows = self.db.execute(
+            "SELECT extension,n FROM directory_extensions WHERE host=? AND share=? AND parent=?",
+            directory,
+        ).fetchall()
+        counts = {row[0]: row[1] for row in rows}
+        for (host, share, parent, extension), n in self._pending.items():
+            if (host, share, parent) == directory:
+                counts[extension] = counts.get(extension, 0) + n
+        counts[None] = (
+            sum(counts.values()),
+            max(counts.values(), default=0),
+        )
+        return counts
 
     def apply(self, metadata: Dict[str, Any], result: Dict[str, Any]) -> None:
         from .review import family_key
@@ -62,15 +90,7 @@ class InventorySignals:
             directory = key[:3]
             counts = self._directory_cache.get(directory)
             if counts is None:
-                rows = self.db.execute(
-                    "SELECT extension,n FROM directory_extensions WHERE host=? AND share=? AND parent=?",
-                    directory,
-                ).fetchall()
-                counts = {row[0]: row[1] for row in rows}
-                counts[None] = (
-                    sum(counts.values()),
-                    max(counts.values(), default=0),
-                )
+                counts = self._directory_counts(directory)
                 self._directory_cache[directory] = counts
                 if len(self._directory_cache) > 4096:
                     self._directory_cache.popitem(last=False)

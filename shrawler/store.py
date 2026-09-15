@@ -127,6 +127,36 @@ class ScanStore:
             daemon=True,
         )
         self._commit_thread.start()
+        # Cheap progress counters (seeded once from SQL, then delta-tracked).
+        self._host_count = int(
+            self.connection.execute(
+                "SELECT COUNT(*) FROM hosts WHERE scan_id=?", (self.scan_id,)
+            ).fetchone()[0]
+        )
+        self._share_count = int(
+            self.connection.execute(
+                """SELECT COUNT(*) FROM shares s JOIN hosts h ON h.id=s.host_id
+                   WHERE h.scan_id=?""",
+                (self.scan_id,),
+            ).fetchone()[0]
+        )
+        self._seen_hosts: Set[str] = {
+            str(row[0])
+            for row in self.connection.execute(
+                "SELECT host FROM hosts WHERE scan_id=?", (self.scan_id,)
+            )
+        }
+        self._seen_shares: Set[Tuple[str, str]] = {
+            (str(row[0]), str(row[1]))  # host, share name
+            for row in self.connection.execute(
+                """SELECT h.host, s.name FROM shares s JOIN hosts h ON h.id=s.host_id
+                   WHERE h.scan_id=?""",
+                (self.scan_id,),
+            )
+        }
+        # share_id per (host, share): only _share_id resolves it; add_file hits
+        # this cache instead of a hosts/shares JOIN per file.
+        self._share_ids: Dict[Tuple[str, str], int] = {}
 
     def _configure(self) -> None:
         self.connection.execute("PRAGMA journal_mode=WAL")
@@ -320,6 +350,9 @@ class ScanStore:
                      status=excluded.status, error=excluded.error""",
                 (self.scan_id, host, display_name, status, error, utc_now()),
             )
+            if host not in self._seen_hosts:
+                self._seen_hosts.add(host)
+                self._host_count += 1
             self._touch(force=status != "scanning")
 
     def _host_id(self, host: str) -> int:
@@ -353,9 +386,16 @@ class ScanStore:
                      status=excluded.status, payload_json=excluded.payload_json""",
                 (host_id, share, status, _json(payload)),
             )
+            if (host, share) not in self._seen_shares:
+                self._seen_shares.add((host, share))
+                self._share_count += 1
             self._touch(force=status == "complete")
 
     def _share_id(self, host: str, share: str) -> int:
+        key = (host, share)
+        cached = self._share_ids.get(key)
+        if cached is not None:
+            return cached
         row = self.connection.execute(
             """SELECT s.id FROM shares s JOIN hosts h ON h.id=s.host_id
                WHERE h.scan_id=? AND h.host=? AND s.name=?""",
@@ -363,7 +403,9 @@ class ScanStore:
         ).fetchone()
         if row is None:
             raise ValueError(f"share has not been recorded: {host}\\{share}")
-        return int(row[0])
+        value = int(row[0])
+        self._share_ids[key] = value
+        return value
 
     def add_file(self, host: str, share: str, payload: Dict[str, Any]) -> bool:
         remote = str(payload["remote_path"])
@@ -375,8 +417,7 @@ class ScanStore:
             (host, share, remote, str(payload["unc_path"]), name, extension)
         ).casefold()
         with self._lock:
-            share_id = self._share_id(host, share)
-            self.connection.execute(
+            row = self.connection.execute(
                 """INSERT INTO files
                    (public_id, host, share, remote_path, parent_path, unc_path,
                     file_name, extension, size_bytes, readable_size, mtime_utc,
@@ -387,7 +428,8 @@ class ScanStore:
                     extension=excluded.extension, size_bytes=excluded.size_bytes,
                     readable_size=excluded.readable_size, mtime_utc=excluded.mtime_utc,
                     scan_timestamp_utc=excluded.scan_timestamp_utc,
-                    search_text=excluded.search_text""",
+                    search_text=excluded.search_text
+                   RETURNING id""",
                 (
                     secrets.token_urlsafe(16),
                     host,
@@ -403,13 +445,9 @@ class ScanStore:
                     str(payload.get("scan_timestamp_utc") or ""),
                     search,
                 ),
-            )
-            file_id = int(
-                self.connection.execute(
-                    "SELECT id FROM files WHERE host=? AND share=? AND remote_path=?",
-                    (host, share, remote),
-                ).fetchone()[0]
-            )
+            ).fetchone()
+            file_id = int(row[0])
+            share_id = self._share_id(host, share)
             cursor = self.connection.execute(
                 """INSERT OR IGNORE INTO scan_files
                    (scan_id, share_id, file_id, payload_json) VALUES (?, ?, ?, ?)""",
@@ -495,30 +533,29 @@ class ScanStore:
                     (self.scan_id,),
                 )
             ]
+            downloaded_bytes = int(
+                self.connection.execute(
+                    """SELECT COALESCE(SUM(json_extract(payload_json,'$.actual_size_bytes')),0)
+                     FROM downloads WHERE scan_id=?""",
+                    (self.scan_id,),
+                ).fetchone()[0]
+            )
             return {
                 "hosts_attempted": int(counts[0]),
                 "host_statuses": statuses,
                 "shares_enumerated": int(counts[1]),
                 "files_seen": int(counts[2]),
                 "files_downloaded": int(counts[3]),
-                "downloaded_bytes": sum(
-                    int(row.get("actual_size_bytes") or 0) for row in download_rows
-                ),
+                "downloaded_bytes": downloaded_bytes,
                 "snaffler_matches": int(counts[4]),
                 "downloads": download_rows,
             }
 
     def progress_counts(self) -> Tuple[int, int]:
         """Return lightweight host/share counts for terminal progress."""
+        # Delta-tracked in memory at upsert time; no COUNT queries per tick.
         with self._lock:
-            row = self.connection.execute(
-                """SELECT
-                   (SELECT COUNT(*) FROM hosts WHERE scan_id=?),
-                   (SELECT COUNT(*) FROM shares s JOIN hosts h ON h.id=s.host_id
-                    WHERE h.scan_id=?)""",
-                (self.scan_id, self.scan_id),
-            ).fetchone()
-            return int(row[0]), int(row[1])
+            return self._host_count, self._share_count
 
     def finish(
         self,
