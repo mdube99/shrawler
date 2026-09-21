@@ -255,6 +255,14 @@ token by default. Add `--token-auth` to require a random bearer token:
 shrawler web 'DOMAIN/user@server' ./results/shrawler.db --token-auth
 ```
 
+The WebUI listens on `127.0.0.1` by default. To make it available through all
+IPv4 interfaces, explicitly set the bind address (token authentication is
+recommended whenever the listener is remotely reachable):
+
+```bash
+shrawler web 'DOMAIN/user@server' ./results/shrawler.db --bind 0.0.0.0 --token-auth
+```
+
 SMB credentials stay in the server process and are never sent to the browser.
 The browser can request only opaque file identifiers from the loaded inventory,
 not arbitrary SMB coordinates.
