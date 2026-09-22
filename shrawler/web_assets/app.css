@@ -153,6 +153,12 @@ body.compact .file-path { display: none; }
 .collection-indicator { color: var(--text-muted); }
 .collection-indicator.collected { color: var(--success); }
 .collection-indicator.not_collected { color: var(--amber-hover); }
+.transfer-chips { display: inline-flex; align-items: center; gap: 6px; }
+.transfer-chip { padding: 0 5px; border: 1px solid var(--line-strong); border-radius: 3px; color: var(--text-muted); font: 500 10px var(--font-data); line-height: 16px; white-space: nowrap; }
+.transfer-chip.downloaded { border-color: hsl(210, 45%, 45%); color: hsl(210, 55%, 72%); background: hsla(210, 45%, 52%, .12); }
+.transfer-chip.nemesis.sent { border-color: hsl(145, 40%, 42%); color: hsl(145, 45%, 70%); background: hsla(145, 40%, 50%, .12); }
+.transfer-chip.nemesis.pending, .transfer-chip.nemesis.unknown { border-color: hsl(38, 55%, 48%); color: hsl(38, 70%, 69%); background: hsla(38, 55%, 54%, .13); }
+.transfer-chip.nemesis.failed { border-color: hsl(0, 50%, 50%); color: hsl(0, 65%, 72%); background: hsla(0, 50%, 52%, .13); }
 .location-strip, .size-value { color: var(--text-secondary); font: 12px var(--font-data); }
 .date-value { color: var(--text-secondary); font-size: 12px; white-space: nowrap; }
 .row-chevron { padding-left: 0 !important; padding-right: 10px !important; color: var(--text-muted); }

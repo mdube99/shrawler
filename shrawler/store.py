@@ -19,6 +19,10 @@ from .search_index import ensure as ensure_search_index, supported as search_sup
 
 SCHEMA_VERSION = 1
 
+# Web-initiated retrievals share the downloads table but are not scan-time
+# downloads, so scan summaries and JSON/CSV exports exclude them.
+_SCAN_DOWNLOAD_FILTER = "COALESCE(json_extract(payload_json, '$.source'), 'scan') != 'web'"
+
 
 def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -519,26 +523,28 @@ class ScanStore:
                 )
             }
             counts = self.connection.execute(
-                """SELECT
+                f"""SELECT
                    (SELECT COUNT(*) FROM hosts WHERE scan_id=?),
                    (SELECT COUNT(*) FROM shares s JOIN hosts h ON h.id=s.host_id
                       WHERE h.scan_id=?),
                    (SELECT COUNT(*) FROM scan_files WHERE scan_id=?),
-                   (SELECT COUNT(*) FROM downloads WHERE scan_id=?),
+                   (SELECT COUNT(*) FROM downloads WHERE scan_id=?
+                      AND {_SCAN_DOWNLOAD_FILTER}),
                    (SELECT COUNT(*) FROM snaffler_matches WHERE scan_id=?)""",
                 (self.scan_id,) * 5,
             ).fetchone()
             download_rows = [
                 json.loads(row[0])
                 for row in self.connection.execute(
-                    "SELECT payload_json FROM downloads WHERE scan_id=?",
+                    f"SELECT payload_json FROM downloads WHERE scan_id=? "
+                    f"AND {_SCAN_DOWNLOAD_FILTER}",
                     (self.scan_id,),
                 )
             ]
             downloaded_bytes = int(
                 self.connection.execute(
-                    """SELECT COALESCE(SUM(json_extract(payload_json,'$.actual_size_bytes')),0)
-                     FROM downloads WHERE scan_id=?""",
+                    f"""SELECT COALESCE(SUM(json_extract(payload_json,'$.actual_size_bytes')),0)
+                     FROM downloads WHERE scan_id=? AND {_SCAN_DOWNLOAD_FILTER}""",
                     (self.scan_id,),
                 ).fetchone()[0]
             )
@@ -629,8 +635,9 @@ class ScanStore:
                 payload["downloaded_files"] = [
                     json.loads(row[0])
                     for row in self.connection.execute(
-                        """SELECT payload_json FROM downloads
-                           WHERE scan_id=? AND share_id=? ORDER BY id""",
+                        f"""SELECT payload_json FROM downloads
+                           WHERE scan_id=? AND share_id=?
+                             AND {_SCAN_DOWNLOAD_FILTER} ORDER BY id""",
                         (self.scan_id, share["id"]),
                     )
                 ]
@@ -710,8 +717,9 @@ class ScanStore:
                         handle.write(row[0])
                     handle.write("]," + _json("downloaded_files") + ":[")
                     rows = self.connection.execute(
-                        """SELECT payload_json FROM downloads
-                           WHERE scan_id=? AND share_id=? ORDER BY id""",
+                        f"""SELECT payload_json FROM downloads
+                           WHERE scan_id=? AND share_id=?
+                             AND {_SCAN_DOWNLOAD_FILTER} ORDER BY id""",
                         (self.scan_id, share["id"]),
                     )
                     for index, row in enumerate(rows):
@@ -742,8 +750,13 @@ class ScanStore:
         os.replace(temporary, path)
         return path
 
-    def _payloads(self, table: str) -> Iterable[Dict[str, Any]]:
-        query = f"SELECT payload_json FROM {table} WHERE scan_id=? ORDER BY id"
+    def _payloads(
+        self, table: str, scan_downloads_only: bool = False
+    ) -> Iterable[Dict[str, Any]]:
+        query = f"SELECT payload_json FROM {table} WHERE scan_id=?"
+        if scan_downloads_only:
+            query += f" AND {_SCAN_DOWNLOAD_FILTER}"
+        query += " ORDER BY id"
         for row in self.connection.execute(query, (self.scan_id,)):
             yield json.loads(row[0])
 
@@ -879,7 +892,7 @@ class ScanStore:
         ]
 
         def download_rows() -> Iterable[Dict[str, Any]]:
-            for payload in self._payloads("downloads"):
+            for payload in self._payloads("downloads", scan_downloads_only=True):
                 nemesis = payload.get("nemesis", {})
                 yield {
                     **payload,

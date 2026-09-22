@@ -120,7 +120,46 @@
   };
 
   const locationText = item => `${item.host || 'Unknown host'} › ${item.share || 'Unknown share'}`;
-  const statusLabel = value => ({collected: 'Collected', not_collected: 'Not collected', unknown: 'Unknown'}[value] || value || 'Unknown');
+  const activityLabel = value => ({downloaded: 'Downloaded', not_downloaded: 'Not downloaded', nemesis_sent: 'Sent to Nemesis', not_nemesis_sent: 'Not sent to Nemesis', nemesis_failed: 'Nemesis failed'}[value] || value || 'Any activity');
+  const nemesisLabel = value => ({uploaded: 'Sent', pending: 'Pending', staged: 'Staged', retrieving: 'Retrieving', uploading: 'Sending', unknown: 'Unknown', upload_failed: 'Failed', retrieval_failed: 'Failed', failed: 'Failed'}[value] || value || '');
+  const nemesisTone = value => value === 'uploaded' ? 'sent' : (['unknown'].includes(value) ? 'unknown' : (['upload_failed', 'retrieval_failed', 'failed'].includes(value) ? 'failed' : (value ? 'pending' : '')));
+  const nemesisText = item => {
+    if (!item.nemesis_status) return 'Not sent';
+    const label = nemesisLabel(item.nemesis_status) || item.nemesis_status;
+    const when = item.nemesis_updated_at_utc ? ` · ${formatDate(item.nemesis_updated_at_utc)}` : '';
+    const detail = item.nemesis_error ? ` — ${item.nemesis_error}` : (item.nemesis_response_id ? ` · ${item.nemesis_response_id}` : '');
+    return `${label}${when}${detail}`;
+  };
+  function transferChips(item) {
+    const wrap = element('span', 'transfer-chips');
+    if (item.collection_status === 'collected') {
+      const count = Number(item.download_count) || 0;
+      const chip = element('span', 'transfer-chip downloaded', count > 1 ? `Downloaded ${count}×` : 'Downloaded');
+      chip.title = item.downloaded_at_utc ? `Downloaded ${formatDate(item.downloaded_at_utc)}${count > 1 ? ` · ${count} times` : ''}` : 'Downloaded';
+      wrap.append(chip);
+    }
+    if (item.nemesis_status) {
+      const chip = element('span', `transfer-chip nemesis ${nemesisTone(item.nemesis_status)}`, `Nemesis ${nemesisLabel(item.nemesis_status)}`);
+      chip.title = item.nemesis_error || `Nemesis ${nemesisLabel(item.nemesis_status)}`;
+      wrap.append(chip);
+    }
+    return wrap;
+  }
+  function markDownloaded(item) {
+    item.collection_status = 'collected';
+    item.download_count = (Number(item.download_count) || 0) + 1;
+    item.downloaded_at_utc = new Date().toISOString();
+  }
+  function markNemesis(item, result) {
+    item.nemesis_status = result.status || 'unknown';
+    item.nemesis_updated_at_utc = result.updated_at || new Date().toISOString();
+    item.nemesis_response_id = result.response_id || '';
+    item.nemesis_error = result.error || '';
+  }
+  function rerenderResults() {
+    if (state.view === 'tree') renderTree();
+    else renderTable();
+  }
   const permissionName = key => ({read: 'List share root', write: 'Write-related access', add_file: 'Create files', add_subdirectory: 'Create directories', write_dac: 'Modify ACL', write_owner: 'Change owner'}[key] || key);
   const permissionLabel = (permissions, key) => {
     const rights = ['read', 'write'].includes(key) ? permissions : permissions && permissions.write_rights;
@@ -150,7 +189,7 @@
 
   function filters() {
     return {q: $('query').value, host: $('host').value, share: $('share').value, extension: $('extension').value,
-      rule: $('rule').value, triage: $('triage').value, permission: $('permission').value, collection: $('collection').value,
+      rule: $('rule').value, triage: $('triage').value, permission: $('permission').value, activity: $('activity').value,
       ranking_run: $('ranking').value, ranking_category: $('ranking-category').value,
       ranking_min: $('ranking-min').value, sort: $('sort').value, direction: state.sortDirection};
   }
@@ -167,7 +206,7 @@
     values.forEach(value => {
       const option = document.createElement('option');
       option.value = value;
-      option.textContent = id === 'extension' ? extensionLabel(value) : id === 'collection' ? statusLabel(value) : id === 'permission' ? permissionName(value) : (value || '(none)');
+      option.textContent = id === 'extension' ? extensionLabel(value) : id === 'activity' ? activityLabel(value) : id === 'permission' ? permissionName(value) : (value || '(none)');
       $(id).append(option);
     });
     if (values.includes(current)) $(id).value = current;
@@ -252,7 +291,7 @@
       ['share', 'Share', values.share],
       ['extension', 'Type', values.extension ? extensionLabel(values.extension) : ''],
       ['rule', 'Rule', values.rule], ['triage', 'Triage', values.triage],
-      ['permission', 'Share-root permission', permissionName(values.permission)], ['collection', 'Collection', values.collection ? statusLabel(values.collection) : ''],
+      ['permission', 'Share-root permission', permissionName(values.permission)], ['activity', 'Activity', values.activity ? activityLabel(values.activity) : ''],
       ['ranking', 'Ranking', values.ranking_run ? 'Selected' : ''], ['ranking-category', 'Rank category', values.ranking_category],
       ['ranking-min', 'Minimum rating', values.ranking_min ? `${values.ranking_min}+` : ''],
       ['sort', 'Sort', values.sort !== 'path' || state.sortDirection !== 'asc' ? `${sortName(values.sort)} ${state.sortDirection === 'desc' ? '↓' : '↑'}` : '']
@@ -282,7 +321,7 @@
 
   function clearFilters() {
     $('query').value = '';
-    ['host', 'share', 'extension', 'rule', 'triage', 'permission', 'collection', 'ranking', 'ranking-category', 'ranking-min'].forEach(id => { $(id).value = ''; });
+    ['host', 'share', 'extension', 'rule', 'triage', 'permission', 'activity', 'ranking', 'ranking-category', 'ranking-min'].forEach(id => { $(id).value = ''; });
     $('sort').value = 'path';
     state.sortDirection = 'asc';
     renderSortHeaders();
@@ -393,7 +432,8 @@
     const evidence = element('div', 'detail-evidence');
     const matchNames = (item.rule_matches || []).map(match => `${match.rule_name || 'unnamed'}${match.triage ? ` · ${match.triage}` : ''}`);
     evidence.append(metadataField('Ranking', item.ranking_run_id ? ratingText(item) : 'No ranking selected'));
-    evidence.append(metadataField('Collection', statusLabel(item.collection_status)));
+    evidence.append(metadataField('Downloaded', item.collection_status === 'collected' ? `Yes${(Number(item.download_count) || 0) > 1 ? ` · ${item.download_count}×` : ''}${item.downloaded_at_utc ? ` · ${formatDate(item.downloaded_at_utc)}` : ''}` : 'No'));
+    evidence.append(metadataField('Nemesis', nemesisText(item)));
     const rules = element('section', 'detail-rules');
     rules.append(element('h3', '', 'Matched rules'), element('p', '', matchNames.join(' · ') || 'No Snaffler rules matched this file.'));
     const technical = element('details', 'detail-technical');
@@ -480,7 +520,7 @@
       trigger.setAttribute('aria-controls', `details-${item.id}`);
       trigger.append(element('span', 'file-name', item.file_name), element('span', 'file-path', item.remote_path || 'Path unavailable'));
       const evidenceLine = element('span', 'file-evidence');
-      evidenceLine.append(element('span', `collection-indicator ${item.collection_status || 'unknown'}`, statusLabel(item.collection_status)), element('span', 'finding-indicator', findingText(item)));
+      evidenceLine.append(transferChips(item), element('span', 'finding-indicator', findingText(item)));
       trigger.append(evidenceLine);
       trigger.title = item.file_name;
       trigger.addEventListener('click', () => toggleTableDetails(item));
@@ -567,7 +607,7 @@
       const label = element('span', 'tree-label file-label');
       label.append(specimenTag(node.extension), element('span', '', node.file_name));
       const meta = element('span', 'tree-file-meta');
-      meta.append(ratingBadge(node), element('span', '', node.readable_size || formatBytes(node.size_bytes)), element('span', '', formatDate(node.mtime_utc)), element('span', `collection-indicator ${node.collection_status || 'unknown'}`, statusLabel(node.collection_status)), element('span', 'finding-indicator', findingText(node)));
+      meta.append(ratingBadge(node), element('span', '', node.readable_size || formatBytes(node.size_bytes)), element('span', '', formatDate(node.mtime_utc)), transferChips(node), element('span', 'finding-indicator', findingText(node)));
       line.append(label, meta);
       line.setAttribute('aria-expanded', String(state.selectedId === node.id));
       line.addEventListener('click', () => toggleTreeFile(node, key));
@@ -829,7 +869,7 @@
     appendOptions('rule', updatedFacets.rules || []);
     appendOptions('triage', updatedFacets.triages || []);
     appendOptions('permission', updatedFacets.permissions || []);
-    appendOptions('collection', updatedFacets.collections || []);
+    appendOptions('activity', updatedFacets.activities || []);
   }
 
   async function applyPendingUpdates() {
@@ -1042,6 +1082,8 @@
       link.click();
       link.remove();
       setTimeout(() => URL.revokeObjectURL(url), 1000);
+      markDownloaded(item);
+      rerenderResults();
       showToast(`Download started: ${item.file_name}`);
     } catch (error) {
       showToast(error.message, true);
@@ -1064,10 +1106,12 @@
         link.href = url; link.download = files[index].file_name;
         document.body.append(link); link.click(); link.remove();
         setTimeout(() => URL.revokeObjectURL(url), 1000);
+        markDownloaded(files[index]);
         await new Promise(resolve => setTimeout(resolve, 150));
       } catch (_) { failed += 1; }
     }
     state.transferActive = false; renderSelectionToolbar();
+    rerenderResults();
     showToast(failed ? `${files.length - failed} downloads started · ${failed} failed` : `${files.length} downloads started`, !!failed);
   }
 
@@ -1080,10 +1124,12 @@
       try {
         const response = await api('/api/nemesis/send', {method: 'POST', headers: {'Content-Type': 'application/json', 'X-Shrawler-Request': '1'}, body: JSON.stringify({file_id: files[index].id})});
         const result = await response.json();
+        markNemesis(files[index], result);
         if (result.status !== 'uploaded') throw new Error(result.error || 'Upload failed');
       } catch (_) { failed += 1; }
     }
     state.transferActive = false; renderSelectionToolbar();
+    rerenderResults();
     showToast(failed ? `${files.length - failed} uploaded · ${failed} failed` : `${files.length} uploaded to Nemesis`, !!failed);
   }
 
@@ -1096,12 +1142,11 @@
         body: JSON.stringify({file_id: item.id})
       });
       const result = await response.json();
+      markNemesis(item, result);
+      rerenderResults();
       if (result.status !== 'uploaded') throw new Error(result.error || 'Upload failed; staged evidence retained for retry');
-      button.textContent = 'Uploaded to Nemesis';
       showToast(`Uploaded: ${item.file_name}${result.response_id ? ` · ${result.response_id}` : ''}`);
     } catch (error) {
-      button.textContent = 'Retry Nemesis upload';
-      button.disabled = false;
       showToast(error.message, true);
     }
   }
@@ -1161,7 +1206,7 @@
   });
 
   $('query').addEventListener('input', scheduleRefresh);
-  ['host', 'share', 'extension', 'rule', 'triage', 'permission', 'collection', 'ranking-min'].forEach(id => $(id).addEventListener('change', scheduleRefresh));
+  ['host', 'share', 'extension', 'rule', 'triage', 'permission', 'activity', 'ranking-min'].forEach(id => $(id).addEventListener('change', scheduleRefresh));
   $('ranking').addEventListener('change', () => { updateRankingCategories(); scheduleRefresh(); });
   $('ranking-category').addEventListener('change', scheduleRefresh);
   $('sort').addEventListener('change', () => {

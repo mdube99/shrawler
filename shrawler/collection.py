@@ -98,11 +98,25 @@ class CollectionQueue:
         source = connect_readonly(self.database)
         try:
             # Historical collection is evidence of a prior retrieval, not freshness.
-            rows = source.execute("""SELECT h.host, s.name, json_extract(d.payload_json, '$.remote_path')
-                FROM downloads d JOIN shares s ON s.id=d.share_id JOIN hosts h ON h.id=s.host_id""")
-            prior_paths = {
-                (h.casefold(), s.casefold(), self._path(p)) for h, s, p in rows if p
-            }
+            # Scope to the candidate hosts/shares so growing web-download evidence
+            # never turns manifest creation into a full-table materialization.
+            targets = sorted(
+                {(candidate["host"], candidate["share"]) for candidate in candidates["items"]}
+            )
+            prior_paths: set = set()
+            for start in range(0, len(targets), 200):
+                chunk = targets[start : start + 200]
+                conditions = " OR ".join("(h.host=? AND s.name=?)" for _ in chunk)
+                rows = source.execute(
+                    "SELECT h.host, s.name, json_extract(d.payload_json, '$.remote_path') "
+                    "FROM downloads d JOIN shares s ON s.id=d.share_id "
+                    "JOIN hosts h ON h.id=s.host_id "
+                    f"WHERE {conditions}",
+                    [value for pair in chunk for value in pair],
+                )
+                prior_paths.update(
+                    (h.casefold(), s.casefold(), self._path(p)) for h, s, p in rows if p
+                )
         finally:
             source.close()
         items: List[Dict[str, Any]] = []

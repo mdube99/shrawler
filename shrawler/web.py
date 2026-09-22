@@ -1,5 +1,6 @@
 """Local-only, dependency-free WebUI for saved Shrawler inventories."""
 
+import hashlib
 import json
 import logging
 import os
@@ -36,6 +37,7 @@ from .triage.storage import (
     explain as triage_explain,
     list_results as triage_list,
     result_path as triage_result_path,
+    utc_now,
 )
 
 TEXT_EXTENSIONS = frozenset(
@@ -87,6 +89,12 @@ class FileRecord:
     permissions: Dict[str, Any] = field(default_factory=dict)
     collection_status: str = "unknown"
     collection_detail: Optional[Dict[str, Any]] = None
+    downloaded_at_utc: str = ""
+    download_count: int = 0
+    nemesis_status: str = ""
+    nemesis_updated_at_utc: str = ""
+    nemesis_response_id: str = ""
+    nemesis_error: str = ""
     metadata_scan_timestamp_utc: str = ""
     ranking_run_id: str = ""
     ranking_priority: Optional[int] = None
@@ -232,7 +240,9 @@ class FileIndex:
             if matches_path(value)
         ]
         detail = downloads[-1] if downloads else None
-        if detail:
+        count = detail.get("download_count") if detail else None
+        download_count = int(count) if count is not None else (1 if detail else 0)
+        if detail and download_count > 0:
             status = str(
                 detail.get("status") or detail.get("collection_status") or "collected"
             )
@@ -242,11 +252,22 @@ class FileIndex:
             status = str(item["collection_status"])
         else:
             status = "not_collected"
+        nemesis = (detail or {}).get("nemesis") or {}
         return {
             "rule_matches": matches,
             "permissions": dict(share_data.get("permissions") or {}),
             "collection_status": status,
             "collection_detail": detail,
+            "downloaded_at_utc": str(
+                (detail or {}).get("downloaded_at_utc")
+                or (detail or {}).get("timestamp_utc")
+                or ""
+            ),
+            "download_count": download_count,
+            "nemesis_status": str(nemesis.get("status") or ""),
+            "nemesis_updated_at_utc": str(nemesis.get("updated_at") or ""),
+            "nemesis_response_id": str(nemesis.get("response_id") or ""),
+            "nemesis_error": str(nemesis.get("last_error") or ""),
             "metadata_scan_timestamp_utc": str(
                 item.get("scan_timestamp_utc")
                 or share_data.get("scan_timestamp_utc")
@@ -278,6 +299,13 @@ class FileIndex:
                 key=str.casefold,
             ),
             "collections": sorted({r.collection_status for r in self.records}),
+            "activities": [
+                "downloaded",
+                "not_downloaded",
+                "nemesis_sent",
+                "not_nemesis_sent",
+                "nemesis_failed",
+            ],
             "permissions": [
                 "read",
                 "write",
@@ -290,6 +318,14 @@ class FileIndex:
 
     def get(self, public_id: str) -> Optional[FileRecord]:
         return self.by_id.get(public_id)
+
+    def record_download(
+        self, record: FileRecord, actual_size: int, sha256: str
+    ) -> None:
+        """JSON result files are read-only; transfers are not persisted."""
+
+    def record_nemesis(self, record: FileRecord, state: Dict[str, Any]) -> None:
+        """JSON result files are read-only; transfers are not persisted."""
 
     def status(self) -> Dict[str, Any]:
         return {
@@ -314,6 +350,7 @@ class FileIndex:
         ranking_run: str = "",
         ranking_category: str = "",
         ranking_min: int = 0,
+        activity: str = "",
     ) -> List[FileRecord]:
         terms = q.casefold().split()
         return [
@@ -341,7 +378,29 @@ class FileIndex:
                 is True
             )
             and (not collection or record.collection_status == collection)
+            and self._activity_match(record, activity)
         ]
+
+    @staticmethod
+    def _activity_match(record: FileRecord, activity: str) -> bool:
+        if not activity:
+            return True
+        if activity == "downloaded":
+            return record.collection_status == "collected"
+        if activity == "not_downloaded":
+            return record.collection_status != "collected"
+        if activity == "nemesis_sent":
+            return record.nemesis_status == "uploaded"
+        if activity == "not_nemesis_sent":
+            return record.nemesis_status != "uploaded"
+        if activity == "nemesis_failed":
+            return record.nemesis_status in {
+                "upload_failed",
+                "retrieval_failed",
+                "failed",
+                "unknown",
+            }
+        raise ValueError("Invalid activity filter")
 
     def search(
         self,
@@ -361,9 +420,10 @@ class FileIndex:
         sort: str = "path",
         direction: str = "asc",
         include_total: bool = True,
+        activity: str = "",
     ) -> Dict[str, Any]:
         matches = self._matching(
-            q, host, share, extension, rule, triage, permission, collection
+            q, host, share, extension, rule, triage, permission, collection, activity=activity
         )
         sort_keys: Dict[str, Callable[[FileRecord], Any]] = {
             "path": lambda row: (
@@ -411,10 +471,11 @@ class FileIndex:
         ranking_min: int = 0,
         sort: str = "path",
         direction: str = "asc",
+        activity: str = "",
     ) -> Dict[str, Any]:
         """Build a complete host/share/folder hierarchy for matching records."""
         matches = self._matching(
-            q, host, share, extension, rule, triage, permission, collection
+            q, host, share, extension, rule, triage, permission, collection, activity=activity
         )
         hosts: Dict[str, Dict[str, Any]] = {}
 
@@ -669,6 +730,135 @@ class DatabaseIndex:
                        AND evidence.share_id=sf.share_id
                         AND evidence.remote_path_key=path_key(files.remote_path)"""
 
+    def _write_connect(self) -> sqlite3.Connection:
+        """Short-lived writer for web-initiated download/Nemesis evidence."""
+        connection = sqlite3.connect(self.path, timeout=30)
+        connection.row_factory = sqlite3.Row
+        connection.execute("PRAGMA busy_timeout=30000")
+        return connection
+
+    @staticmethod
+    def _observation_target(
+        connection: sqlite3.Connection, public_id: str
+    ) -> Optional[sqlite3.Row]:
+        return connection.execute(
+            """SELECT sf.scan_id AS scan_id, sf.share_id AS share_id,
+                      files.remote_path AS remote_path
+               FROM files
+               JOIN scan_files sf ON sf.file_id=files.id
+                 AND sf.rowid=(SELECT observation.rowid FROM scan_files observation
+                     JOIN scans observation_scan
+                       ON observation_scan.id=observation.scan_id
+                     WHERE observation.file_id=files.id
+                     ORDER BY observation_scan.started_at_utc DESC,
+                              observation.rowid DESC LIMIT 1)
+               WHERE files.public_id=?""",
+            (public_id,),
+        ).fetchone()
+
+    @staticmethod
+    def _web_download_row(
+        connection: sqlite3.Connection,
+        scan_id: str,
+        share_id: int,
+        remote_path_key: str,
+    ) -> Optional[sqlite3.Row]:
+        return connection.execute(
+            """SELECT id, payload_json FROM downloads
+               WHERE scan_id=? AND share_id=? AND remote_path_key=?
+                 AND json_extract(payload_json, '$.source')='web'
+               ORDER BY id DESC LIMIT 1""",
+            (scan_id, share_id, remote_path_key),
+        ).fetchone()
+
+    def _web_base_payload(self, record: FileRecord, now: str) -> Dict[str, Any]:
+        return {
+            "host": record.host,
+            "share_name": record.share,
+            "remote_path": record.remote_path,
+            "unc_path": record.unc_path,
+            "local_filename": record.file_name,
+            "size_bytes": record.size_bytes,
+            "actual_size_bytes": 0,
+            "sha256": "",
+            "mtime_utc": record.mtime_utc,
+            "timestamp_utc": now,
+            "source": "web",
+            "download_count": 0,
+            "downloaded_at_utc": "",
+            "nemesis": {},
+        }
+
+    def _record_web_transfer(
+        self,
+        public_id: str,
+        base: Callable[[], Dict[str, Any]],
+        update: Callable[[Dict[str, Any]], None],
+    ) -> None:
+        """Upsert one web row per file, keyed by its latest observation path."""
+        connection = self._write_connect()
+        try:
+            target = self._observation_target(connection, public_id)
+            if target is None:
+                return
+            key = self._path_key(target["remote_path"])
+            row = self._web_download_row(
+                connection, target["scan_id"], target["share_id"], key
+            )
+            payload = json.loads(row["payload_json"]) if row else base()
+            update(payload)
+            payload["updated_at_utc"] = utc_now()
+            encoded = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+            if row:
+                connection.execute(
+                    "UPDATE downloads SET payload_json=? WHERE id=?",
+                    (encoded, row["id"]),
+                )
+            else:
+                connection.execute(
+                    "INSERT INTO downloads"
+                    "(scan_id, share_id, remote_path_key, payload_json) "
+                    "VALUES (?, ?, ?, ?)",
+                    (target["scan_id"], target["share_id"], key, encoded),
+                )
+            connection.commit()
+        finally:
+            connection.close()
+            # Web writes do not bump the scan revision, so cached totals would
+            # otherwise hide the new evidence from activity filters.
+            self._total_cache.clear()
+
+    def record_download(
+        self, record: FileRecord, actual_size: int, sha256: str
+    ) -> None:
+        now = utc_now()
+
+        def update(payload: Dict[str, Any]) -> None:
+            payload["download_count"] = int(payload.get("download_count") or 0) + 1
+            payload["downloaded_at_utc"] = now
+            payload["actual_size_bytes"] = int(actual_size)
+            payload["sha256"] = sha256
+
+        self._record_web_transfer(
+            record.id, lambda: self._web_base_payload(record, now), update
+        )
+
+    def record_nemesis(self, record: FileRecord, state: Dict[str, Any]) -> None:
+        now = utc_now()
+
+        def update(payload: Dict[str, Any]) -> None:
+            payload["nemesis"] = {
+                "status": state.get("status"),
+                "attempts": state.get("attempts"),
+                "response_id": state.get("response_id"),
+                "last_error": state.get("error") or state.get("last_error"),
+                "updated_at": state.get("updated_at") or now,
+            }
+
+        self._record_web_transfer(
+            record.id, lambda: self._web_base_payload(record, now), update
+        )
+
     def _enrich(self, records: List[FileRecord]) -> List[FileRecord]:
         """Load only the selected files' latest evidence in bounded SQL batches."""
         with self._connect() as connection:
@@ -706,9 +896,28 @@ class DatabaseIndex:
                         detail: Dict[str, Any] = json.loads(row[1])
                         if table == "snaffler_matches":
                             record.rule_matches += (detail,)
-                        else:
+                            continue
+                        count = detail.get("download_count")
+                        row_count = int(count) if count is not None else 1
+                        if row_count > 0:
+                            record.download_count = max(record.download_count, row_count)
                             record.collection_status = "collected"
                             record.collection_detail = detail
+                            record.downloaded_at_utc = str(
+                                detail.get("downloaded_at_utc")
+                                or detail.get("timestamp_utc")
+                                or ""
+                            )
+                        nemesis = detail.get("nemesis") or {}
+                        if nemesis:
+                            record.nemesis_status = str(nemesis.get("status") or "")
+                            record.nemesis_updated_at_utc = str(
+                                nemesis.get("updated_at") or ""
+                            )
+                            record.nemesis_response_id = str(
+                                nemesis.get("response_id") or ""
+                            )
+                            record.nemesis_error = str(nemesis.get("last_error") or "")
         return records
 
     @classmethod
@@ -725,6 +934,7 @@ class DatabaseIndex:
         ranking_run: str = "",
         ranking_category: str = "",
         ranking_min: int = 0,
+        activity: str = "",
     ) -> Tuple[str, List[Any]]:
         clauses: List[str] = []
         values: List[Any] = []
@@ -781,8 +991,38 @@ class DatabaseIndex:
                 prefix
                 + "EXISTS (SELECT 1 FROM files AS matched_file "
                 + cls._evidence_join("downloads")
-                + " WHERE matched_file.id=files.id)"
+                + " WHERE matched_file.id=files.id AND "
+                "COALESCE(json_extract(evidence.payload_json, '$.download_count'), 1) > 0)"
             )
+        if activity:
+            is_download = (
+                "COALESCE(json_extract(evidence.payload_json, "
+                "'$.download_count'), 1) > 0"
+            )
+            activity_clauses = {
+                "downloaded": "EXISTS (SELECT 1 FROM files AS matched_file "
+                + cls._evidence_join("downloads")
+                + f" WHERE matched_file.id=files.id AND {is_download})",
+                "not_downloaded": "NOT EXISTS (SELECT 1 FROM files AS matched_file "
+                + cls._evidence_join("downloads")
+                + f" WHERE matched_file.id=files.id AND {is_download})",
+                "nemesis_sent": "EXISTS (SELECT 1 FROM files AS matched_file "
+                + cls._evidence_join("downloads")
+                + " WHERE matched_file.id=files.id AND "
+                "json_extract(evidence.payload_json, '$.nemesis.status')='uploaded')",
+                "not_nemesis_sent": "NOT EXISTS (SELECT 1 FROM files AS matched_file "
+                + cls._evidence_join("downloads")
+                + " WHERE matched_file.id=files.id AND "
+                "json_extract(evidence.payload_json, '$.nemesis.status')='uploaded')",
+                "nemesis_failed": "EXISTS (SELECT 1 FROM files AS matched_file "
+                + cls._evidence_join("downloads")
+                + " WHERE matched_file.id=files.id AND "
+                "json_extract(evidence.payload_json, '$.nemesis.status') IN "
+                "('upload_failed','retrieval_failed','failed','unknown'))",
+            }
+            if activity not in activity_clauses:
+                raise ValueError("Invalid activity filter")
+            clauses.append(activity_clauses[activity])
         if ranking_run and ranking_min > 0:
             clauses.append("ranking_score >= ?")
             values.append(ranking_min)
@@ -827,6 +1067,13 @@ class DatabaseIndex:
                     )
                 ],
                 "collections": ["collected", "not_collected"],
+                "activities": [
+                    "downloaded",
+                    "not_downloaded",
+                    "nemesis_sent",
+                    "not_nemesis_sent",
+                    "nemesis_failed",
+                ],
                 "permissions": [
                     "read",
                     "write",
@@ -935,6 +1182,7 @@ class DatabaseIndex:
         sort: str = "path",
         direction: str = "asc",
         include_total: bool = True,
+        activity: str = "",
     ) -> Dict[str, Any]:
         where, where_values = self._where(
             q,
@@ -948,6 +1196,7 @@ class DatabaseIndex:
             ranking_run,
             ranking_category,
             ranking_min,
+            activity,
         )
         joins, join_values, ranking_score = self._ranking_join(
             ranking_run, ranking_category
@@ -1063,7 +1312,7 @@ class DatabaseIndex:
             revision = int(revision_row[0]) if revision_row else 0
             total_key = (
                 revision, q, host, share, extension, rule, triage, permission,
-                collection, ranking_run, ranking_category, ranking_min,
+                collection, ranking_run, ranking_category, ranking_min, activity,
             )
             total = self._total_cache.get(total_key) if include_total else None
             if include_total and total is None:
@@ -1117,6 +1366,7 @@ class DatabaseIndex:
         ranking_min: int = 0,
         sort: str = "path",
         direction: str = "asc",
+        activity: str = "",
     ) -> Dict[str, Any]:
         """Return root host nodes; descendants are loaded on expansion."""
         where, where_values = self._where(
@@ -1131,6 +1381,7 @@ class DatabaseIndex:
             ranking_run,
             ranking_category,
             ranking_min,
+            activity,
         )
         joins, join_values, ranking_score = self._ranking_join(
             ranking_run, ranking_category
@@ -1180,6 +1431,7 @@ class DatabaseIndex:
         ranking_min: int = 0,
         sort: str = "path",
         direction: str = "asc",
+        activity: str = "",
     ) -> Dict[str, Any]:
         """Return immediate children for one host, share, or folder."""
         if not host:
@@ -1196,6 +1448,7 @@ class DatabaseIndex:
             ranking_run,
             ranking_category,
             ranking_min,
+            activity,
         )
         joins, join_values, ranking_score = self._ranking_join(
             ranking_run, ranking_category
@@ -1610,6 +1863,7 @@ class WebHandler(BaseHTTPRequestHandler):
                     "ranking_min",
                     "sort",
                     "direction",
+                    "activity",
                 )
             )
             if filters[6] not in {
@@ -1622,6 +1876,16 @@ class WebHandler(BaseHTTPRequestHandler):
                 "write_owner",
             } or filters[7] not in {"", "collected", "not_collected"}:
                 self._error(400, "Invalid evidence filter", "invalid_query")
+                return
+            if filters[13] not in {
+                "",
+                "downloaded",
+                "not_downloaded",
+                "nemesis_sent",
+                "not_nemesis_sent",
+                "nemesis_failed",
+            }:
+                self._error(400, "Invalid activity filter", "invalid_query")
                 return
             if filters[11] not in {
                 "",
@@ -1673,13 +1937,18 @@ class WebHandler(BaseHTTPRequestHandler):
                             query.get("parent", [""])[0],
                             *filters[4:8],
                             *ranking_args,
+                            activity=filters[13],
                         )
                     )
                 except (AttributeError, ValueError) as exc:
                     self._error(400, str(exc), "invalid_query")
                 return
             if parsed.path == "/api/tree":
-                self._json(state.index.tree(*filters[:8], *ranking_args))
+                self._json(
+                    state.index.tree(
+                        *filters[:8], *ranking_args, activity=filters[13]
+                    )
+                )
                 return
             try:
                 self._json(
@@ -1689,7 +1958,8 @@ class WebHandler(BaseHTTPRequestHandler):
                         int(query.get("per_page", [str(state.index.page_size)])[0]),
                         *filters[4:8],
                         *ranking_args,
-                        query.get("include_total", ["0"])[0] == "1",
+                        activity=filters[13],
+                        include_total=query.get("include_total", ["0"])[0] == "1",
                     )
                 )
             except (ValueError, OverflowError):
@@ -1788,8 +2058,22 @@ class WebHandler(BaseHTTPRequestHandler):
             for name, value in SECURITY_HEADERS.items():
                 self.send_header(name, value)
             self.end_headers()
+            digest = hashlib.sha256()
             with path.open("rb") as handle:
-                shutil.copyfileobj(handle, self.wfile, 64 * 1024)
+                while True:
+                    chunk = handle.read(64 * 1024)
+                    if not chunk:
+                        break
+                    digest.update(chunk)
+                    self.wfile.write(chunk)
+            try:
+                state.index.record_download(record, size, digest.hexdigest())
+            except Exception as exc:
+                logging.warning(
+                    "Failed to record download for %s: %s",
+                    escape_terminal(record.unc_path),
+                    escape_terminal(str(exc)),
+                )
         except DownloadTooLarge:
             self._error(413, "File exceeds download limit", "download_too_large")
         except (BrokenPipeError, ConnectionResetError):
@@ -1902,6 +2186,14 @@ class WebHandler(BaseHTTPRequestHandler):
                         state.nemesis,
                         state.pool.retrieve if state.pool else None,
                         state.nemesis_max,
+                    )
+                try:
+                    state.index.record_nemesis(record, result)
+                except Exception as exc:
+                    logging.warning(
+                        "Failed to record Nemesis status for %s: %s",
+                        escape_terminal(record.unc_path),
+                        escape_terminal(str(exc)),
                     )
                 self._json(result)
             elif path == "/api/review/build":
