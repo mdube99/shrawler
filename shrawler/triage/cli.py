@@ -24,7 +24,7 @@ def _rule_options(parser: argparse.ArgumentParser) -> None:
         "--no-builtins", action="store_true", help="use only supplied rules"
     )
     parser.add_argument(
-        "--scan", help="full or short scan ID; default: latest completed inventory scan"
+        "--scan", help="full or short scan ID; default: latest completed inventory scan with observations"
     )
 
 

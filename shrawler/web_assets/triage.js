@@ -57,7 +57,7 @@
     catalog = await api('/api/triage/catalog');
     const scan = $('scan').value;
     $('scan').replaceChildren(option('', 'Latest completed inventory scan'));
-    catalog.scans.forEach(item => $('scan').append(option(item.id, `${item.short_id} · ${item.status} · ${item.started_at_utc} · ${item.domain}/${item.username}`)));
+    catalog.scans.forEach(item => $('scan').append(option(item.id, `${item.short_id} · ${item.status} · ${Number(item.file_count || 0).toLocaleString()} files · ${item.started_at_utc} · ${item.domain}/${item.username}`)));
     if (catalog.scans.some(item => item.id === scan)) $('scan').value = scan;
     const selected = preferred || $('ranking-run').value;
     $('ranking-run').replaceChildren(option('', 'Select a saved ranking'));

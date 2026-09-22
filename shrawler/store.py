@@ -284,9 +284,11 @@ class ScanStore:
 
     def _select_resume(self, value: str, mode: str) -> Tuple[str, str, str]:
         if value:
+            # An explicit ID may reopen a completed scan to expand depth or
+            # scope; the default only resumes genuinely incomplete work.
             row = self.connection.execute(
                 """SELECT id, short_id, run_dir, mode FROM scans
-                   WHERE (id=? OR short_id=?) AND status!='completed'""",
+                   WHERE id=? OR short_id=?""",
                 (value, value),
             ).fetchone()
         else:

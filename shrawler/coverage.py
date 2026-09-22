@@ -21,6 +21,12 @@ CREATE INDEX IF NOT EXISTS directory_work_status ON directory_work(scan_id,statu
 CREATE TABLE IF NOT EXISTS scan_scope (scan_id TEXT PRIMARY KEY, payload_json TEXT NOT NULL);
 """
 
+# Directory states that deliberately end work for a scan: covered listings, a
+# Snaffler discard, the configured depth boundary, and an expansion selection
+# that skipped a subtree. Only genuinely resumable states (pending, listed,
+# failed) keep a scan partial.
+TERMINAL_STATUSES = ("complete", "excluded", "depth_limit", "scoped")
+
 
 @dataclass
 class SavedEntry:
@@ -168,8 +174,12 @@ class DirectoryCoverage:
     def outstanding(
         self, host: Optional[str] = None, share: Optional[str] = None
     ) -> bool:
-        query = "SELECT 1 FROM directory_work WHERE scan_id=? AND status NOT IN ('complete','excluded')"
-        values = [self.store.scan_id]
+        placeholders = ",".join("?" for _ in TERMINAL_STATUSES)
+        query = (
+            "SELECT 1 FROM directory_work WHERE scan_id=? "
+            f"AND status NOT IN ({placeholders})"
+        )
+        values: List[Any] = [self.store.scan_id, *TERMINAL_STATUSES]
         for key, value in (("host", host), ("share", share)):
             if value is not None:
                 query += " AND " + key + "=?"
@@ -224,7 +234,9 @@ def main(argv: Optional[List[str]] = None) -> int:
                     query += " AND " + key + "=?"
                     values.append(getattr(args, key))
             statuses = {
-                "remaining": "status NOT IN ('complete','excluded')",
+                "remaining": "status NOT IN ("
+                + ",".join(f"'{status}'" for status in TERMINAL_STATUSES)
+                + ")",
                 "failed": "status='failed'",
                 "covered": "entries_json IS NOT NULL",
             }

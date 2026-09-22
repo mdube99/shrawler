@@ -2436,7 +2436,7 @@ class Shrawler(SnafflerEngineMixin):
                 )
             ):
                 coverage.mark(
-                    target, share, path, depth, "pending", "Not selected for expansion"
+                    target, share, path, depth, "scoped", "Not selected for expansion"
                 )
                 continue
             if depth > self.args.max_depth:

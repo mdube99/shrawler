@@ -76,6 +76,10 @@ def connect_readonly(path: Path) -> sqlite3.Connection:
 def select_scan(
     connection: sqlite3.Connection, requested: Optional[str]
 ) -> sqlite3.Row:
+    # Only scans with committed observations are candidates: an empty
+    # "completed" scan (for example, a shares-only pass) must not shadow a
+    # newer inventory that actually holds files.
+    observed = "EXISTS (SELECT 1 FROM scan_files sf WHERE sf.scan_id=scans.id)"
     if requested:
         rows = list(
             connection.execute(
@@ -86,12 +90,22 @@ def select_scan(
         rows = list(
             connection.execute(
                 "SELECT * FROM scans WHERE status='completed' AND mode IN ('spider', 'snaffle') "
-                "ORDER BY started_at_utc DESC, rowid DESC LIMIT 1"
+                f"AND {observed} ORDER BY started_at_utc DESC, rowid DESC LIMIT 1"
             )
         )
+        if not rows:
+            # No completed scan holds observations; prefer the latest inventory
+            # with files (partial/interrupted) so it can still be scored. The
+            # source status is reported to the caller.
+            rows = list(
+                connection.execute(
+                    "SELECT * FROM scans WHERE mode IN ('spider', 'snaffle') "
+                    f"AND {observed} ORDER BY started_at_utc DESC, rowid DESC LIMIT 1"
+                )
+            )
     if len(rows) != 1:
         raise ValueError(
-            "no matching scan; specify --scan with a full or short scan ID (default: latest completed inventory scan)"
+            "no matching scan; specify --scan with a full or short scan ID (default: latest completed inventory scan with observations)"
         )
     if rows[0]["mode"] not in {"spider", "snaffle"}:
         raise ValueError("triage requires a spider or snaffle inventory scan")
@@ -520,8 +534,10 @@ def catalog(database: Path) -> Dict[str, Any]:
         scans = [
             dict(row)
             for row in source.execute(
-                "SELECT id, short_id, mode, status, started_at_utc, domain, username FROM scans "
-                "WHERE mode IN ('spider','snaffle') ORDER BY started_at_utc DESC, rowid DESC LIMIT 200"
+                "SELECT id, short_id, mode, status, started_at_utc, domain, username, "
+                "(SELECT COUNT(*) FROM scan_files sf WHERE sf.scan_id=scans.id) AS file_count "
+                "FROM scans WHERE mode IN ('spider','snaffle') "
+                "ORDER BY started_at_utc DESC, rowid DESC LIMIT 200"
             )
         ]
     scan_ids = {str(scan["id"]) for scan in scans}
