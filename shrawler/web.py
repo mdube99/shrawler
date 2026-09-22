@@ -1493,6 +1493,8 @@ class WebHandler(BaseHTTPRequestHandler):
             "[::1]:" + expected,
         }
         if self.server.allowed_hosts is None:
+            if self.server.server_address[0] in {"0.0.0.0", "::"}:
+                return True
             return raw in loopback
         try:
             hostname, port = urllib.parse.urlsplit("//" + raw).hostname, urllib.parse.urlsplit("//" + raw).port
@@ -1955,10 +1957,8 @@ def run(config: WebConfig, auth: Optional[SMBAuth]) -> int:
         config.nemesis_max_bytes,
     )
     allowed_hosts = None
-    if config.bind not in {"127.0.0.1", "localhost", "::1"}:
+    if config.bind not in {"127.0.0.1", "localhost", "::1", "0.0.0.0", "::"}:
         allowed_hosts = {config.bind}
-        if config.bind in {"0.0.0.0", "::"}:
-            allowed_hosts = None
     server = WebServer((config.bind, config.port), state, allowed_hosts)
     display_host = "127.0.0.1" if config.bind in {"0.0.0.0", "::"} else config.bind
     url = f"http://{display_host}:{server.server_port}/"
