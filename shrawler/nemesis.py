@@ -13,6 +13,7 @@ from typing import Any, Callable, Dict, List, Optional, cast
 from urllib.parse import urlsplit
 
 import requests
+import urllib3
 
 
 @dataclass(frozen=True)
@@ -87,6 +88,7 @@ def upload(config: NemesisConfig, path: Path, record: Dict[str, Any]) -> Dict[st
     if record.get("mtime_utc"):
         metadata["modification_time"] = record["mtime_utc"]
     with path.open("rb") as handle:
+        urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
         response = requests.post(
             config.url.rstrip("/") + "/files",
             files={
