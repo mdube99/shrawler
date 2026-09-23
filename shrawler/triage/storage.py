@@ -2,6 +2,7 @@
 
 import hashlib
 import json
+import os
 import sqlite3
 import uuid
 from contextlib import closing
@@ -53,9 +54,37 @@ CREATE INDEX IF NOT EXISTS triage_priority ON triage_files(run_id, priority DESC
 CREATE INDEX IF NOT EXISTS triage_category_score ON triage_categories(run_id, category, score DESC, file_id);
 """
 
+# Ranking rows are staged here in observation order and moved into the real
+# tables in public_id order at the end of the run. Inserting into the ranked
+# tables (whose keys are the random opaque public_id) in sorted order turns
+# scattered B-tree writes into sequential ones; measured ~6x on 2M rows. The
+# staging tables are dropped when the run finishes.
+STAGE_SCHEMA = """
+CREATE TABLE IF NOT EXISTS triage_stage_files (
+ file_id TEXT NOT NULL, priority INTEGER NOT NULL,
+ metadata_json TEXT NOT NULL, result_json TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS triage_stage_categories (
+ file_id TEXT NOT NULL, category TEXT NOT NULL, score INTEGER NOT NULL
+);
+"""
+
 
 def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _cache_kib(env_name: str, default_mb: int) -> int:
+    """Bounded page cache in KiB, overridable for measurement."""
+    raw = os.environ.get(env_name)
+    if raw:
+        try:
+            megabytes = int(raw)
+        except ValueError:
+            megabytes = 0
+        if megabytes > 0:
+            return megabytes * 1024
+    return default_mb * 1024
 
 
 def result_path(database: Path) -> Path:
@@ -216,6 +245,12 @@ def rank(
             target.execute("PRAGMA journal_mode=WAL")
             target.execute("PRAGMA synchronous=NORMAL")
             target.execute("PRAGMA busy_timeout=5000")
+            # The writer previously used the default page cache. A bounded,
+            # explicit cache keeps upper B-tree pages resident while inserting
+            # rows keyed by random opaque file IDs.
+            target.execute(
+                f"PRAGMA cache_size=-{_cache_kib('SHRAWLER_TRIAGE_CACHE_MB', 128)}"
+            )
             version = target.execute("PRAGMA user_version").fetchone()[0]
             if version not in (0, 1, 2, 3):
                 raise ValueError(f"unsupported triage database version: {version}")
@@ -239,6 +274,10 @@ def rank(
                 ),
             )
             target.commit()
+            target.executescript(STAGE_SCHEMA)
+            target.execute("DELETE FROM triage_stage_files")
+            target.execute("DELETE FROM triage_stage_categories")
+            target.commit()
             try:
                 from .signals import InventorySignals
 
@@ -258,14 +297,29 @@ def rank(
                     on_phase("indexing sibling names", 0)
 
                 engine = Engine(rules, sibling_index.lookup)
+                # Phase accounting. Timers are cheap relative to per-file work
+                # (~160 us/file on the real 2.5M inventory) and let callers see
+                # exactly where scoring time goes.
+                metrics: Dict[str, float] = {
+                    "read": 0.0,
+                    "evaluate": 0.0,
+                    "signals": 0.0,
+                    "serialize": 0.0,
+                    "row_build": 0.0,
+                    "insert": 0.0,
+                }
+                timings["setup_seconds"] = perf_counter() - started
 
                 def score(metadata: Dict[str, Any], raw: str) -> None:
                     nonlocal count
                     if cancelled and cancelled():
                         raise KeyboardInterrupt
+                    mark = perf_counter()
                     digest.update(digest_value(metadata, raw))
                     evaluated = engine.evaluate(metadata)
+                    after_evaluate = perf_counter()
                     inventory_signals.apply(metadata, evaluated)
+                    after_signals = perf_counter()
                     if evaluated["priority"] > 0:
                         summary["positive_files"] += 1
                         group = (
@@ -294,9 +348,9 @@ def rank(
                         result_json = json.dumps(
                             evaluated, sort_keys=True, separators=(",", ":")
                         )
+                    after_serialize = perf_counter()
                     file_rows.append(
                         (
-                            run_id,
                             metadata["file_id"],
                             evaluated["priority"],
                             ""
@@ -309,12 +363,17 @@ def rank(
                     )
                     category_rows.extend(
                         (
-                            (run_id, metadata["file_id"], category, score_value)
+                            (metadata["file_id"], category, score_value)
                             for category, score_value in evaluated[
                                 "category_scores"
                             ].items()
                         )
                     )
+                    after_row = perf_counter()
+                    metrics["evaluate"] += after_evaluate - mark
+                    metrics["signals"] += after_signals - after_evaluate
+                    metrics["serialize"] += after_serialize - after_signals
+                    metrics["row_build"] += after_row - after_serialize
                     count += 1
                     if count % BATCH_SIZE == 0:
                         batch_write()
@@ -323,17 +382,27 @@ def rank(
                         if on_phase:
                             on_phase("scoring", count)
 
+                def score_stream(iterator: Iterator[Tuple[Dict[str, Any], str]]) -> None:
+                    """Score a stream, attributing time between rows to reading."""
+                    last = perf_counter()
+                    for metadata, raw in iterator:
+                        now = perf_counter()
+                        metrics["read"] += now - last
+                        score(metadata, raw)
+                        last = perf_counter()
+
                 if on_phase:
                     on_phase("scoring", 0)
                 file_rows = []
                 category_rows = []
 
                 def batch_write() -> None:
+                    mark = perf_counter()
                     target.executemany(
-                        "INSERT INTO triage_files VALUES (?,?,?,?,?)", file_rows
+                        "INSERT INTO triage_stage_files VALUES (?,?,?,?)", file_rows
                     )
                     target.executemany(
-                        "INSERT INTO triage_categories VALUES (?,?,?,?)",
+                        "INSERT INTO triage_stage_categories VALUES (?,?,?)",
                         category_rows,
                     )
                     file_rows.clear()
@@ -343,8 +412,8 @@ def rank(
                         (count, run_id),
                     )
                     target.commit()
+                    metrics["insert"] += perf_counter() - mark
 
-                scoring_started = perf_counter()
                 stream = observables(source, scan["id"])
                 if indexing_needed:
                     if on_phase:
@@ -353,6 +422,7 @@ def rank(
                     # and score in the same stream; the leading batch stays
                     # alive in memory so it is not parsed a second time.
                     staged: List[Tuple[Dict[str, Any], str]] = []
+                    indexing_started = perf_counter()
                     for indexed, (metadata, raw) in enumerate(stream, 1):
                         if cancelled and cancelled():
                             raise KeyboardInterrupt
@@ -369,23 +439,54 @@ def rank(
                     sibling_index.flush()
                     inventory_signals.flush()
                     target.commit()
-                    timings["indexing_seconds"] = perf_counter() - started
+                    timings["indexing_seconds"] = perf_counter() - indexing_started
+                    scoring_started = perf_counter()
                     for metadata, raw in staged:
                         score(metadata, raw)
                     # Second cursor; the staged prefix is skipped unparsed.
-                    for metadata, raw in observables(
-                        source, scan["id"], skip=BATCH_SIZE
-                    ):
-                        score(metadata, raw)
+                    score_stream(observables(source, scan["id"], skip=BATCH_SIZE))
                 else:
-                    for metadata, raw in stream:
-                        score(metadata, raw)
+                    timings["indexing_seconds"] = 0.0
+                    scoring_started = perf_counter()
+                    score_stream(stream)
+                finalize_started = perf_counter()
+                # Flush the trailing partial batch into staging, then move all
+                # rows into the ranked tables in public_id order. The ranked
+                # keys are random opaque IDs, so sorted insertion turns
+                # scattered B-tree writes into sequential ones.
                 target.executemany(
-                    "INSERT INTO triage_files VALUES (?,?,?,?,?)", file_rows
+                    "INSERT INTO triage_stage_files VALUES (?,?,?,?)", file_rows
                 )
                 target.executemany(
-                    "INSERT INTO triage_categories VALUES (?,?,?,?)", category_rows
+                    "INSERT INTO triage_stage_categories VALUES (?,?,?)", category_rows
                 )
+                file_rows.clear()
+                category_rows.clear()
+                materialize_started = perf_counter()
+                target.execute(
+                    "CREATE INDEX IF NOT EXISTS triage_stage_files_idx "
+                    "ON triage_stage_files(file_id)"
+                )
+                target.execute(
+                    "CREATE INDEX IF NOT EXISTS triage_stage_categories_idx "
+                    "ON triage_stage_categories(file_id)"
+                )
+                target.execute(
+                    "INSERT INTO triage_files"
+                    "(run_id,file_id,priority,metadata_json,result_json) "
+                    "SELECT ?,file_id,priority,metadata_json,result_json "
+                    "FROM triage_stage_files ORDER BY file_id",
+                    (run_id,),
+                )
+                target.execute(
+                    "INSERT INTO triage_categories(run_id,file_id,category,score) "
+                    "SELECT ?,file_id,category,score "
+                    "FROM triage_stage_categories ORDER BY file_id",
+                    (run_id,),
+                )
+                timings["materialize_seconds"] = perf_counter() - materialize_started
+                target.execute("DROP TABLE IF EXISTS triage_stage_files")
+                target.execute("DROP TABLE IF EXISTS triage_stage_categories")
                 target.execute(
                     "INSERT INTO triage_summaries VALUES (?,?)",
                     (run_id, json.dumps(summary)),
@@ -395,11 +496,21 @@ def rank(
                     (utc_now(), count, digest.hexdigest(), run_id),
                 )
                 target.commit()
+                timings["finalize_seconds"] = perf_counter() - finalize_started
                 timings["scoring_and_saving_seconds"] = (
                     perf_counter() - scoring_started
                 )
+                timings["read_and_parse_seconds"] = metrics["read"]
+                timings["evaluate_seconds"] = metrics["evaluate"]
+                timings["signals_seconds"] = metrics["signals"]
+                timings["serialize_seconds"] = metrics["serialize"]
+                timings["row_build_seconds"] = metrics["row_build"]
+                timings["insert_seconds"] = metrics["insert"]
             except BaseException as exc:
                 target.rollback()
+                # Leave the derived database clean even when a run fails.
+                target.execute("DROP TABLE IF EXISTS triage_stage_files")
+                target.execute("DROP TABLE IF EXISTS triage_stage_categories")
                 persisted = target.execute(
                     "SELECT COUNT(*) FROM triage_files WHERE run_id=?", (run_id,)
                 ).fetchone()[0]

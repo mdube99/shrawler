@@ -57,12 +57,18 @@ class InventorySignals:
             self._pending[key] = self._pending.get(key, 0) + 1
 
     def flush(self) -> None:
-        """Persist staged counts; pending counts always overlay query results."""
+        """Persist staged counts; pending counts always overlay query results.
+
+        The staged value is the number of files observed for this key since the
+        last flush, so an existing row must accumulate the whole value. Using
+        ``n=n+1`` silently undercounts whenever a key spans a flush boundary
+        (large directories, or repeated flush calls).
+        """
         if not self._pending:
             return
         self.db.executemany(
             """INSERT INTO directory_extensions VALUES (?,?,?,?,?)
-            ON CONFLICT(host,share,parent,extension) DO UPDATE SET n=n+1""",
+            ON CONFLICT(host,share,parent,extension) DO UPDATE SET n=n+excluded.n""",
             [(*key, value) for key, value in self._pending.items()],
         )
         self._pending.clear()
