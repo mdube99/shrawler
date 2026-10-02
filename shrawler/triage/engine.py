@@ -5,9 +5,9 @@ from collections import OrderedDict
 from fnmatch import translate
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
-from .rules import RuleSet
+from .rules import RuleSet, parse_timestamp
 
-ENGINE_VERSION = "3"
+ENGINE_VERSION = "4"
 
 SiblingLookup = Callable[
     [str, str, Tuple[str, ...], Dict[str, Any]], List[Dict[str, Any]]
@@ -37,8 +37,14 @@ class Engine:
             prepared_when = {}
             for condition, expected in rule["when"].items():
                 self._needed_conditions.add(condition)
-                if condition in {"min_size_bytes", "max_size_bytes", "context_any"}:
+                if condition in {
+                    "min_size_bytes",
+                    "max_size_bytes",
+                    "context_any",
+                }:
                     prepared_when[condition] = expected
+                elif condition in {"modified_before", "modified_after"}:
+                    prepared_when[condition] = parse_timestamp(expected)
                 elif condition == "filename_glob_any":
                     prepared_when[condition] = tuple(
                         re.compile(translate(value.casefold())).match
@@ -85,9 +91,10 @@ class Engine:
                 ancestor = parent[: len(parent) - distance]
                 witnesses: List[Dict[str, Any]] = []
                 if "directory_name_any" in context:
-                    match = bool(ancestor) and ancestor[-1].casefold() in context[
-                        "directory_name_any"
-                    ]
+                    match = (
+                        bool(ancestor)
+                        and ancestor[-1].casefold() in context["directory_name_any"]
+                    )
                 elif "directory_name_contains_any" in context:
                     match = bool(ancestor) and any(
                         term in ancestor[-1].casefold()
@@ -101,8 +108,7 @@ class Engine:
                     match = (
                         host.casefold() == context["host"]
                         and share.casefold() == context["share"]
-                        and tuple(p.casefold() for p in ancestor)
-                        == context["path"]
+                        and tuple(p.casefold() for p in ancestor) == context["path"]
                     )
                 if match:
                     evidence.append(
@@ -129,9 +135,22 @@ class Engine:
         metadata: Dict[str, Any],
     ) -> bool:
         """Boolean-only condition check; evidence is rebuilt later for matched rules."""
+        if condition in {"modified_before", "modified_after"}:
+            actual = parse_timestamp(metadata.get("mtime_utc"))
+            if actual is None or expected is None:
+                return False
+            return (
+                actual < expected
+                if condition == "modified_before"
+                else actual > expected
+            )
         if condition in {"min_size_bytes", "max_size_bytes"}:
             actual = metadata["size_bytes"]
-            return actual >= expected if condition == "min_size_bytes" else actual <= expected
+            return (
+                actual >= expected
+                if condition == "min_size_bytes"
+                else actual <= expected
+            )
         if condition.endswith("contains_any"):
             for value in values[condition]:
                 for pattern in expected:
@@ -164,14 +183,30 @@ class Engine:
         values: Dict[str, Any] = {}
         if "extension_any" in self._needed_conditions:
             values["extension_any"] = [extension]
-        if {"filename_any", "filename_glob_any", "filename_contains_any"} & self._needed_conditions:
-            values.update({key: [folded] for key in ("filename_any", "filename_glob_any", "filename_contains_any") if key in self._needed_conditions})
+        if {
+            "filename_any",
+            "filename_glob_any",
+            "filename_contains_any",
+        } & self._needed_conditions:
+            values.update(
+                {
+                    key: [folded]
+                    for key in (
+                        "filename_any",
+                        "filename_glob_any",
+                        "filename_contains_any",
+                    )
+                    if key in self._needed_conditions
+                }
+            )
         if "filename_token_any" in self._needed_conditions:
             values["filename_token_any"] = tokens(name)
         parent_name = parent[-1].casefold() if parent else ""
         for key in ("parent_name_any", "parent_name_contains_any"):
             if key in self._needed_conditions:
                 values[key] = [parent_name] if parent else []
+        if "path_segment_any" in self._needed_conditions:
+            values["path_segment_any"] = [part.casefold() for part in parent]
         if "host_any" in self._needed_conditions:
             values["host_any"] = [str(metadata["host"]).casefold()]
         if "share_any" in self._needed_conditions:
@@ -207,6 +242,8 @@ class Engine:
             for condition, expected in rule["when"].items():
                 if condition in {"min_size_bytes", "max_size_bytes"}:
                     evidence[condition] = metadata["size_bytes"]
+                elif condition in {"modified_before", "modified_after"}:
+                    evidence[condition] = metadata.get("mtime_utc")
                 elif condition.endswith("contains_any"):
                     hits = [
                         value
@@ -221,9 +258,9 @@ class Engine:
                     ]
                 elif condition == "filename_glob_any":
                     value = values[condition][0]
-                    evidence[condition] = [
-                        value
-                    ] if any(pattern(value) for pattern in expected) else []
+                    evidence[condition] = (
+                        [value] if any(pattern(value) for pattern in expected) else []
+                    )
                 else:
                     value_list = values[condition]
                     hits = [value for value in value_list if value in expected]

@@ -215,7 +215,6 @@ def _lean_zero_result(evaluated: Dict[str, Any]) -> str:
     )
 
 
-
 def rank(
     database: Path,
     rules: RuleSet,
@@ -285,13 +284,10 @@ def rank(
                 inventory_signals = InventorySignals(
                     target,
                     database,
-                    any(
-                        rule["id"].startswith("builtin.")
-                        for rule in rules.document.get("rules", [])
-                    ),
+                    rules.document.get("rarity", []),
                 )
                 indexing_needed = bool(
-                    sibling_index.contexts or inventory_signals.builtins
+                    sibling_index.contexts or inventory_signals.rarity
                 )
                 if indexing_needed and on_phase:
                     on_phase("indexing sibling names", 0)
@@ -382,7 +378,9 @@ def rank(
                         if on_phase:
                             on_phase("scoring", count)
 
-                def score_stream(iterator: Iterator[Tuple[Dict[str, Any], str]]) -> None:
+                def score_stream(
+                    iterator: Iterator[Tuple[Dict[str, Any], str]],
+                ) -> None:
                     """Score a stream, attributing time between rows to reading."""
                     last = perf_counter()
                     for metadata, raw in iterator:
@@ -497,9 +495,7 @@ def rank(
                 )
                 target.commit()
                 timings["finalize_seconds"] = perf_counter() - finalize_started
-                timings["scoring_and_saving_seconds"] = (
-                    perf_counter() - scoring_started
-                )
+                timings["scoring_and_saving_seconds"] = perf_counter() - scoring_started
                 timings["read_and_parse_seconds"] = metrics["read"]
                 timings["evaluate_seconds"] = metrics["evaluate"]
                 timings["signals_seconds"] = metrics["signals"]

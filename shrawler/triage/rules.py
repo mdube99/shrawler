@@ -4,6 +4,7 @@ import hashlib
 import json
 import sys
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, cast
 
@@ -53,6 +54,26 @@ def _integer(value: Any, location: str) -> None:
         raise ValueError(f"{location}: expected an integer between 0 and 1000000")
 
 
+def parse_timestamp(value: Any) -> Optional[datetime]:
+    """Parse an ISO 8601 timestamp into an aware UTC datetime, or None.
+
+    Naive values are assumed to be UTC. The trailing ``Z`` form accepted by
+    web tooling is normalized before parsing so Python 3.8 behaves like 3.11.
+    """
+    if not isinstance(value, str) or not value.strip():
+        return None
+    text = value.strip()
+    if text[-1:] in {"Z", "z"}:
+        text = text[:-1] + "+00:00"
+    try:
+        parsed = datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed
+
+
 CONDITIONS = {
     "extension_any",
     "filename_any",
@@ -61,21 +82,43 @@ CONDITIONS = {
     "filename_contains_any",
     "parent_name_any",
     "parent_name_contains_any",
+    "path_segment_any",
     "context_any",
     "host_any",
     "share_any",
     "min_size_bytes",
     "max_size_bytes",
+    "modified_before",
+    "modified_after",
+}
+
+
+# Rarity entries describe directory-population thresholds rather than a single
+# file, so they are validated separately from per-file rules.
+RARITY_FIELDS = {
+    "id",
+    "description",
+    "category",
+    "signal_group",
+    "points",
+    "minimum_directory_files",
+    "maximum_same_extension_ratio",
+    "minimum_dominant_extension_ratio",
 }
 
 
 def validate(document: Dict[str, Any]) -> RuleSet:
-    _keys(document, {"version", "contexts", "rules"}, {"version"}, "ruleset")
+    _keys(
+        document,
+        {"version", "contexts", "rules", "rarity"},
+        {"version"},
+        "ruleset",
+    )
     if type(document["version"]) is not int or document["version"] != 1:
         raise ValueError("ruleset version must be 1")
     ids: Set[str] = set()
     tags: Set[str] = set()
-    for kind in ("contexts", "rules"):
+    for kind in ("contexts", "rules", "rarity"):
         entries = document.get(kind, [])
         if not isinstance(entries, list):
             raise ValueError(f"{kind} must be an array of tables")
@@ -160,6 +203,37 @@ def validate(document: Dict[str, Any]) -> RuleSet:
                         raise ValueError(
                             f"{identifier}: path cannot contain . or .. segments"
                         )
+            elif kind == "rarity":
+                _keys(entry, RARITY_FIELDS, RARITY_FIELDS, identifier)
+                for key in ("description", "category", "signal_group"):
+                    _text(entry[key], f"{identifier}.{key}")
+                _integer(entry["points"], identifier)
+                _integer(entry["minimum_directory_files"], identifier)
+                if entry["minimum_directory_files"] < 1:
+                    raise ValueError(
+                        f"{identifier}: minimum_directory_files must be at least 1"
+                    )
+                for key in (
+                    "maximum_same_extension_ratio",
+                    "minimum_dominant_extension_ratio",
+                ):
+                    ratio = entry[key]
+                    if isinstance(ratio, bool) or not isinstance(ratio, (int, float)):
+                        raise ValueError(
+                            f"{identifier}.{key}: expected a ratio between 0 and 1"
+                        )
+                    if not 0 <= ratio <= 1:
+                        raise ValueError(
+                            f"{identifier}.{key}: expected a ratio between 0 and 1"
+                        )
+                if (
+                    entry["maximum_same_extension_ratio"]
+                    > entry["minimum_dominant_extension_ratio"]
+                ):
+                    raise ValueError(
+                        f"{identifier}: maximum_same_extension_ratio cannot exceed "
+                        "minimum_dominant_extension_ratio"
+                    )
             else:
                 _keys(
                     entry,
@@ -188,6 +262,12 @@ def validate(document: Dict[str, Any]) -> RuleSet:
                             raise ValueError(
                                 f"{identifier}.{key}: expected a nonnegative integer"
                             )
+                    elif key in {"modified_before", "modified_after"}:
+                        _text(value, f"{identifier}.{key}")
+                        if parse_timestamp(value) is None:
+                            raise ValueError(
+                                f"{identifier}.{key}: expected an ISO 8601 timestamp"
+                            )
                     else:
                         _strings(value, f"{identifier}.{key}")
                 if when.get("min_size_bytes", 0) > when.get(
@@ -214,14 +294,19 @@ def load(paths: Optional[List[Path]] = None, builtins: bool = True) -> RuleSet:
             files.extend(found)
         else:
             files.append(path)
-    document: Dict[str, Any] = {"version": 1, "contexts": [], "rules": []}
+    document: Dict[str, Any] = {"version": 1, "contexts": [], "rules": [], "rarity": []}
     for path in files:
         with path.open("rb") as handle:
             part = tomllib.load(handle)
-        _keys(part, {"version", "contexts", "rules"}, {"version"}, str(path))
+        _keys(
+            part,
+            {"version", "contexts", "rules", "rarity"},
+            {"version"},
+            str(path),
+        )
         if type(part["version"]) is not int or part["version"] != 1:
             raise ValueError(f"{path}: ruleset version must be 1")
-        for kind in ("contexts", "rules"):
+        for kind in ("contexts", "rules", "rarity"):
             entries = part.get(kind, [])
             if not isinstance(entries, list):
                 raise ValueError(f"{path}: {kind} must be an array of tables")
@@ -232,11 +317,16 @@ def load(paths: Optional[List[Path]] = None, builtins: bool = True) -> RuleSet:
 def load_text(text: str, builtins: bool = True) -> RuleSet:
     """Parse browser/CLI-supplied TOML without interpreting filesystem paths."""
     part = tomllib.loads(text)
-    _keys(part, {"version", "contexts", "rules"}, {"version"}, "ruleset")
+    _keys(
+        part,
+        {"version", "contexts", "rules", "rarity"},
+        {"version"},
+        "ruleset",
+    )
     if type(part["version"]) is not int or part["version"] != 1:
         raise ValueError("ruleset version must be 1")
     document = json.loads(load(builtins=builtins).canonical)
-    for kind in ("contexts", "rules"):
+    for kind in ("contexts", "rules", "rarity"):
         entries = part.get(kind, [])
         if not isinstance(entries, list):
             raise ValueError(f"{kind} must be an array of tables")

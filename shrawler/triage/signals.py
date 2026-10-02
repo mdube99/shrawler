@@ -3,7 +3,7 @@
 from collections import OrderedDict
 from contextlib import closing
 from pathlib import Path
-from typing import Any, Dict, Tuple
+from typing import Any, Dict, List, Tuple
 
 from .storage import connect_readonly
 
@@ -13,9 +13,9 @@ _PendingKey = Tuple[str, str, str, str]
 
 
 class InventorySignals:
-    def __init__(self, db: Any, database: Path, builtins: bool):
+    def __init__(self, db: Any, database: Path, rarity: List[Dict[str, Any]]) -> None:
         self.db = db
-        self.builtins = builtins
+        self.rarity = list(rarity or [])
         self._directory_cache = OrderedDict()
         self._pending: Dict[_PendingKey, int] = {}
         self._file_reviews = {}
@@ -52,7 +52,7 @@ class InventorySignals:
         )
 
     def observe(self, metadata: Dict[str, Any]) -> None:
-        if self.builtins:
+        if self.rarity:
             key = self.key(metadata)
             self._pending[key] = self._pending.get(key, 0) + 1
 
@@ -91,7 +91,7 @@ class InventorySignals:
     def apply(self, metadata: Dict[str, Any], result: Dict[str, Any]) -> None:
         from .review import family_key
 
-        if self.builtins:
+        if self.rarity:
             key = self.key(metadata)
             directory = key[:3]
             counts = self._directory_cache.get(directory)
@@ -104,15 +104,26 @@ class InventorySignals:
                 self._directory_cache.move_to_end(directory)
             total, dominant = counts[None]
             matching = counts.get(key[3], 0)
-            if total >= 20 and matching * 20 <= total and dominant * 5 >= total * 4:
+            matched: Dict[Tuple[str, str], int] = {}
+            for config in self.rarity:
+                if total < config["minimum_directory_files"]:
+                    continue
+                if matching > total * config["maximum_same_extension_ratio"]:
+                    continue
+                if dominant < total * config["minimum_dominant_extension_ratio"]:
+                    continue
+                matched[(config["category"], config["signal_group"])] = max(
+                    matched.get((config["category"], config["signal_group"]), 0),
+                    config["points"],
+                )
                 result["signals"].append(
                     {
-                        "rule_id": "builtin.rare-extension",
-                        "category": "unusual-files",
-                        "signal_group": "directory-rarity",
-                        "description": "Uncommon extension in a repetitive observed directory",
-                        "points": 10,
-                        "credited_points": 10,
+                        "rule_id": config["id"],
+                        "category": config["category"],
+                        "signal_group": config["signal_group"],
+                        "description": config["description"],
+                        "points": config["points"],
+                        "credited_points": config["points"],
                         "evidence": {
                             "observed_files": total,
                             "same_extension": matching,
@@ -122,8 +133,11 @@ class InventorySignals:
                         },
                     }
                 )
-                result["category_scores"]["unusual-files"] = 10
-                result["priority"] = max(result["priority"], 10)
+            for (category, _group), points in matched.items():
+                result["category_scores"][category] = (
+                    result["category_scores"].get(category, 0) + points
+                )
+                result["priority"] = max(result["priority"], points)
         family = family_key(metadata)
         result["family_id"] = family
         # An explicit file decision overrides a family decision. Undo exposes

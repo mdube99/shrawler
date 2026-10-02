@@ -103,6 +103,46 @@ such as `compass`; its explanation records exactly which fragment matched.
 These weights are initial heuristics, not calibrated findings.
 There are no automatic downloads, content classifiers, or network actions.
 
+### Exact-name, extension, and location signals
+
+Engine version 4 adds higher-precision starter rules for files whose name alone
+identifies them:
+
+- **Exact filenames** (`filename_any`) score the highest-value objects. Active
+  Directory stores (`ntds.dit`, `sam`, `system`, `security`) score 80 when at
+  least 64 KiB. Plaintext credential files (`.git-credentials`, `.netrc`,
+  `.pgpass`, `wallet.dat`, `.htpasswd`) score 50; SSH private and host keys 45;
+  saved remote-console profiles (`*.rdg`, `confCons.xml`, mRemoteNG) 45;
+  package-manager authentication files and browser credential stores 40;
+  deployment answer files (`unattend.xml`, `customsettings.ini`, `variables.dat`)
+  and web application configuration (`wp-config.php`, `configuration.php`) 35;
+  and Group Policy Preferences files (`groups.xml`, `services.xml`, and peers)
+  30.
+- **Share-scoped names**: Group Policy Preferences files observed on a `SYSVOL`
+  or `NETLOGON` share score 70. The `share_any` condition raises the same
+  filename set once the recorded share matches.
+- **Environment files**: `.env`, `.env.production`, `settings.env`, and similar
+  names score 40. Extension-only matching missed multi-suffix names such as
+  `.env.production`, whose derived extension is `.production`; a filename glob
+  now covers the family.
+- **High-value extensions**: password-manager and Kerberos material (`.psafe3`,
+  `.keytab`) 55, Kerberos caches (`.ccache`) 40, key containers (`.pfx`, `.p12`,
+  `.jks`) 35, and PEM files 20. Memory dumps (`.dmp`) score 35, packet captures
+  25, virtual disks (`.vmdk`, `.vhd(x)`, `.wim`) 20, and VPN or RDP profiles
+  15–30.
+- **Configuration family**: `web.config`, `app.config`, `machine.config`, and
+  `appsettings*.json` score 30 in `infrastructure`, while backup copies such as
+  `web.config.bak` or `appsettings.json.old` score 35. A lone `web.config` now
+  ranks instead of dropping to fallback review.
+- **Location**: files under `.ssh` score 20, under cloud credential directories
+  (`.aws`, `.azure`, `.gcloud`, `.kube`) 25, and under finance or personnel
+  directories 15 in `financial-data` or `personal-information`.
+
+Exact-name rules share a signal group with the token rule for the same kind of
+file, so `.git-credentials` keeps the stronger 50 rather than adding the
+25-point name token. Independent location and extension groups do add to their
+category score, as the group rules below describe.
+
 ### Credential signals, operational scripts, and extension fallback
 
 The default rules retain broad `cred`, `pass`, and `ssn` filename matches across
@@ -219,6 +259,11 @@ edges below it. Maximum depth is 64. Each context definition reports its nearest
 matching ancestor. Multiple definitions can assign the same tag. Labels do not
 propagate across hosts/shares or infer other labels.
 
+A ruleset may also include optional top-level `[[rarity]]` tables that score a
+file from the observed extension population of its directory. They are described
+under [Rarity and review feedback](#rarity-and-review-feedback); rules and
+contexts score individual files, while a rarity entry scores a population.
+
 ### Sibling context
 
 ```toml
@@ -257,16 +302,22 @@ Supported file conditions:
 | `filename_contains_any` | Literal substring anywhere in the filename; e.g. `cred`, `pass`, `ssn` |
 | `parent_name_any` | Exact immediate parent directory name |
 | `parent_name_contains_any` | Literal substring in the immediate parent directory name |
+| `path_segment_any` | Exact directory segment at any depth; the filename is excluded |
 | `context_any` | Any applicable context tag (tag identifiers are case-sensitive) |
 | `host_any` | Exact recorded host name; no hostname resolution or alias inference |
 | `share_any` | Exact share name |
 | `min_size_bytes` | Inclusive minimum observed size |
 | `max_size_bytes` | Inclusive maximum observed size |
+| `modified_before` | ISO 8601 timestamp; matches when the observed mtime is earlier |
+| `modified_after` | ISO 8601 timestamp; matches when the observed mtime is later |
 
 All string matching except context-tag identifiers is case-insensitive. Literal
 conditions do not interpret regex or glob metacharacters. Only
 `filename_glob_any` interprets file-condition globs; `sibling_name_any` interprets
-context-marker globs. The original metadata remains intact.
+context-marker globs. `path_segment_any` matches a whole path component, so
+`.ssh` matches `.ssh` but not `.ssh2`. Timestamp conditions parse ISO 8601 values
+(naive values are treated as UTC) and never match when the observation has no
+mtime. The original metadata remains intact.
 Rule points are nonnegative integers up to 1000000. Negative weights and discard
 actions are deliberately unsupported in this version.
 
@@ -304,7 +355,7 @@ saved ranking runs.
 ## Historical initial scale check
 
 A local synthetic benchmark evaluated 2,000,000 observations with the six starter
-rules, sibling context enabled, and 100 files per directory:
+rules current at that time, sibling context enabled, and 100 files per directory:
 
 | Measurement | Result |
 | :--- | :--- |
@@ -325,13 +376,32 @@ their own measurements.
 
 ## Rarity and review feedback
 
-Ranking engine version 3 adds financial-data and customer-information starter
-categories based on filename tokens. It also compares extensions within each
-observed directory: with at least 20 files, an extension occurring in at most 5%
-of files receives an unusual-files score of 10 when a dominant extension accounts
-for at least 80%. Explanations preserve those counts. This detects an unusual
-extension, not sensitive content or absence from an unlisted area. Rarity is
-active when built-in rules are included; custom-only rules do not add it.
+Ranking engine version 4 adds exact-name, extension, and location starter rules
+and moves directory rarity into the ruleset. Earlier engines compiled the rarity
+thresholds into the scorer; a ranking now applies the `[[rarity]]` tables present
+in its ruleset:
+
+```toml
+[[rarity]]
+id = "builtin.rare-extension"
+description = "Uncommon extension in a repetitive observed directory"
+category = "unusual-files"
+signal_group = "directory-rarity"
+points = 10
+minimum_directory_files = 20
+maximum_same_extension_ratio = 0.05
+minimum_dominant_extension_ratio = 0.8
+```
+
+Each entry compares extensions within an observed directory. A directory with at
+least `minimum_directory_files` files yields the signal when the current file's
+extension occurs in at most `maximum_same_extension_ratio` of the files and a
+single dominant extension accounts for at least `minimum_dominant_extension_ratio`.
+Explanations preserve those counts. This detects an unusual extension, not
+sensitive content or absence from an unlisted area. Ratios are between 0 and 1,
+the same-extension ratio cannot exceed the dominant ratio, and rarity IDs share
+the uniqueness namespace with rules and contexts. Custom-only rulesets that omit
+the table add no rarity signal.
 
 [Analyst decisions](families.md) are snapshotted when ranking starts. Relevant
 files receive an analyst-review score of 100; reviewed, deferred, and excluded
@@ -344,9 +414,9 @@ review feedback and does not measure their additional cost.
 
 The reproducible [benchmark script](../scripts/benchmark_triage.py) generated
 2,000,000 observations in 20,000 directories, each with 99 numbered CSV reports
-and one configuration file. Ranking included the eight starter rules, sibling
-indexing, rarity indexing, and review lookup. Family normalization collapsed
-this deliberately repetitive fixture into two large families.
+and one configuration file. Ranking included the then-current starter rules,
+sibling indexing, rarity indexing, and review lookup. Family normalization
+collapsed this deliberately repetitive fixture into two large families.
 
 | Measurement | Result |
 | --- | --- |

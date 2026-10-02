@@ -172,3 +172,332 @@ signal_group = "identity-name"
 points = 25
 [rules.when]
 filename_glob_any = ["*social*security*", "*national*id*"]
+
+# --- Exact-name rules: highest-precision metadata signals ---
+
+[[rules]]
+id = "builtin.ad-directory-store"
+description = "Active Directory database or registry hive filename"
+category = "credentials"
+signal_group = "password-database"
+points = 80
+[rules.when]
+filename_any = ["ntds.dit", "sam", "system", "security"]
+min_size_bytes = 65536
+
+[[rules]]
+id = "builtin.credential-file-name"
+description = "Plaintext credential store filename"
+category = "credentials"
+signal_group = "credential-name"
+points = 50
+[rules.when]
+filename_any = [".git-credentials", ".netrc", ".pgpass", "wallet.dat", ".htpasswd"]
+
+[[rules]]
+id = "builtin.package-manager-credentials"
+description = "Package manager authentication file"
+category = "credentials"
+signal_group = "credential-name"
+points = 40
+[rules.when]
+filename_any = [".npmrc", ".pypirc"]
+
+[[rules]]
+id = "builtin.ssh-private-key-name"
+description = "SSH private or host key filename"
+category = "credentials"
+signal_group = "ssh-key"
+points = 45
+[rules.when]
+filename_any = ["id_rsa", "id_dsa", "id_ecdsa", "id_ed25519", "ssh_host_rsa_key", "ssh_host_dsa_key", "ssh_host_ecdsa_key", "ssh_host_ed25519_key"]
+
+[[rules]]
+id = "builtin.ssh-metadata-name"
+description = "SSH authorization or known-host filename"
+category = "credentials"
+signal_group = "ssh-key"
+points = 20
+[rules.when]
+filename_any = ["authorized_keys", "known_hosts"]
+
+[[rules]]
+id = "builtin.browser-credential-store"
+description = "Browser credential or cookie store filename"
+category = "credentials"
+signal_group = "credential-name"
+points = 40
+[rules.when]
+filename_any = ["logins.json", "login data", "key4.db", "key3.db", "cookies.sqlite", "web data"]
+
+[[rules]]
+id = "builtin.database-tool-credential"
+description = "Database client config that can retain saved connections"
+category = "credentials"
+signal_group = "credential-name"
+points = 40
+[rules.when]
+filename_any = ["sqlstudio.bin", ".dbeaver-data-sources.xml", "dbvis.xml", "robomongo.json", "credentials-config.json"]
+
+[[rules]]
+id = "builtin.remote-console-credential"
+description = "Saved remote-console configuration that may retain credentials"
+category = "credentials"
+signal_group = "credential-name"
+points = 45
+[rules.when]
+filename_glob_any = ["*.rdg", "confcons.xml", "mremoteng*.xml", "mremoteng*.conf"]
+
+[[rules]]
+id = "builtin.gpp-cpassword"
+description = "Group Policy Preferences file that may contain cpassword data"
+category = "credentials"
+signal_group = "credential-name"
+points = 30
+[rules.when]
+filename_any = ["groups.xml", "services.xml", "scheduledtasks.xml", "printers.xml", "drives.xml", "datasources.xml"]
+
+[[rules]]
+id = "builtin.gpp-cpassword-sysvol"
+description = "Group Policy Preferences file observed on a SYSVOL or NETLOGON share"
+category = "credentials"
+signal_group = "credential-name"
+points = 70
+[rules.when]
+filename_any = ["groups.xml", "services.xml", "scheduledtasks.xml", "printers.xml", "drives.xml", "datasources.xml"]
+share_any = ["sysvol", "netlogon"]
+
+[[rules]]
+id = "builtin.env-file"
+description = "Environment secret file by name"
+category = "credentials"
+signal_group = "credential-name"
+points = 40
+[rules.when]
+filename_glob_any = [".env", ".env.*", "*.env", "*.env.*"]
+
+[[rules]]
+id = "builtin.unattend-credential"
+description = "Unattended installation or deployment answer file"
+category = "credentials"
+signal_group = "credential-name"
+points = 35
+[rules.when]
+filename_any = ["unattend.xml", "autounattend.xml", "sysprep.inf", "sysprep.xml", "customsettings.ini", "bootstrap.ini", "variables.dat"]
+
+[[rules]]
+id = "builtin.web-app-credential-config"
+description = "Web application configuration that commonly stores credentials"
+category = "credentials"
+signal_group = "credential-name"
+points = 35
+[rules.when]
+filename_any = ["wp-config.php", "configuration.php", "localsettings.php", "config.php", "secrets.php"]
+
+[[rules]]
+id = "builtin.web-config-family"
+description = "IIS or .NET application configuration filename"
+category = "infrastructure"
+signal_group = "configuration"
+points = 30
+[rules.when]
+filename_glob_any = ["web.config", "web.*.config", "machine.config", "app.config", "appsettings.json", "appsettings.*.json", "connectionstrings.config"]
+
+[[rules]]
+id = "builtin.stale-config-copy"
+description = "Backup copy of a configuration file"
+category = "infrastructure"
+signal_group = "configuration"
+points = 35
+[rules.when]
+filename_glob_any = ["*.config.bak", "*.config.old", "*.config.orig", "*.ini.bak", "*.ini.old", "*.json.bak", "*.json.old", "*.env.bak", "*.env.old", "copy of *config*", "copy of *settings*"]
+
+# --- High-value file extensions ---
+
+[[rules]]
+id = "builtin.password-manager-extension"
+description = "Password manager database extension"
+category = "credentials"
+signal_group = "password-database"
+points = 55
+[rules.when]
+extension_any = [".psafe3", ".kwallet", ".keychain", ".1pif", ".opvault"]
+
+[[rules]]
+id = "builtin.private-key-extension"
+description = "Private key or Kerberos keytab extension"
+category = "credentials"
+signal_group = "password-database"
+points = 55
+[rules.when]
+extension_any = [".ppk", ".keytab"]
+
+[[rules]]
+id = "builtin.kerberos-cache-extension"
+description = "Kerberos ticket cache or dump extension"
+category = "credentials"
+signal_group = "password-database"
+points = 40
+[rules.when]
+extension_any = [".ccache", ".kirbi"]
+
+[[rules]]
+id = "builtin.private-key-container"
+description = "Private key container extension"
+category = "credentials"
+signal_group = "password-database"
+points = 35
+[rules.when]
+extension_any = [".pfx", ".p12", ".jks", ".keystore"]
+
+[[rules]]
+id = "builtin.pem-extension"
+description = "PEM key or certificate file"
+category = "infrastructure"
+signal_group = "certificate"
+points = 20
+[rules.when]
+extension_any = [".pem"]
+
+[[rules]]
+id = "builtin.bitlocker-key"
+description = "BitLocker recovery key material by filename"
+category = "credentials"
+signal_group = "credential-name"
+points = 50
+[rules.when]
+filename_glob_any = ["*.bek", "*bitlocker*", "*recovery*key*"]
+
+[[rules]]
+id = "builtin.memory-dump-extension"
+description = "Process or crash memory dump extension"
+category = "infrastructure"
+signal_group = "memory-capture"
+points = 35
+[rules.when]
+extension_any = [".dmp", ".hdmp", ".mdmp"]
+
+[[rules]]
+id = "builtin.packet-capture-extension"
+description = "Network packet capture extension"
+category = "infrastructure"
+signal_group = "network-capture"
+points = 25
+[rules.when]
+extension_any = [".pcap", ".pcapng", ".cap"]
+
+[[rules]]
+id = "builtin.vm-disk-extension"
+description = "Virtual machine disk or deployment image extension"
+category = "infrastructure"
+signal_group = "disk-image"
+points = 20
+[rules.when]
+extension_any = [".vmdk", ".vdi", ".vhd", ".vhdx", ".wim", ".ova", ".ovf"]
+
+[[rules]]
+id = "builtin.vpn-profile-extension"
+description = "VPN client profile extension"
+category = "credentials"
+signal_group = "remote-access"
+points = 30
+[rules.when]
+extension_any = [".ovpn", ".pcf"]
+
+[[rules]]
+id = "builtin.rdp-file-extension"
+description = "Remote Desktop connection profile extension"
+category = "infrastructure"
+signal_group = "remote-access"
+points = 15
+[rules.when]
+extension_any = [".rdp"]
+
+# --- Sensitive parent directories ---
+
+[[rules]]
+id = "builtin.sensitive-parent-ssh"
+description = "File inside a .ssh directory"
+category = "credentials"
+signal_group = "sensitive-parent"
+points = 20
+[rules.when]
+parent_name_any = [".ssh"]
+
+[[rules]]
+id = "builtin.sensitive-parent-cloud"
+description = "File inside a cloud or orchestration credential directory"
+category = "credentials"
+signal_group = "sensitive-parent"
+points = 25
+[rules.when]
+parent_name_any = [".aws", ".azure", ".gcloud", ".kube"]
+
+[[rules]]
+id = "builtin.hr-directory"
+description = "File inside a personnel or confidential directory"
+category = "personal-information"
+signal_group = "sensitive-parent"
+points = 15
+[rules.when]
+parent_name_contains_any = ["payroll", "personnel", "humanresources", "human resources", "confidential", "pii"]
+
+[[rules]]
+id = "builtin.finance-directory"
+description = "File inside a finance or accounting directory"
+category = "financial-data"
+signal_group = "sensitive-parent"
+points = 15
+[rules.when]
+parent_name_contains_any = ["finance", "accounting", "invoices", "banking", "ledger", "remittance"]
+
+# --- Additional filename tokens ---
+
+[[rules]]
+id = "builtin.credential-token-extended"
+description = "Filename token suggests a stored credential"
+category = "credentials"
+signal_group = "credential-name"
+points = 20
+[rules.when]
+filename_token_any = ["passwd", "pwd", "passphrase", "apikey", "apikeys", "oauth", "signing", "sessionkey", "serviceaccount", "login", "auth", "authkey", "privatekey", "secretkey"]
+
+[[rules]]
+id = "builtin.identity-token-extended"
+description = "Filename token suggests personal identity data"
+category = "personal-information"
+signal_group = "identity-name"
+points = 20
+[rules.when]
+filename_token_any = ["dob", "dateofbirth", "nationalid", "nationalinsurance", "driverslicense", "driverlicense", "licensenumber"]
+
+[[rules]]
+id = "builtin.financial-token-extended"
+description = "Filename token suggests financial records"
+category = "financial-data"
+signal_group = "financial-name"
+points = 20
+[rules.when]
+filename_token_any = ["expense", "expenses", "payment", "payments", "401k", "benefits", "compensation", "reimbursement", "remittance"]
+
+[[rules]]
+id = "builtin.shell-history"
+description = "Shell or PowerShell command history filename"
+category = "infrastructure"
+signal_group = "command-history"
+points = 20
+[rules.when]
+filename_any = [".bash_history", ".zsh_history", ".sh_history", ".mysql_history", ".psql_history", ".irb_history", ".python_history", ".node_repl_history", "consolehost_history.txt"]
+
+# Directory rarity is evaluated from the observed file population of each
+# directory rather than from a single file's metadata. Custom-only rulesets
+# that omit this table apply no rarity signal.
+[[rarity]]
+id = "builtin.rare-extension"
+description = "Uncommon extension in a repetitive observed directory"
+category = "unusual-files"
+signal_group = "directory-rarity"
+points = 10
+minimum_directory_files = 20
+maximum_same_extension_ratio = 0.05
+minimum_dominant_extension_ratio = 0.8
