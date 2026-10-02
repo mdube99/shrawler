@@ -29,6 +29,11 @@ WEB_SORT_INDEXES = (
 BATCH_SIZE = 10_000
 SCHEMA_VERSION = 3
 
+# Zero-point review pools: category membership is supplied by a zero-point rule
+# and the listing keeps the pool disjoint from recommendations and analyst
+# decisions.
+FALLBACK_CATEGORIES = frozenset({"extension-fallback", "executable-fallback"})
+
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS triage_runs (
  id TEXT PRIMARY KEY, source_path TEXT NOT NULL, scan_id TEXT NOT NULL,
@@ -281,10 +286,12 @@ def rank(
                 from .signals import InventorySignals
 
                 sibling_index = SiblingIndex(target, rules)
+                engine = Engine(rules, sibling_index.lookup)
                 inventory_signals = InventorySignals(
                     target,
                     database,
                     rules.document.get("rarity", []),
+                    engine,
                 )
                 indexing_needed = bool(
                     sibling_index.contexts or inventory_signals.rarity
@@ -292,7 +299,6 @@ def rank(
                 if indexing_needed and on_phase:
                     on_phase("indexing sibling names", 0)
 
-                engine = Engine(rules, sibling_index.lookup)
                 # Phase accounting. Timers are cheap relative to per-file work
                 # (~160 us/file on the real 2.5M inventory) and let callers see
                 # exactly where scoring time goes.
@@ -594,8 +600,8 @@ def list_results(
             if category
             else [run["scan_id"], run["id"], min_score]
         )
-        if category == "extension-fallback":
-            # Category membership is supplied by the zero-point extension rule.
+        if category in FALLBACK_CATEGORIES:
+            # Category membership is supplied by a zero-point rule.
             # Keep this pool disjoint from recommendations and analyst decisions.
             query += (
                 " AND f.priority=0 AND json_extract(f.result_json, '$.review') IS NULL"

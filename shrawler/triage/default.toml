@@ -489,6 +489,50 @@ points = 20
 [rules.when]
 filename_any = [".bash_history", ".zsh_history", ".sh_history", ".mysql_history", ".psql_history", ".irb_history", ".python_history", ".node_repl_history", "consolehost_history.txt"]
 
+# --- Executables for offline reverse-engineering review ---
+
+# Extension alone is a review pool, not evidence. Browse the executables
+# category to see every native binary; name, location, staleness, and observed
+# rarity supply the priority.
+[[rules]]
+id = "builtin.executable-fallback"
+description = "Native executable extension only; retained for reverse-engineering review"
+category = "executable-fallback"
+signal_group = "executable-extension"
+points = 0
+[rules.when]
+extension_any = [".exe", ".dll", ".sys", ".ocx", ".cpl", ".scr", ".ax", ".drv", ".pyd", ".efi", ".so", ".dylib"]
+
+[[rules]]
+id = "builtin.operational-executable"
+description = "Executable inside an observed automation or deployment directory"
+category = "executables"
+signal_group = "executable-location"
+points = 15
+[rules.when]
+extension_any = [".exe", ".dll", ".sys", ".ocx", ".cpl", ".scr", ".ax", ".drv", ".pyd", ".efi", ".so", ".dylib"]
+context_any = ["automation-area", "deployment-area"]
+
+[[rules]]
+id = "builtin.internal-binary-name"
+description = "Executable name suggests an internal, test, or development build"
+category = "executables"
+signal_group = "executable-purpose"
+points = 15
+[rules.when]
+extension_any = [".exe", ".dll", ".sys", ".ocx", ".cpl", ".scr", ".ax", ".drv", ".pyd", ".efi", ".so", ".dylib"]
+filename_token_any = ["test", "tests", "debug", "dev", "internal", "custom", "staging", "legacy", "beta", "prototype", "poc"]
+
+[[rules]]
+id = "builtin.stale-executable"
+description = "Executable last modified before 2015"
+category = "executables"
+signal_group = "executable-staleness"
+points = 10
+[rules.when]
+extension_any = [".exe", ".dll", ".sys", ".ocx", ".cpl", ".scr", ".ax", ".drv", ".pyd", ".efi", ".so", ".dylib"]
+modified_before = "2015-01-01T00:00:00+00:00"
+
 # Directory rarity is evaluated from the observed file population of each
 # directory rather than from a single file's metadata. Custom-only rulesets
 # that omit this table apply no rarity signal.
@@ -501,3 +545,34 @@ points = 10
 minimum_directory_files = 20
 maximum_same_extension_ratio = 0.05
 minimum_dominant_extension_ratio = 0.8
+
+# An executable among repetitive non-executable files is a review candidate;
+# the same thresholds apply only when the file itself is a native binary.
+[[rarity]]
+id = "builtin.stray-executable"
+description = "Executable among repetitive non-executable files"
+category = "executables"
+signal_group = "executable-location"
+points = 25
+scope = "directory"
+minimum_directory_files = 20
+maximum_same_extension_ratio = 0.05
+minimum_dominant_extension_ratio = 0.8
+[rarity.when]
+extension_any = [".exe", ".dll", ".sys", ".ocx", ".cpl", ".scr", ".ax", ".drv", ".pyd", ".efi", ".so", ".dylib"]
+
+# Environment rarity scores a filename from how often it appears across the
+# whole scan rather than in one directory. Ubiquitous runtime DLLs occur many
+# times and score nothing; a binary unique to this environment surfaces even
+# though its own metadata is unremarkable.
+[[rarity]]
+id = "builtin.unique-executable"
+description = "Executable filename observed only rarely across the environment"
+category = "executables"
+signal_group = "executable-notability"
+points = 30
+scope = "environment"
+maximum_occurrences = 2
+minimum_environment_files = 500
+[rarity.when]
+extension_any = [".exe", ".dll", ".sys", ".ocx", ".cpl", ".scr", ".ax", ".drv", ".pyd", ".efi", ".so", ".dylib"]

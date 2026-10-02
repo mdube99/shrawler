@@ -11,7 +11,12 @@ from types import SimpleNamespace
 from typing import Any, Callable, Dict, Generator, List, Optional
 
 from .smb import SMBAuth
-from .triage.storage import connect_readonly, list_results, utc_now
+from .triage.storage import (
+    FALLBACK_CATEGORIES,
+    connect_readonly,
+    list_results,
+    utc_now,
+)
 
 
 class CollectionBusyError(ValueError):
@@ -101,7 +106,10 @@ class CollectionQueue:
             # Scope to the candidate hosts/shares so growing web-download evidence
             # never turns manifest creation into a full-table materialization.
             targets = sorted(
-                {(candidate["host"], candidate["share"]) for candidate in candidates["items"]}
+                {
+                    (candidate["host"], candidate["share"])
+                    for candidate in candidates["items"]
+                }
             )
             prior_paths: set = set()
             for start in range(0, len(targets), 200):
@@ -153,7 +161,7 @@ class CollectionQueue:
                     or [
                         s["description"]
                         for s in candidate["signals"]
-                        if s["category"] == "extension-fallback"
+                        if s["category"] in FALLBACK_CATEGORIES
                     ]
                     or [
                         f"Selected by saved ranking query (score {candidate['review_score']})"

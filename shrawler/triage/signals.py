@@ -13,11 +13,31 @@ _PendingKey = Tuple[str, str, str, str]
 
 
 class InventorySignals:
-    def __init__(self, db: Any, database: Path, rarity: List[Dict[str, Any]]) -> None:
+    def __init__(
+        self,
+        db: Any,
+        database: Path,
+        rarity: List[Dict[str, Any]],
+        engine: Any = None,
+    ) -> None:
         self.db = db
+        self.engine = engine
         self.rarity = list(rarity or [])
+        self._directories = [
+            config
+            for config in self.rarity
+            if config.get("scope", "directory") == "directory"
+        ]
+        self._environments = [
+            config
+            for config in self.rarity
+            if config.get("scope", "directory") == "environment"
+        ]
+        self._has_when = any("when" in config for config in self.rarity)
         self._directory_cache = OrderedDict()
         self._pending: Dict[_PendingKey, int] = {}
+        self._env_pending: Dict[str, int] = {}
+        self._env_total = 0
         self._file_reviews = {}
         self._family_reviews = {}
         db.executescript("""
@@ -25,6 +45,9 @@ class InventorySignals:
                 host TEXT,share TEXT,parent TEXT,extension TEXT,n INTEGER,
                 PRIMARY KEY(host,share,parent,extension));
             DELETE FROM directory_extensions;
+            CREATE TEMP TABLE IF NOT EXISTS environment_filenames (
+                filename TEXT PRIMARY KEY,n INTEGER) WITHOUT ROWID;
+            DELETE FROM environment_filenames;
         """)
         review = database.with_name(database.stem + ".review.db")
         if review.exists():
@@ -52,9 +75,13 @@ class InventorySignals:
         )
 
     def observe(self, metadata: Dict[str, Any]) -> None:
-        if self.rarity:
+        if self._directories:
             key = self.key(metadata)
             self._pending[key] = self._pending.get(key, 0) + 1
+        if self._environments:
+            name = metadata["file_name"].casefold()
+            self._env_pending[name] = self._env_pending.get(name, 0) + 1
+            self._env_total += 1
 
     def flush(self) -> None:
         """Persist staged counts; pending counts always overlay query results.
@@ -64,14 +91,20 @@ class InventorySignals:
         ``n=n+1`` silently undercounts whenever a key spans a flush boundary
         (large directories, or repeated flush calls).
         """
-        if not self._pending:
-            return
-        self.db.executemany(
-            """INSERT INTO directory_extensions VALUES (?,?,?,?,?)
-            ON CONFLICT(host,share,parent,extension) DO UPDATE SET n=n+excluded.n""",
-            [(*key, value) for key, value in self._pending.items()],
-        )
-        self._pending.clear()
+        if self._pending:
+            self.db.executemany(
+                """INSERT INTO directory_extensions VALUES (?,?,?,?,?)
+                ON CONFLICT(host,share,parent,extension) DO UPDATE SET n=n+excluded.n""",
+                [(*key, value) for key, value in self._pending.items()],
+            )
+            self._pending.clear()
+        if self._env_pending:
+            self.db.executemany(
+                """INSERT INTO environment_filenames VALUES (?,?)
+                ON CONFLICT(filename) DO UPDATE SET n=n+excluded.n""",
+                self._env_pending.items(),
+            )
+            self._env_pending.clear()
 
     def _directory_counts(self, directory: Tuple[str, str, str]) -> Dict[str, int]:
         rows = self.db.execute(
@@ -88,56 +121,112 @@ class InventorySignals:
         )
         return counts
 
+    def _environment_occurrences(self, metadata: Dict[str, Any]) -> int:
+        name = metadata["file_name"].casefold()
+        row = self.db.execute(
+            "SELECT n FROM environment_filenames WHERE filename=?", (name,)
+        ).fetchone()
+        return int(row[0]) if row else 0
+
+    def _when_ok(self, config: Dict[str, Any], when_results: Dict[str, bool]) -> bool:
+        if "when" not in config:
+            return True
+        return bool(when_results.get(config["id"], False))
+
+    @staticmethod
+    def _record(
+        result: Dict[str, Any],
+        matched: Dict[Tuple[str, str], int],
+        config: Dict[str, Any],
+        evidence: Dict[str, Any],
+    ) -> None:
+        matched[(config["category"], config["signal_group"])] = max(
+            matched.get((config["category"], config["signal_group"]), 0),
+            config["points"],
+        )
+        result["signals"].append(
+            {
+                "rule_id": config["id"],
+                "category": config["category"],
+                "signal_group": config["signal_group"],
+                "description": config["description"],
+                "points": config["points"],
+                "credited_points": config["points"],
+                "evidence": evidence,
+            }
+        )
+
     def apply(self, metadata: Dict[str, Any], result: Dict[str, Any]) -> None:
         from .review import family_key
 
         if self.rarity:
-            key = self.key(metadata)
-            directory = key[:3]
-            counts = self._directory_cache.get(directory)
-            if counts is None:
-                counts = self._directory_counts(directory)
-                self._directory_cache[directory] = counts
-                if len(self._directory_cache) > 4096:
-                    self._directory_cache.popitem(last=False)
-            else:
-                self._directory_cache.move_to_end(directory)
-            total, dominant = counts[None]
-            matching = counts.get(key[3], 0)
+            when_results = (
+                self.engine.rarity_conditions(metadata, result.get("contexts"))
+                if self._has_when and self.engine is not None
+                else {}
+            )
             matched: Dict[Tuple[str, str], int] = {}
-            for config in self.rarity:
-                if total < config["minimum_directory_files"]:
-                    continue
-                if matching > total * config["maximum_same_extension_ratio"]:
-                    continue
-                if dominant < total * config["minimum_dominant_extension_ratio"]:
-                    continue
-                matched[(config["category"], config["signal_group"])] = max(
-                    matched.get((config["category"], config["signal_group"]), 0),
-                    config["points"],
-                )
-                result["signals"].append(
-                    {
-                        "rule_id": config["id"],
-                        "category": config["category"],
-                        "signal_group": config["signal_group"],
-                        "description": config["description"],
-                        "points": config["points"],
-                        "credited_points": config["points"],
-                        "evidence": {
+            if self._directories:
+                key = self.key(metadata)
+                directory = key[:3]
+                counts = self._directory_cache.get(directory)
+                if counts is None:
+                    counts = self._directory_counts(directory)
+                    self._directory_cache[directory] = counts
+                    if len(self._directory_cache) > 4096:
+                        self._directory_cache.popitem(last=False)
+                else:
+                    self._directory_cache.move_to_end(directory)
+                total, dominant = counts[None]  # type: ignore[index]
+                matching = counts.get(key[3], 0)
+                for config in self._directories:
+                    if total < config["minimum_directory_files"]:
+                        continue
+                    if matching > total * config["maximum_same_extension_ratio"]:
+                        continue
+                    if dominant < total * config["minimum_dominant_extension_ratio"]:
+                        continue
+                    if not self._when_ok(config, when_results):
+                        continue
+                    self._record(
+                        result,
+                        matched,
+                        config,
+                        {
                             "observed_files": total,
                             "same_extension": matching,
                             "dominant_extension_files": dominant,
                             "extension": key[3],
                             "scope": "observed files only",
                         },
-                    }
-                )
+                    )
+            if self._environments:
+                occurrences = self._environment_occurrences(metadata)
+                for config in self._environments:
+                    if self._env_total < config.get("minimum_environment_files", 0):
+                        continue
+                    if occurrences > config["maximum_occurrences"]:
+                        continue
+                    if not self._when_ok(config, when_results):
+                        continue
+                    self._record(
+                        result,
+                        matched,
+                        config,
+                        {
+                            "filename": metadata["file_name"],
+                            "occurrences": occurrences,
+                            "environment_files": self._env_total,
+                            "scope": "environment",
+                        },
+                    )
+            category_points: Dict[str, int] = {}
             for (category, _group), points in matched.items():
-                result["category_scores"][category] = (
-                    result["category_scores"].get(category, 0) + points
-                )
-                result["priority"] = max(result["priority"], points)
+                category_points[category] = category_points.get(category, 0) + points
+            for category, points in category_points.items():
+                total = result["category_scores"].get(category, 0) + points
+                result["category_scores"][category] = total
+                result["priority"] = max(result["priority"], total)
         family = family_key(metadata)
         result["family_id"] = family
         # An explicit file decision overrides a family decision. Undo exposes

@@ -181,6 +181,49 @@ a manifest as usual. The fallback reason is shown even though it contributes no
 points. Existing rankings and collection manifests keep their saved rules and
 selections. These weights express review order, not confirmation of credentials.
 
+### Executables for reverse-engineering review
+
+Native binaries are ranked separately so they can be collected and taken offline
+for analysis. The pool extensions are `.exe`, `.dll`, `.sys`, `.ocx`, `.cpl`,
+`.scr`, `.ax`, `.drv`, `.pyd`, `.efi`, `.so`, and `.dylib`. Extension alone
+contributes **zero priority** through the `executable-fallback` category, which
+behaves exactly like `extension-fallback`: unreviewed, zero-priority binaries
+only, browseable and queueable as a bounded slice.
+
+Notability comes from metadata and observed populations rather than a static
+allowlist of "known Microsoft" names:
+
+- An executable inside an automation or deployment directory scores 15.
+- A name token such as `test`, `debug`, `dev`, `internal`, `custom`, `staging`,
+  `legacy`, `beta`, `prototype`, or `poc` scores 15 in `executables`.
+- A binary last modified before 2015 scores 10.
+- A binary that appears only a few times across the **whole scan** scores 30 in
+  `executables` (the `builtin.unique-executable` environment-scope rarity).
+- An executable that is a stray extension in an otherwise repetitive directory
+  scores 25 via the `builtin.stray-executable` directory-scope rarity.
+
+The environment-scope signal is what separates notable binaries from noise. A
+runtime DLL copied across the estate (for example `kernel32.dll` observed
+hundreds of times) occurs far above `maximum_occurrences` and scores nothing,
+while an internally developed or vendor-specific binary observed once is unique
+to the environment and scores — without maintaining a name blocklist. A
+`minimum_environment_files` floor keeps a tiny inventory from claiming
+uniqueness. Because these are population signals, they only appear when the saved
+ruleset contains the matching `[[rarity]]` entry; custom-only rulesets add none.
+
+```bash
+shrawler triage run results/shrawler.db
+shrawler triage list results/shrawler.db --category executables --limit 100
+shrawler triage list results/shrawler.db --category executable-fallback --limit 100
+shrawler collect create results/shrawler.db --category executables --limit 25
+```
+
+Note that environment rarity tracks the case-insensitive **filename**, not the
+full path or the file contents. Two distinct binaries that share a filename are
+counted together, and the score is review priority, not proof that a binary is
+unique or malicious. Signature verification would require reading file content
+and is intentionally outside metadata-only triage.
+
 ## Rules and engagement-specific context
 
 Rules use their own versioned TOML schema. They do not accept Snaffler TOML
@@ -260,9 +303,9 @@ matching ancestor. Multiple definitions can assign the same tag. Labels do not
 propagate across hosts/shares or infer other labels.
 
 A ruleset may also include optional top-level `[[rarity]]` tables that score a
-file from the observed extension population of its directory. They are described
-under [Rarity and review feedback](#rarity-and-review-feedback); rules and
-contexts score individual files, while a rarity entry scores a population.
+file from an observed population. They are described under
+[Rarity and review feedback](#rarity-and-review-feedback); rules and contexts
+score individual files, while a rarity entry scores a population.
 
 ### Sibling context
 
@@ -376,10 +419,12 @@ their own measurements.
 
 ## Rarity and review feedback
 
-Ranking engine version 4 adds exact-name, extension, and location starter rules
-and moves directory rarity into the ruleset. Earlier engines compiled the rarity
-thresholds into the scorer; a ranking now applies the `[[rarity]]` tables present
-in its ruleset:
+Ranking engine version 5 adds executable scoring and moves every population
+signal into the ruleset. Earlier engines compiled rarity thresholds into the
+scorer; a ranking now applies the `[[rarity]]` tables present in its ruleset.
+There are two scopes.
+
+Directory scope compares extensions within one observed directory:
 
 ```toml
 [[rarity]]
@@ -388,20 +433,48 @@ description = "Uncommon extension in a repetitive observed directory"
 category = "unusual-files"
 signal_group = "directory-rarity"
 points = 10
+scope = "directory"                       # the default when omitted
 minimum_directory_files = 20
 maximum_same_extension_ratio = 0.05
 minimum_dominant_extension_ratio = 0.8
 ```
 
-Each entry compares extensions within an observed directory. A directory with at
-least `minimum_directory_files` files yields the signal when the current file's
-extension occurs in at most `maximum_same_extension_ratio` of the files and a
-single dominant extension accounts for at least `minimum_dominant_extension_ratio`.
-Explanations preserve those counts. This detects an unusual extension, not
-sensitive content or absence from an unlisted area. Ratios are between 0 and 1,
-the same-extension ratio cannot exceed the dominant ratio, and rarity IDs share
-the uniqueness namespace with rules and contexts. Custom-only rulesets that omit
-the table add no rarity signal.
+A directory with at least `minimum_directory_files` files yields the signal when
+the current file's extension occurs in at most `maximum_same_extension_ratio` of
+the files and a single dominant extension accounts for at least
+`minimum_dominant_extension_ratio`. Ratios are between 0 and 1 and the
+same-extension ratio cannot exceed the dominant ratio.
+
+Environment scope counts a filename across the whole scan:
+
+```toml
+[[rarity]]
+id = "builtin.unique-executable"
+description = "Executable filename observed only rarely across the environment"
+category = "executables"
+signal_group = "executable-notability"
+points = 30
+scope = "environment"
+maximum_occurrences = 2
+minimum_environment_files = 500
+[rarity.when]
+extension_any = [".exe", ".dll"]
+```
+
+The signal fires when at least `minimum_environment_files` files were observed and
+this filename occurs in at most `maximum_occurrences` of them. It is how
+ubiquitous runtime binaries are suppressed without a name blocklist: they appear
+many times and never match. Environment-scope counting uses the case-insensitive
+filename, not the full path.
+
+Optional `[rarity.when]` conditions gate either scope per file using the same
+condition vocabulary as rules (for example `extension_any`, `max_size_bytes`, or
+`modified_before`). Environment fields require `scope = "environment"`; directory
+thresholds require `scope = "directory"`. Missing thresholds are rejected rather
+than silently broadened, and rarity IDs share the uniqueness namespace with rules
+and contexts. Custom-only rulesets that omit the tables add no rarity signal.
+Explanations preserve the observed counts and, for environment scope, the
+filename and occurrence count.
 
 [Analyst decisions](families.md) are snapshotted when ranking starts. Relevant
 files receive an analyst-review score of 100; reviewed, deferred, and excluded
@@ -438,3 +511,29 @@ evidence, file counts, and nonempty result pages were checked. These measurement
 are not predictions for physical disks, diverse family keys, large review
 histories, or live SMB latency. Deep inventory offset pagination and on-demand
 family aggregates remain measurable costs.
+
+## Engine 5 scale check
+
+The [ranking benchmark script](../scripts/benchmark_ranking.py) generated
+300,000 observations in 50,000 directories. The fixture mixes numbered text
+reports, a few password databases, repeated runtime-library filenames, and unique
+internal executable names so it exercises both rarity scopes. Ranking used the
+full starter ruleset, sibling indexing, directory and environment rarity, and
+review lookup:
+
+| Measurement | Result |
+| --- | --- |
+| Ranking and persistence | 39.2 seconds (7,648 files/second) |
+| Sibling and rarity indexing | 3.4 seconds |
+| Per-file evaluation | 19.1 seconds |
+| Population signals (rarity, review) | 10.2 seconds |
+| Top-ranked retrieval | immediate |
+| Ranking database size | 202.2 MiB |
+
+The environment frequency index adds one point lookup per file; with 300,000
+observations it contributed roughly 34 microseconds per file. Repeated runtime
+filenames such as `kernel32.dll` were suppressed to the zero-point pool while
+unique `InternalTool*.exe` filenames scored 45 (environment rarity plus purpose
+name), and the runtime DLLs were excluded from the `executables` category. The
+fixture was memory-backed under `/tmp` with warm caches; physical-disk behavior
+and much larger inventories require their own measurements.

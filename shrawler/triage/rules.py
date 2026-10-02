@@ -93,14 +93,45 @@ CONDITIONS = {
 }
 
 
-# Rarity entries describe directory-population thresholds rather than a single
-# file, so they are validated separately from per-file rules.
+def _validate_when(when: Any, location: str) -> None:
+    """Validate a per-file condition table shared by rules and rarity entries."""
+    if not isinstance(when, dict) or not when:
+        raise ValueError(f"{location}: when must be a nonempty table")
+    when = cast(Dict[str, Any], when)
+    _keys(when, CONDITIONS, set(), location)
+    for key, value in when.items():
+        if key.endswith("size_bytes"):
+            if type(value) is not int or value < 0:
+                raise ValueError(f"{location}.{key}: expected a nonnegative integer")
+        elif key in {"modified_before", "modified_after"}:
+            _text(value, f"{location}.{key}")
+            if parse_timestamp(value) is None:
+                raise ValueError(f"{location}.{key}: expected an ISO 8601 timestamp")
+        else:
+            _strings(value, f"{location}.{key}")
+    if when.get("min_size_bytes", 0) > when.get("max_size_bytes", float("inf")):
+        raise ValueError(f"{location}: minimum size exceeds maximum")
+
+
+# Rarity entries describe an observed population rather than a single file, so
+# they are validated separately from per-file rules. Directory scope thresholds
+# and environment-scope occurrence limits are mutually exclusive.
 RARITY_FIELDS = {
     "id",
     "description",
     "category",
     "signal_group",
     "points",
+    "scope",
+    "minimum_directory_files",
+    "maximum_same_extension_ratio",
+    "minimum_dominant_extension_ratio",
+    "maximum_occurrences",
+    "minimum_environment_files",
+    "when",
+}
+RARITY_REQUIRED = {"id", "description", "category", "signal_group", "points"}
+DIRECTORY_THRESHOLDS = {
     "minimum_directory_files",
     "maximum_same_extension_ratio",
     "minimum_dominant_extension_ratio",
@@ -204,36 +235,74 @@ def validate(document: Dict[str, Any]) -> RuleSet:
                             f"{identifier}: path cannot contain . or .. segments"
                         )
             elif kind == "rarity":
-                _keys(entry, RARITY_FIELDS, RARITY_FIELDS, identifier)
+                _keys(entry, RARITY_FIELDS, RARITY_REQUIRED, identifier)
                 for key in ("description", "category", "signal_group"):
                     _text(entry[key], f"{identifier}.{key}")
                 _integer(entry["points"], identifier)
-                _integer(entry["minimum_directory_files"], identifier)
-                if entry["minimum_directory_files"] < 1:
+                scope = entry.get("scope", "directory")
+                if scope not in ("directory", "environment"):
                     raise ValueError(
-                        f"{identifier}: minimum_directory_files must be at least 1"
+                        f"{identifier}.scope: expected 'directory' or 'environment'"
                     )
-                for key in (
-                    "maximum_same_extension_ratio",
-                    "minimum_dominant_extension_ratio",
-                ):
-                    ratio = entry[key]
-                    if isinstance(ratio, bool) or not isinstance(ratio, (int, float)):
+                if scope == "directory":
+                    missing = DIRECTORY_THRESHOLDS - set(entry)
+                    if missing:
                         raise ValueError(
-                            f"{identifier}.{key}: expected a ratio between 0 and 1"
+                            f"{identifier}: directory rarity requires {sorted(missing)}"
                         )
-                    if not 0 <= ratio <= 1:
+                    if (
+                        "maximum_occurrences" in entry
+                        or "minimum_environment_files" in entry
+                    ):
                         raise ValueError(
-                            f"{identifier}.{key}: expected a ratio between 0 and 1"
+                            f"{identifier}: environment fields require scope = 'environment'"
                         )
-                if (
-                    entry["maximum_same_extension_ratio"]
-                    > entry["minimum_dominant_extension_ratio"]
-                ):
-                    raise ValueError(
-                        f"{identifier}: maximum_same_extension_ratio cannot exceed "
-                        "minimum_dominant_extension_ratio"
-                    )
+                    _integer(entry["minimum_directory_files"], identifier)
+                    if entry["minimum_directory_files"] < 1:
+                        raise ValueError(
+                            f"{identifier}: minimum_directory_files must be at least 1"
+                        )
+                    for key in (
+                        "maximum_same_extension_ratio",
+                        "minimum_dominant_extension_ratio",
+                    ):
+                        ratio = entry[key]
+                        if isinstance(ratio, bool) or not isinstance(
+                            ratio, (int, float)
+                        ):
+                            raise ValueError(
+                                f"{identifier}.{key}: expected a ratio between 0 and 1"
+                            )
+                        if not 0 <= ratio <= 1:
+                            raise ValueError(
+                                f"{identifier}.{key}: expected a ratio between 0 and 1"
+                            )
+                    if (
+                        entry["maximum_same_extension_ratio"]
+                        > entry["minimum_dominant_extension_ratio"]
+                    ):
+                        raise ValueError(
+                            f"{identifier}: maximum_same_extension_ratio cannot exceed "
+                            "minimum_dominant_extension_ratio"
+                        )
+                else:
+                    if DIRECTORY_THRESHOLDS & set(entry):
+                        raise ValueError(
+                            f"{identifier}: directory thresholds require scope = 'directory'"
+                        )
+                    if "maximum_occurrences" not in entry:
+                        raise ValueError(
+                            f"{identifier}: environment rarity requires maximum_occurrences"
+                        )
+                    _integer(entry["maximum_occurrences"], identifier)
+                    if entry["maximum_occurrences"] < 1:
+                        raise ValueError(
+                            f"{identifier}: maximum_occurrences must be at least 1"
+                        )
+                    if "minimum_environment_files" in entry:
+                        _integer(entry["minimum_environment_files"], identifier)
+                if "when" in entry:
+                    _validate_when(entry["when"], identifier)
             else:
                 _keys(
                     entry,
@@ -251,35 +320,14 @@ def validate(document: Dict[str, Any]) -> RuleSet:
                 for key in ("description", "category", "signal_group"):
                     _text(entry[key], f"{identifier}.{key}")
                 _integer(entry["points"], identifier)
-                when = entry["when"]
-                if not isinstance(when, dict) or not when:
-                    raise ValueError(f"{identifier}: when must be a nonempty table")
-                when = cast(Dict[str, Any], when)
-                _keys(when, CONDITIONS, set(), identifier)
-                for key, value in when.items():
-                    if key.endswith("size_bytes"):
-                        if type(value) is not int or value < 0:
-                            raise ValueError(
-                                f"{identifier}.{key}: expected a nonnegative integer"
-                            )
-                    elif key in {"modified_before", "modified_after"}:
-                        _text(value, f"{identifier}.{key}")
-                        if parse_timestamp(value) is None:
-                            raise ValueError(
-                                f"{identifier}.{key}: expected an ISO 8601 timestamp"
-                            )
-                    else:
-                        _strings(value, f"{identifier}.{key}")
-                if when.get("min_size_bytes", 0) > when.get(
-                    "max_size_bytes", float("inf")
-                ):
-                    raise ValueError(f"{identifier}: minimum size exceeds maximum")
-    for rule in document.get("rules", []):
-        unknown_tags = set(rule["when"].get("context_any", [])) - tags
-        if unknown_tags:
-            raise ValueError(
-                f"{rule['id']}: undefined context tags {sorted(unknown_tags)}"
-            )
+                _validate_when(entry["when"], identifier)
+    for kind in ("rules", "rarity"):
+        for entry in document.get(kind, []):
+            unknown_tags = set(entry.get("when", {}).get("context_any", [])) - tags
+            if unknown_tags:
+                raise ValueError(
+                    f"{entry['id']}: undefined context tags {sorted(unknown_tags)}"
+                )
     canonical = json.dumps(document, sort_keys=True, separators=(",", ":"))
     return RuleSet(document, canonical, hashlib.sha256(canonical.encode()).hexdigest())
 

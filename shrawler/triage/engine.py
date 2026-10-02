@@ -7,7 +7,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from .rules import RuleSet, parse_timestamp
 
-ENGINE_VERSION = "4"
+ENGINE_VERSION = "5"
 
 SiblingLookup = Callable[
     [str, str, Tuple[str, ...], Dict[str, Any]], List[Dict[str, Any]]
@@ -34,32 +34,16 @@ class Engine:
         self._needed_conditions = set()
         for rule in self.rules.document.get("rules", []):
             prepared = dict(rule)
-            prepared_when = {}
-            for condition, expected in rule["when"].items():
-                self._needed_conditions.add(condition)
-                if condition in {
-                    "min_size_bytes",
-                    "max_size_bytes",
-                    "context_any",
-                }:
-                    prepared_when[condition] = expected
-                elif condition in {"modified_before", "modified_after"}:
-                    prepared_when[condition] = parse_timestamp(expected)
-                elif condition == "filename_glob_any":
-                    prepared_when[condition] = tuple(
-                        re.compile(translate(value.casefold())).match
-                        for value in expected
-                    )
-                elif condition.endswith("contains_any"):
-                    prepared_when[condition] = tuple(
-                        value.casefold() for value in expected
-                    )
-                else:
-                    prepared_when[condition] = frozenset(
-                        value.casefold() for value in expected
-                    )
-            prepared["when"] = prepared_when
+            prepared["when"] = self._prepare_when(rule["when"])
             self._rules.append(prepared)
+        # Rarity entries may carry per-file `when` conditions; they are matched
+        # by the engine while their population thresholds stay in signals.py.
+        self._rarity_when = []
+        for entry in self.rules.document.get("rarity", []):
+            when = entry.get("when")
+            self._rarity_when.append(
+                (entry["id"], self._prepare_when(when) if when else None)
+            )
         self._contexts = []
         for context in self.rules.document.get("contexts", []):
             prepared = dict(context)
@@ -76,6 +60,95 @@ class Engine:
         self._cache: OrderedDict[
             Tuple[str, str, Tuple[str, ...]], List[Dict[str, Any]]
         ] = OrderedDict()
+
+    def _prepare_when(self, when: Dict[str, Any]) -> Dict[str, Any]:
+        prepared: Dict[str, Any] = {}
+        for condition, expected in when.items():
+            self._needed_conditions.add(condition)
+            if condition in {"min_size_bytes", "max_size_bytes", "context_any"}:
+                prepared[condition] = expected
+            elif condition in {"modified_before", "modified_after"}:
+                prepared[condition] = parse_timestamp(expected)
+            elif condition == "filename_glob_any":
+                prepared[condition] = tuple(
+                    re.compile(translate(value.casefold())).match for value in expected
+                )
+            elif condition.endswith("contains_any"):
+                prepared[condition] = tuple(value.casefold() for value in expected)
+            else:
+                prepared[condition] = frozenset(value.casefold() for value in expected)
+        return prepared
+
+    def _values(
+        self,
+        metadata: Dict[str, Any],
+        parent: Tuple[str, ...],
+        context: List[Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        """Per-file lookup values for every condition the rule/rarity set needs."""
+        name = str(metadata["file_name"])
+        folded = name.casefold()
+        # Treat .env itself as an extension-bearing candidate as well.
+        extension = "." + folded.rsplit(".", 1)[1] if "." in folded else ""
+        values: Dict[str, Any] = {}
+        if "extension_any" in self._needed_conditions:
+            values["extension_any"] = [extension]
+        if {
+            "filename_any",
+            "filename_glob_any",
+            "filename_contains_any",
+        } & self._needed_conditions:
+            values.update(
+                {
+                    key: [folded]
+                    for key in (
+                        "filename_any",
+                        "filename_glob_any",
+                        "filename_contains_any",
+                    )
+                    if key in self._needed_conditions
+                }
+            )
+        if "filename_token_any" in self._needed_conditions:
+            values["filename_token_any"] = tokens(name)
+        parent_name = parent[-1].casefold() if parent else ""
+        for key in ("parent_name_any", "parent_name_contains_any"):
+            if key in self._needed_conditions:
+                values[key] = [parent_name] if parent else []
+        if "path_segment_any" in self._needed_conditions:
+            values["path_segment_any"] = [part.casefold() for part in parent]
+        if "host_any" in self._needed_conditions:
+            values["host_any"] = [str(metadata["host"]).casefold()]
+        if "share_any" in self._needed_conditions:
+            values["share_any"] = [str(metadata["share"]).casefold()]
+        if "context_any" in self._needed_conditions:
+            values["context_any"] = [item["tag"] for item in context]
+        return values
+
+    def rarity_conditions(
+        self,
+        metadata: Dict[str, Any],
+        resolved_contexts: Optional[List[Dict[str, Any]]] = None,
+    ) -> Dict[str, bool]:
+        """Return {rarity id: whether its optional `when` conditions match}."""
+        if not self._rarity_when:
+            return {}
+        path = segments(str(metadata["remote_path"]))
+        parent = path[:-1]
+        context = (
+            resolved_contexts
+            if resolved_contexts is not None
+            else self.contexts(str(metadata["host"]), str(metadata["share"]), parent)
+        )
+        values = self._values(metadata, parent, context)
+        return {
+            identifier: prepared is None
+            or all(
+                self._condition_matches(condition, expected, values, metadata)
+                for condition, expected in prepared.items()
+            )
+            for identifier, prepared in self._rarity_when
+        }
 
     def contexts(
         self, host: str, share: str, parent: Tuple[str, ...]
@@ -169,7 +242,6 @@ class Engine:
         explain_all: bool = False,
         resolved_contexts: Optional[List[Dict[str, Any]]] = None,
     ) -> Dict[str, Any]:
-        name = str(metadata["file_name"])
         path = segments(str(metadata["remote_path"]))
         parent = path[:-1]
         context = (
@@ -177,42 +249,7 @@ class Engine:
             if resolved_contexts is not None
             else self.contexts(str(metadata["host"]), str(metadata["share"]), parent)
         )
-        folded = name.casefold()
-        # Treat .env itself as an extension-bearing candidate as well.
-        extension = "." + folded.rsplit(".", 1)[1] if "." in folded else ""
-        values: Dict[str, Any] = {}
-        if "extension_any" in self._needed_conditions:
-            values["extension_any"] = [extension]
-        if {
-            "filename_any",
-            "filename_glob_any",
-            "filename_contains_any",
-        } & self._needed_conditions:
-            values.update(
-                {
-                    key: [folded]
-                    for key in (
-                        "filename_any",
-                        "filename_glob_any",
-                        "filename_contains_any",
-                    )
-                    if key in self._needed_conditions
-                }
-            )
-        if "filename_token_any" in self._needed_conditions:
-            values["filename_token_any"] = tokens(name)
-        parent_name = parent[-1].casefold() if parent else ""
-        for key in ("parent_name_any", "parent_name_contains_any"):
-            if key in self._needed_conditions:
-                values[key] = [parent_name] if parent else []
-        if "path_segment_any" in self._needed_conditions:
-            values["path_segment_any"] = [part.casefold() for part in parent]
-        if "host_any" in self._needed_conditions:
-            values["host_any"] = [str(metadata["host"]).casefold()]
-        if "share_any" in self._needed_conditions:
-            values["share_any"] = [str(metadata["share"]).casefold()]
-        if "context_any" in self._needed_conditions:
-            values["context_any"] = [item["tag"] for item in context]
+        values = self._values(metadata, parent, context)
         signals: List[Dict[str, Any]] = []
         diagnostics: List[Dict[str, Any]] = []
         groups: Dict[Tuple[str, str], int] = {}
