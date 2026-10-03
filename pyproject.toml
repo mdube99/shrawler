@@ -17,6 +17,12 @@ mccabe = { max-complexity = 15 }
 ignore = [
     "E501", # formatting is handled separately
     "B904", # preserve existing CLI exception behavior during package migration
+    "UP006", # scripts/ tests/ use typing.List for Python 3.8 compatibility
+    "UP007", # scripts/ tests/ use typing.Optional for Python 3.8 compatibility
+    "UP035", # scripts/ tests/ use typing.Iterator for Python 3.8 compatibility
+    "UP037", # scripts/ tests/ quote runtime-safe annotations
+    "UP045", # scripts/ tests/ use typing.Optional for Python 3.8 compatibility
+    "RUF046", # scripts/ tests/ explicit casts
 ]
 
 [tool.pyright]

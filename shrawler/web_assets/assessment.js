@@ -120,6 +120,21 @@
     if (run) params.set('run', run);
     const status = await api(`/api/assessment/status?${params}`);
     $('coverage-summary').textContent = `${status.total_observed.toLocaleString()} observed · ${status.assessed.toLocaleString()} assessed · ${status.in_flight.toLocaleString()} in-flight · ${status.pending.toLocaleString()} pending · ${status.failed.toLocaleString()} failed · reconciled ${status.reconciled ? 'yes' : 'NO'}`;
+    const batches = status.batches || {};
+    const metrics = status.metrics || {};
+    const latency = status.latency_ms || {};
+    const parts = [
+      `batches ${Number(batches.completed||0).toLocaleString()}/${Number(batches.total||0).toLocaleString()} done`,
+      `active ${Number(batches.active||0)}`,
+      `pending ${Number(batches.pending||0)}`,
+      `failed ${Number(batches.failed||0)}`,
+      `packing ${status.packing_scope || 'directory'}`,
+      `workers ${status.workers || '?'}`,
+    ];
+    if (latency.p50 != null) parts.push(`p50 ${latency.p50}ms`, `p95 ${latency.p95}ms`);
+    if (metrics.reused_requests) parts.push(`cache ${metrics.reused_requests}`);
+    if (metrics.retried_requests) parts.push(`retried ${metrics.retried_requests}`);
+    $('coverage-batches').textContent = parts.join(' · ');
   }
 
   async function loadDirectoryCoverage() {

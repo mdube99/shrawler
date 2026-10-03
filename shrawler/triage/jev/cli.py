@@ -17,7 +17,7 @@ from ...output import escape_terminal
 from ..rules import load
 from .client import JevClient
 from .config import PRIORITY_LEVELS, JevConfig
-from .planner import TokenCounter
+from .planner import TokenCounter, plan_run
 from .runner import JevRunner
 from .storage import JevStore, RunBusyError
 from .views import coverage_by_directory, highlight_missed, list_assessed
@@ -47,10 +47,39 @@ def _print_status(payload: Dict[str, Any]) -> None:
     )
     reconciled = "yes" if payload["reconciled"] else "NO"
     print(f"coverage reconciled: {reconciled}")
+    batches = payload["batches"]
     print(
-        f"directories: {payload['directories']} | batches {payload['batches']['completed']}"
-        f"/{payload['batches']['total']} completed"
+        f"directories: {payload['directories']} | batches "
+        f"{batches['completed']}/{batches['total']} completed | "
+        f"active {batches.get('active', 0)} | pending {batches.get('pending', 0)} | "
+        f"failed {batches.get('failed', 0)}"
     )
+    print(
+        f"packing: {payload.get('packing_scope', 'directory')} | "
+        f"workers: {payload.get('workers', '?')}"
+    )
+    metrics = payload.get("metrics") or {}
+    if metrics:
+        print(
+            "timing: "
+            f"staging {metrics.get('staging_ms', 0)}ms | "
+            f"planning {metrics.get('planning_ms', 0)}ms | "
+            f"dispatch {metrics.get('dispatch_wall_ms', 0)}ms | "
+            f"requests {metrics.get('completed_requests', 0)}"
+        )
+        if metrics.get("remote_request_ms_sum"):
+            print(
+                f"remote request time: {metrics['remote_request_ms_sum']}ms | "
+                f"peak in-flight: {metrics.get('peak_in_flight', 0)} | "
+                f"retried {metrics.get('retried_requests', 0)} | "
+                f"cache-reused {metrics.get('reused_requests', 0)}"
+            )
+    latency = payload.get("latency_ms") or {}
+    if latency.get("p50") is not None:
+        print(
+            f"request latency: p50 {latency['p50']}ms | p95 {latency.get('p95')}ms "
+            f"(n={latency.get('count', 0)})"
+        )
 
 
 def _print_list(payload: Dict[str, Any]) -> None:
@@ -222,55 +251,71 @@ def _preview(
     store: JevStore, run_id: str, config: JevConfig, limit: int, as_json: bool
 ) -> None:
     counter = TokenCounter(JevClient(config), config)
-    examples: List[Dict[str, Any]] = []
-    total = 0
-    for row in store.context_rows(run_id):
-        context = json.loads(row["context_json"])
-        candidates = [
-            dict(item)
-            for item in store.connection.execute(
-                "SELECT file_id,file_name,size_bytes,mtime_utc FROM assessment_files "
-                "WHERE run_id=? AND directory_id=? AND status='pending' ORDER BY file_id LIMIT 3",
-                (run_id, row["directory_id"]),
-            )
-        ]
-        if not candidates:
-            continue
-        from .planner import question_for, state_text
-
-        state = state_text({**context, "objective": config.objective}, candidates)
-        total += len(
-            store.connection.execute(
-                "SELECT 1 FROM assessment_files WHERE run_id=? AND directory_id=? "
-                "AND status='pending'",
-                (run_id, row["directory_id"]),
-            ).fetchall()
+    pending = store.status_counts(run_id).get("pending", 0)
+    if pending:
+        # Dry-run the exact global planner without persisting or dispatching.
+        result = plan_run(
+            store,
+            run_id,
+            config,
+            counter,
+            config.objective,
+            persist=False,
+            preview_limit=limit,
         )
-        if len(examples) < limit:
-            questions = {
-                item["file_id"]: question_for(item["file_id"], config) for item in candidates
-            }
-            examples.append(
-                {
-                    "directory": context["directory"],
-                    "state": state,
-                    "questions": questions,
-                    "estimated_input_tokens": counter.count(state)
-                    + sum(counter.count(json.dumps(q, sort_keys=True)) for q in questions.values()),
-                }
-            )
+        summary = result.summary(limit=limit)
+    else:
+        planned = store.planned_batch_stats(run_id)
+        summary = {
+            "planned_batches": planned["batches"],
+            "pending_candidates": planned["candidates"],
+            "estimated_input_tokens": planned["input_tokens"],
+            "min_candidates_per_request": planned["min_candidates"],
+            "max_candidates_per_request": planned["max_candidates"],
+            "average_candidates_per_request": planned["average_candidates"],
+            "min_directories_per_request": planned["min_directories"],
+            "max_directories_per_request": planned["max_directories"],
+            "average_directories_per_request": planned["average_directories"],
+            "examples": [],
+        }
+    workers = max(1, config.workers)
+    planned_batches = int(summary.get("planned_batches", 0))
     payload = {
         "run_id": run_id,
-        "pending_candidates": total,
-        "examples": examples,
+        "packing_scope": config.packing_scope,
+        "workers": workers,
+        "estimated_request_waves": -(-planned_batches // workers),
+        **summary,
         "note": "Preview examples are illustrative; inference scope is every observed file.",
     }
     if as_json:
         print(json.dumps(payload, ensure_ascii=True, default=str))
     else:
-        print(f"Pending candidates: {total} (all will be assessed)")
-        for example in examples:
-            print(
-                f"\n--- {example['directory']} (~{example['estimated_input_tokens']} input tokens)"
-            )
-            print(example["state"])
+        _print_preview(payload)
+
+
+def _print_preview(payload: Dict[str, Any]) -> None:
+    print(
+        f"Pending candidates: {payload.get('pending_candidates', 0)} "
+        f"across {payload.get('planned_batches', 0)} planned requests "
+        f"(packing {payload.get('packing_scope')}, {payload.get('workers')} workers)"
+    )
+    print(
+        f"requests: min {payload.get('min_candidates_per_request', 0)} / "
+        f"avg {payload.get('average_candidates_per_request', 0)} / "
+        f"max {payload.get('max_candidates_per_request', 0)} candidates; "
+        f"directories min {payload.get('min_directories_per_request', 0)} / "
+        f"avg {payload.get('average_directories_per_request', 0)} / "
+        f"max {payload.get('max_directories_per_request', 0)}"
+    )
+    print(
+        f"estimated input tokens: {payload.get('estimated_input_tokens', 0)} | "
+        f"estimated bytes: {payload.get('estimated_request_bytes', 0)} | "
+        f"request waves: {payload.get('estimated_request_waves', 0)}"
+    )
+    for example in payload.get("examples", []):
+        print(
+            f"\n--- example request "
+            f"(~{example.get('estimated_input_tokens', 0)} input tokens)"
+        )
+        print(example["state"])

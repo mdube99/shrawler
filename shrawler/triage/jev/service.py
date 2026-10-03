@@ -161,16 +161,28 @@ class JevService:
             self._update(status="failed", phase="failed", error=str(exc))
 
     def _dispatch(self, runner: JevRunner, run_id: str, budget: Optional[int]) -> Dict[str, Any]:
-        return runner.run(
-            run_id,
-            self._owner(),
-            cancelled=self._cancel.is_set,
-            progress=lambda status: self._update(
+        def progress(status: Dict[str, Any]) -> None:
+            batches = status.get("batches", {})
+            metrics = status.get("metrics", {})
+            self._update(
                 processed=status["assessed"],
                 total=status["total_observed"],
                 pending=status["pending"],
                 failed=status["failed"],
-            ),
+                in_flight=status["in_flight"],
+                completed_batches=batches.get("completed", 0),
+                active_batches=batches.get("active", 0),
+                pending_batches=batches.get("pending", 0),
+                reused_requests=metrics.get("reused_requests", 0),
+                retried_requests=metrics.get("retried_requests", 0),
+                peak_in_flight=metrics.get("peak_in_flight", 0),
+            )
+
+        return runner.run(
+            run_id,
+            self._owner(),
+            cancelled=self._cancel.is_set,
+            progress=progress,
             budget_seconds=budget,
         )
 

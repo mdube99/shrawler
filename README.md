@@ -357,6 +357,20 @@ Snaffler mode loads TOML rules recursively and supports share, directory, file,
 content, and post-match scopes. Content inspection defaults to relayed mode so
 metadata rules decide which eligible files are read.
 
+Model-assisted assessment scores every observed file with the Jev decision
+endpoint, packing independent directory blocks into bounded requests and
+dispatching them through a bounded worker pool:
+
+```bash
+shrawler triage jev prepare ./results/shrawler.db
+shrawler triage jev preview ./results/shrawler.db
+shrawler triage jev run ./results/shrawler.db
+shrawler triage jev status ./results/shrawler.db
+```
+
+See [Model-assisted assessment scaling](docs/jev-assessment-scaling.md) for
+packing rules, concurrency, rate limiting, cache reuse, resume, and rollout.
+
 Nemesis is optional. It can receive Snaffler matches or every locally downloaded
 file through a bounded background queue. Failed uploads preserve the local file
 and can be retried without rescanning SMB:
@@ -389,6 +403,7 @@ strict type and lint configuration in `pyproject.toml`.
 - [Local WebUI](docs/webui.md)
 - [Snaffler support](docs/snaffler.md)
 - [Offline metadata triage](docs/triage.md)
+- [Model-assisted assessment scaling](docs/jev-assessment-scaling.md)
 - [Nemesis integration](docs/nemesis.md)
 - [Output formats](docs/output-format.md)
 - [Performance and concurrency](docs/performance.md)

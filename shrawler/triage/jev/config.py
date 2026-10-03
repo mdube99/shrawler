@@ -13,10 +13,19 @@ from dataclasses import dataclass
 from typing import Any, Dict, Mapping, Optional
 
 ADAPTER_VERSION = "systemone-1"
-CONTEXT_VERSION = "1"
-PLANNER_VERSION = "1"
+# Context and payload layout changed with multi-directory packing: directory
+# blocks are now labeled inside one shared state. Historical runs keep their
+# stored context hashes and payloads; these versions only affect new work.
+CONTEXT_VERSION = "2"
+PLANNER_VERSION = "2"
+PAYLOAD_VERSION = "2"
 RUBRIC_VERSION = "2"
 PREPROCESSING_VERSION = "1"
+
+# Planning scopes. ``directory`` keeps one source directory per request (the
+# conservative default while the cross-directory quality gate is pending);
+# ``multi-directory`` packs independent directory blocks into shared requests.
+PACKING_SCOPES = ("directory", "multi-directory")
 
 # Default Jev (TypeSafe System One) route. The hosted route
 # ``https://jevtypesafeai.com/api/v1/decide`` and a team LiteLLM proxy that
@@ -97,6 +106,8 @@ ALLOWED_FIELDS = frozenset(
         "tokenize_endpoint",
         "instruction_overhead_tokens",
         "state_overhead_tokens",
+        "packing_scope",
+        "token_headroom_percent",
     }
 )
 
@@ -171,6 +182,8 @@ class JevConfig:
     tokenize_endpoint: str = ""
     instruction_overhead_tokens: int = 24
     state_overhead_tokens: int = 8
+    packing_scope: str = "directory"
+    token_headroom_percent: int = 10
 
     @classmethod
     def from_mapping(cls, data: Optional[Mapping[str, Any]]) -> "JevConfig":
@@ -222,6 +235,17 @@ class JevConfig:
         ):
             if name in table:
                 values[name] = _require_int(table[name], name, 0)
+        if "token_headroom_percent" in table:
+            values["token_headroom_percent"] = _require_int(
+                table["token_headroom_percent"], "token_headroom_percent", 0, 90
+            )
+        if "packing_scope" in table:
+            scope = _require_str(table["packing_scope"], "packing_scope")
+            if scope not in PACKING_SCOPES:
+                raise ValueError(
+                    f"[jev] packing_scope must be one of {list(PACKING_SCOPES)}"
+                )
+            values["packing_scope"] = scope
         if values.get("workers", 1) < 1:
             raise ValueError("[jev] workers must be at least 1")
         if "tokenize_endpoint" in table:
@@ -264,12 +288,15 @@ class JevConfig:
             "adapter_version": ADAPTER_VERSION,
             "context_version": CONTEXT_VERSION,
             "planner_version": PLANNER_VERSION,
+            "payload_version": PAYLOAD_VERSION,
             "rubric_version": RUBRIC_VERSION,
             "preprocessing_version": PREPROCESSING_VERSION,
             "objective": self.objective,
             "max_input_tokens": self.max_input_tokens,
             "max_state_longest_question_tokens": self.max_state_longest_question_tokens,
             "max_questions_per_request": self.max_questions_per_request,
+            "packing_scope": self.packing_scope,
+            "token_headroom_percent": self.token_headroom_percent,
         }
 
     def fingerprint(self) -> str:

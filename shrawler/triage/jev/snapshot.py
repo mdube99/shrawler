@@ -22,6 +22,8 @@ from .storage import JevStore, utc_now
 
 # Bounded in-memory buffering while staging; nothing scales with directory size.
 FLUSH_ROWS = 5000
+# Insert staged directory contexts in bounded chunks instead of one huge call.
+CONTEXT_INSERT_CHUNK = 2000
 # Directory aggregate rows mirrored per run into a disk-backed table.
 CONTEXT_MARKER_EXAMPLES = 12
 
@@ -125,11 +127,15 @@ def stage(
 
         file_rows: List[Tuple[Any, ...]] = []
         ext_rows: List[Tuple[int, str, int]] = []
+        marker_rows: List[Tuple[int, str, str]] = []
         pending_ext: Dict[Tuple[int, str], int] = {}
         last_flush = 0
+        # One staging timestamp per flush keeps identical times for a bounded
+        # batch and avoids a clock call per observed file.
+        staged_at = utc_now()
 
         def flush() -> None:
-            nonlocal last_flush
+            nonlocal last_flush, staged_at
             if ext_rows:
                 store.connection.executemany(
                     "INSERT INTO jev_ext VALUES (?,?,?) "
@@ -137,11 +143,18 @@ def stage(
                     ext_rows,
                 )
                 ext_rows.clear()
+            if marker_rows:
+                store.connection.executemany(
+                    "INSERT OR IGNORE INTO jev_markers VALUES (?,?,?)",
+                    marker_rows,
+                )
+                marker_rows.clear()
             if file_rows:
                 store.insert_files(file_rows)
                 file_rows.clear()
             store.commit()
             last_flush = counters["observed"]
+            staged_at = utc_now()
 
         def directory_id(key: Tuple[str, str, str]) -> int:
             found = directory_ids.get(key)
@@ -175,9 +188,8 @@ def stage(
                 pending_ext.clear()
             # Exact sibling-marker evidence is preserved for every directory,
             # independent of which rules are active.
-            store.connection.execute(
-                "INSERT OR IGNORE INTO jev_markers VALUES (?,?,?)",
-                (directory_value, name.casefold(), str(metadata["file_id"])),
+            marker_rows.append(
+                (directory_value, name.casefold(), str(metadata["file_id"]))
             )
             feature_json = canonical(metadata)
             file_rows.append(
@@ -195,7 +207,7 @@ def stage(
                     hashlib.sha256(feature_json.encode()).hexdigest(),
                     0,
                     "pending",
-                    utc_now(),
+                    staged_at,
                 )
             )
             if len(file_rows) >= FLUSH_ROWS:
@@ -346,6 +358,7 @@ def _build_contexts(
             bucket.append(name)
 
     rows: List[Tuple[Any, ...]] = []
+    total_contexts = 0
     enumeration = _enumeration(str(scan["status"]))
     for directory_value, key in directory_keys.items():
         host, share, parent = directory_display.get(directory_value, key)
@@ -397,5 +410,11 @@ def _build_contexts(
         )
         if progress and len(rows) % 2000 == 0:
             progress("building directory context", len(rows))
-    store.insert_contexts(run_id, rows)
-    return len(rows)
+        if len(rows) >= CONTEXT_INSERT_CHUNK:
+            store.insert_contexts(run_id, rows)
+            total_contexts += len(rows)
+            rows = []
+    if rows:
+        store.insert_contexts(run_id, rows)
+        total_contexts += len(rows)
+    return total_contexts
