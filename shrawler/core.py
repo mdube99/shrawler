@@ -4,7 +4,6 @@ import hashlib
 import json
 import logging
 import os
-import socket
 import threading
 import time
 import uuid
@@ -722,17 +721,6 @@ class Shrawler(SnafflerEngineMixin):
 |_____/|_| |_|_|  \__,_| \_/\_/ |_|\___|_|   
         """
         return Fore.GREEN + ascii + Style.RESET_ALL + "\n"
-
-    def check_port(self, machine: str, port: int) -> bool:
-        """Check if port is open."""
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-            s.settimeout(1)
-
-            try:
-                return s.connect_ex((machine, port)) == 0
-            except (socket.timeout, OSError) as e:
-                logging.debug(f"Port check failed for {machine}:{port} - {e}")
-                return False
 
     def download_file(
         self,

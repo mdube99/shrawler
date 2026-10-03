@@ -137,13 +137,6 @@ CREATE TABLE IF NOT EXISTS decision_results (
 );
 CREATE INDEX IF NOT EXISTS decision_results_file
  ON decision_results(run_id, file_id);
-CREATE TABLE IF NOT EXISTS decision_cache (
- run_id TEXT NOT NULL,
- cache_key TEXT NOT NULL,
- batch_id TEXT NOT NULL,
- created_at TEXT NOT NULL,
- PRIMARY KEY(run_id, cache_key)
-);
 CREATE TABLE IF NOT EXISTS assessment_labels (
  id INTEGER PRIMARY KEY,
  run_id TEXT NOT NULL,
@@ -513,20 +506,6 @@ class JevStore:
             ),
         )
         return int(cursor.lastrowid or 0)
-
-    def put_cache(self, run_id: str, cache_key: str, batch_id: str) -> None:
-        self.connection.execute(
-            "INSERT OR REPLACE INTO decision_cache(run_id,cache_key,batch_id,created_at) "
-            "VALUES (?,?,?,?)",
-            (run_id, cache_key, batch_id, utc_now()),
-        )
-
-    def cache_hit(self, run_id: str, cache_key: str) -> Optional[str]:
-        row = self.connection.execute(
-            "SELECT batch_id FROM decision_cache WHERE run_id=? AND cache_key=?",
-            (run_id, cache_key),
-        ).fetchone()
-        return row["batch_id"] if row else None
 
     # -- coverage ---------------------------------------------------------
 

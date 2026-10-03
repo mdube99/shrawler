@@ -8,7 +8,7 @@ returns an ``answers`` map keyed by question ID. The requests are issued with
 import json
 import time
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Optional
 
 import requests
 
@@ -286,7 +286,3 @@ def _distribution(answer: Dict[str, Any]) -> Optional[Dict[str, Any]]:
 
 def load_payload(batch_row: Any) -> Dict[str, Any]:
     return json.loads(batch_row["payload_json"])
-
-
-def question_ids(batch_row: Any) -> List[str]:
-    return list(json.loads(batch_row["payload_json"]).get("questions", {}).keys())

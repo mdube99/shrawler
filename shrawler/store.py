@@ -588,9 +588,6 @@ class ScanStore:
             )
             self._touch(force=True)
 
-    def host_statuses(self) -> Dict[str, int]:
-        return dict(self.summary_counts()["host_statuses"])
-
     def _hosts(self) -> List[sqlite3.Row]:
         return list(
             self.connection.execute(
@@ -598,62 +595,6 @@ class ScanStore:
                 (self.scan_id,),
             )
         )
-
-    def build_results(self, summary: Dict[str, Any]) -> Dict[str, Any]:
-        """Build one scan result. Primarily retained for tests and small reports."""
-        result: Dict[str, Any] = {
-            "_schema": {"name": "shrawler-results", "version": 3},
-            "_summary": summary,
-        }
-        scan = self.connection.execute(
-            "SELECT snaffler_summary_json FROM scans WHERE id=?", (self.scan_id,)
-        ).fetchone()
-        if scan and scan[0]:
-            result["_snaffler_summary"] = json.loads(scan[0])
-        for host in self._hosts():
-            host_data: Dict[str, Any] = {
-                "scan_timestamp_utc": host["scan_timestamp_utc"],
-                "status": host["status"],
-                "error": host["error"],
-                "shares": {},
-            }
-            shares = self.connection.execute(
-                "SELECT * FROM shares WHERE host_id=? ORDER BY name COLLATE NOCASE",
-                (host["id"],),
-            )
-            for share in shares:
-                payload = json.loads(share["payload_json"])
-                payload["status"] = share["status"]
-                payload["discovered_files"] = [
-                    json.loads(row[0])
-                    for row in self.connection.execute(
-                        """SELECT sf.payload_json FROM scan_files sf
-                           WHERE sf.scan_id=? AND sf.share_id=? ORDER BY sf.rowid""",
-                        (self.scan_id, share["id"]),
-                    )
-                ]
-                payload["downloaded_files"] = [
-                    json.loads(row[0])
-                    for row in self.connection.execute(
-                        f"""SELECT payload_json FROM downloads
-                           WHERE scan_id=? AND share_id=?
-                             AND {_SCAN_DOWNLOAD_FILTER} ORDER BY id""",
-                        (self.scan_id, share["id"]),
-                    )
-                ]
-                matches = [
-                    json.loads(row[0])
-                    for row in self.connection.execute(
-                        """SELECT payload_json FROM snaffler_matches
-                           WHERE scan_id=? AND share_id=? ORDER BY id""",
-                        (self.scan_id, share["id"]),
-                    )
-                ]
-                if matches:
-                    payload["snaffler_matches"] = matches
-                host_data["shares"][share["name"]] = payload
-            result[str(host["host"])] = host_data
-        return result
 
     def export_json(self, summary: Dict[str, Any]) -> Path:
         """Atomically export the current scan using schema-v3 structure."""

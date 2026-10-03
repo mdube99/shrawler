@@ -28,10 +28,6 @@ LEASE_HEARTBEAT_SECONDS = 60.0
 WORK_STATUSES = ("pending", "failed", "input-error")
 
 
-class RunnerError(ValueError):
-    pass
-
-
 class JevRunner:
     """Owns prepare/dispatch/status for one assessment database."""
 
@@ -237,8 +233,6 @@ class JevRunner:
             remote_model=response.model,
             duration_ms=duration_ms,
         )
-        if answered:
-            self.store.put_cache(run_id, str(batch["cache_key"]), batch_id)
         self.store.commit()
 
     def _split_by_attempts(
