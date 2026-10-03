@@ -29,8 +29,9 @@ from .search_index import (
 )
 from .smb import SMBAuth, close_smb, connect_smb
 from .store import SCHEMA_VERSION
-from .triage.jev.config import JevConfig
+from .triage.jev.config import PRIORITY_NAMES, JevConfig, priority_score
 from .triage.jev.service import JevBusyError, JevService
+from .triage.jev.storage import assessment_path
 from .triage.review import ReviewStore
 from .triage.service import TriageBusyError, TriageService
 from .triage.storage import (
@@ -73,6 +74,36 @@ SECURITY_HEADERS = {
 }
 
 
+def jev_catalog(database: Path) -> List[Dict[str, Any]]:
+    """Assessment runs recorded beside an inventory, newest first."""
+    path = assessment_path(database)
+    if not path.is_file():
+        return []
+    try:
+        connection = sqlite3.connect(str(path), timeout=5)
+        connection.row_factory = sqlite3.Row
+        try:
+            connection.execute("PRAGMA query_only=ON")
+            rows = connection.execute(
+                "SELECT id, scan_id, status, created_at, total_observed "
+                "FROM assessment_runs ORDER BY created_at DESC, rowid DESC LIMIT 200"
+            ).fetchall()
+        finally:
+            connection.close()
+    except sqlite3.Error:
+        return []
+    return [
+        {
+            "id": str(row["id"]),
+            "scan_id": str(row["scan_id"]),
+            "status": str(row["status"]),
+            "created_at": str(row["created_at"]),
+            "total_observed": int(row["total_observed"] or 0),
+        }
+        for row in rows
+    ]
+
+
 @dataclass
 class FileRecord:
     id: str
@@ -102,6 +133,10 @@ class FileRecord:
     ranking_priority: Optional[int] = None
     ranking_score: Optional[int] = None
     ranking_category: str = ""
+    jev_run_id: str = ""
+    jev_choice: str = ""
+    jev_score: Optional[int] = None
+    jev_priority_name: str = ""
 
     def public(self) -> Dict[str, Any]:
         value = asdict(self)
@@ -423,6 +458,7 @@ class FileIndex:
         direction: str = "asc",
         include_total: bool = True,
         activity: str = "",
+        jev_run: str = "",
     ) -> Dict[str, Any]:
         matches = self._matching(
             q, host, share, extension, rule, triage, permission, collection, activity=activity
@@ -444,6 +480,10 @@ class FileIndex:
             "size": lambda row: row.size_bytes,
             "modified": lambda row: row.mtime_utc,
         }
+        # JSON result sets carry no assessment database, so Jev sorting falls
+        # back to path order rather than failing.
+        if sort == "jev":
+            sort = "path"
         if sort not in sort_keys or direction not in {"asc", "desc"}:
             raise ValueError("Invalid inventory sort")
         matches.sort(key=sort_keys[sort], reverse=direction == "desc")
@@ -687,6 +727,12 @@ class DatabaseIndex:
             connection.execute(
                 "ATTACH DATABASE ? AS triage",
                 (str(ranking_path.resolve()),),
+            )
+        jev_path = assessment_path(self.path)
+        if jev_path.is_file():
+            connection.execute(
+                "ATTACH DATABASE ? AS jev",
+                (str(jev_path.resolve()),),
             )
         return connection
 
@@ -1114,6 +1160,7 @@ class DatabaseIndex:
             "revision": revision_value,
             "scan_active": bool(active[0]),
             "ranking_runs": self.ranking_catalog().get("runs", []),
+            "jev_runs": jev_catalog(self.path),
         }
 
     def ranking_catalog(self) -> Dict[str, Any]:
@@ -1121,6 +1168,18 @@ class DatabaseIndex:
             return triage_catalog(self.path)
         except (OSError, sqlite3.Error, ValueError):
             return {"scans": [], "runs": []}
+
+    def _resolve_jev_run(self, requested: str) -> str:
+        """Pick the assessment run to surface, preferring a finished one."""
+        runs = jev_catalog(self.path)
+        if not runs:
+            return ""
+        if requested:
+            return requested if any(run["id"] == requested for run in runs) else ""
+        for run in runs:
+            if run["status"] in {"completed", "partial"}:
+                return run["id"]
+        return runs[0]["id"]
 
     @staticmethod
     def _ranking_join(run_id: str, category: str) -> Tuple[str, List[Any], str]:
@@ -1159,6 +1218,15 @@ class DatabaseIndex:
             )
             record.ranking_category = category
 
+    @staticmethod
+    def _apply_jev(records: List[FileRecord], rows: List[sqlite3.Row]) -> None:
+        for record, row in zip(records, rows):
+            choice = row["jev_choice"]
+            record.jev_run_id = str(row["jev_run_id"] or "")
+            record.jev_choice = str(choice) if choice is not None else ""
+            record.jev_score = priority_score(choice) if choice is not None else None
+            record.jev_priority_name = PRIORITY_NAMES.get(record.jev_choice, "")
+
     def get(self, public_id: str) -> Optional[FileRecord]:
         with self._connect() as connection:
             row = connection.execute(
@@ -1185,6 +1253,7 @@ class DatabaseIndex:
         direction: str = "asc",
         include_total: bool = True,
         activity: str = "",
+        jev_run: str = "",
     ) -> Dict[str, Any]:
         where, where_values = self._where(
             q,
@@ -1203,18 +1272,35 @@ class DatabaseIndex:
         joins, join_values, ranking_score = self._ranking_join(
             ranking_run, ranking_category
         )
+        jev_run_id = self._resolve_jev_run(jev_run)
+        jev_join = ""
+        jev_join_values: List[Any] = []
+        jev_projection = "NULL AS jev_choice, '' AS jev_run_id"
+        jev_order: Optional[str] = None
+        if jev_run_id:
+            jev_join = (
+                " LEFT JOIN jev.assessment_files jev_file"
+                " ON jev_file.file_id=files.public_id AND jev_file.run_id=?"
+                " LEFT JOIN jev.decision_results jev_result"
+                " ON jev_result.id=jev_file.result_id"
+            )
+            jev_join_values = [jev_run_id]
+            jev_projection = (
+                "jev_result.choice AS jev_choice, jev_file.run_id AS jev_run_id"
+            )
+            jev_order = "CAST(jev_result.choice AS INTEGER)"
         ranking_projection = (
             "ranking.run_id AS ranking_run_id, ranking.priority AS ranking_priority, "
             f"{ranking_score} AS ranking_score"
             if ranking_run
             else "'' AS ranking_run_id, NULL AS ranking_priority, NULL AS ranking_score"
-        )
-        values = join_values + where_values
+        ) + ", " + jev_projection
+        values = join_values + jev_join_values + where_values
         if ranking_run and ranking_min > 0:
             where = where.replace("ranking_score >= ?", f"{ranking_score} >= ?")
-        ranking_source = "files" + joins
+        ranking_source = "files" + joins + jev_join
         ranking_order_id = "files.public_id"
-        if sort == "priority" and ranking_run and direction == "desc":
+        if sort == "priority" and ranking_run and direction == "desc" and not jev_join:
             # These are inner joins: the indexed score is never NULL. Using
             # COALESCE or the inventory's ID in ORDER BY forces a temporary sort.
             indexed_score = (
@@ -1269,17 +1355,29 @@ class DatabaseIndex:
             "size": ["files.size_bytes", "files.file_name COLLATE NOCASE"],
             "modified": ["files.mtime_utc", "files.file_name COLLATE NOCASE"],
         }
+        if jev_order:
+            sort_columns["jev"] = [jev_order]
         if sort not in sort_columns or direction not in {"asc", "desc"}:
             raise ValueError("Invalid inventory sort")
         if sort == "priority" and not ranking_run:
             sort = "path"
-        order = (
-            " ORDER BY "
-            + ", ".join(
-                f"{column} {direction.upper()}" for column in sort_columns[sort]
+        if sort == "jev" and not jev_order:
+            sort = "path"
+        if sort == "jev":
+            # Assessed files first, highest priority first; unassessed rows last
+            # regardless of direction.
+            order = (
+                " ORDER BY (jev_result.choice IS NULL) ASC, "
+                f"{jev_order} {direction.upper()}, files.public_id {direction.upper()}"
             )
-            + f", {ranking_order_id} {direction.upper()}"
-        )
+        else:
+            order = (
+                " ORDER BY "
+                + ", ".join(
+                    f"{column} {direction.upper()}" for column in sort_columns[sort]
+                )
+                + f", {ranking_order_id} {direction.upper()}"
+            )
         per_page = min(max(per_page, 1), self.page_size, 500)
         page = max(page, 1)
         start = (page - 1) * per_page
@@ -1315,6 +1413,7 @@ class DatabaseIndex:
             total_key = (
                 revision, q, host, share, extension, rule, triage, permission,
                 collection, ranking_run, ranking_category, ranking_min, activity,
+                jev_run_id,
             )
             total = self._total_cache.get(total_key) if include_total else None
             if include_total and total is None:
@@ -1344,6 +1443,7 @@ class DatabaseIndex:
             rows = rows[:per_page]
             records = [self._record(row) for row in rows]
             self._apply_ranking(records, rows, ranking_category)
+            self._apply_jev(records, rows)
             items = [record.public() for record in self._enrich(records)]
         return {
             "items": items,
@@ -1906,6 +2006,7 @@ class WebHandler(BaseHTTPRequestHandler):
                 "priority",
                 "size",
                 "modified",
+                "jev",
             }:
                 self._error(400, "Invalid inventory sort", "invalid_query")
                 return
@@ -1970,6 +2071,7 @@ class WebHandler(BaseHTTPRequestHandler):
                         *ranking_args,
                         activity=filters[13],
                         include_total=query.get("include_total", ["0"])[0] == "1",
+                        jev_run=query.get("jev_run", [""])[0],
                     )
                 )
             except (ValueError, OverflowError):

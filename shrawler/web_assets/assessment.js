@@ -147,7 +147,8 @@
     body.replaceChildren();
     data.items.forEach(item => {
       const row = node('tr');
-      row.append(node('td', item.choice, 'ranking-priority'));
+      const priority = item.priority_name ? `${item.priority} ${item.priority_name}` : item.choice;
+      row.append(node('td', priority, 'ranking-priority'));
       row.append(node('td', item.file_name));
       row.append(node('td', item.unc_path, 'ranking-path'));
       const distribution = item.distribution ? Object.entries(item.distribution).map(([key, value]) => `${key} ${Number(value).toFixed(2)}`).join(', ') : '—';
@@ -159,7 +160,7 @@
       const cell = node('td', 'No assessed candidates match this filter.', 'ranking-empty');
       cell.colSpan = 4; row.append(cell); body.append(row);
     }
-    $('results-summary').textContent = `Model labels are metadata-based review value, not confirmed content. Showing ${data.items.length} result(s).`;
+    $('results-summary').textContent = `Model priority is metadata-based review value, not confirmed content. Showing ${data.items.length} result(s).`;
     $('results-page').textContent = `Page ${Math.floor(offset / pageSize) + 1}`;
     $('results-prev').disabled = offset === 0;
     $('results-next').disabled = data.items.length < pageSize;

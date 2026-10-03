@@ -49,8 +49,8 @@ def question_for(file_id: str, config: JevConfig) -> Dict[str, Any]:
         "type": "choice",
         "instructions": (
             f"Assess candidate {file_id} using the shared directory context and "
-            "its own metadata. Judge how likely an analyst should inspect this "
-            "file for sensitive information under the declared objective."
+            "its own metadata. Return the inspection-priority level that the "
+            "declared objective and rubric support."
         ),
         "criteria": dict(RUBRIC),
     }

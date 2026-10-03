@@ -15,7 +15,7 @@ from typing import Any, Dict, Mapping, Optional
 ADAPTER_VERSION = "systemone-1"
 CONTEXT_VERSION = "1"
 PLANNER_VERSION = "1"
-RUBRIC_VERSION = "1"
+RUBRIC_VERSION = "2"
 PREPROCESSING_VERSION = "1"
 
 # Default Jev (TypeSafe System One) route. The hosted route
@@ -24,23 +24,57 @@ PREPROCESSING_VERSION = "1"
 DEFAULT_ENDPOINT = "https://api.typesafe.ai/v1/systemone"
 
 DEFAULT_OBJECTIVE = (
-    "Rank each observed file for how likely an analyst should inspect it for "
-    "sensitive information. Sensitivity includes credentials, private keys, "
-    "sensitive configuration, personal records, financial data, and other "
-    "engagement-specific sensitive content."
+    "Evaluate how strongly the available evidence supports prioritizing this "
+    "file for analyst inspection to identify sensitive information exposed "
+    "through a file share.\n\n"
+    "Sensitive information includes credentials, authentication tokens, private "
+    "keys, configurations containing secrets, personal records, financial data, "
+    "and confidential business information.\n\n"
+    "Use the supplied filename, full path, metadata, and file contents when "
+    "available. Prioritize evidence of actual sensitive information over generic "
+    "security relevance. Treat suggestive filenames and paths as indicators, not "
+    "confirmation. Missing or unreadable contents do not establish that a file "
+    "is safe.\n\n"
+    "Apply this inspection-priority rubric:\n"
+    "0 — Minimal: Available evidence suggests ordinary, public, or nonsensitive material.\n"
+    "1 — Possible: Weak indicators of sensitive information warrant lower-priority review.\n"
+    "2 — Likely: Specific indicators suggest sensitive information and warrant analyst inspection.\n"
+    "3 — Strong: Available evidence strongly indicates sensitive information and warrants prompt inspection.\n"
+    "4 — Immediate: Available contents reveal apparent authentication secrets or "
+    "highly sensitive records requiring immediate analyst review.\n"
+    "Assess inspection priority, not confirmed vulnerability severity."
 )
 
-# One unordered ``choice`` question per file. "insufficient" is deliberately a
-# peer option, not the bottom of an ordinal scale.
+# One ordered ``choice`` question per file on a 0-4 inspection-priority scale.
+# Keys are the numeric levels so the model's answer is directly rankable.
 RUBRIC = {
-    "high": "Strong metadata evidence the file merits review for sensitive information.",
-    "moderate": "Some metadata evidence the file merits review for sensitive information.",
-    "low": "Little metadata evidence the file merits review for sensitive information.",
-    "insufficient": "The supplied metadata is not sufficient to judge review value.",
+    "0": "Minimal: Available evidence suggests ordinary, public, or nonsensitive material.",
+    "1": "Possible: Weak indicators of sensitive information warrant lower-priority review.",
+    "2": "Likely: Specific indicators suggest sensitive information and warrant analyst inspection.",
+    "3": "Strong: Available evidence strongly indicates sensitive information and warrants prompt inspection.",
+    "4": "Immediate: Available contents reveal apparent authentication secrets or highly sensitive records requiring immediate analyst review.",
 }
-REVIEW_LABELS = tuple(RUBRIC)
-HIGH_LABEL = "high"
-INSUFFICIENT_LABEL = "insufficient"
+# Ordered numeric levels; dict insertion order above is the source of truth.
+PRIORITY_LEVELS = tuple(RUBRIC)
+PRIORITY_NAMES = {
+    "0": "Minimal",
+    "1": "Possible",
+    "2": "Likely",
+    "3": "Strong",
+    "4": "Immediate",
+}
+# A rule-missed file is surfaced for rule expansion only when the model rates it
+# at least this strongly (3 = "Strong", 4 = "Immediate").
+PRIORITY_INSPECT_MIN = 3
+
+
+def priority_score(value: Any) -> int:
+    """Numeric priority for a stored model answer, or -1 if unparseable."""
+    try:
+        return int(float(str(value)))
+    except (TypeError, ValueError):
+        return -1
+
 
 ALLOWED_FIELDS = frozenset(
     {

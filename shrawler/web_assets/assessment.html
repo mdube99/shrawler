@@ -11,7 +11,7 @@
     <a id="ranking-link" class="button" href="/triage">Ranked review</a>
   </div></header>
   <main class="workspace ranking-workspace">
-    <section class="intro"><div><h1>Model-assisted assessment</h1><p>Ask a decision model about every observed file using shared directory context. Labels are metadata-based review value, not confirmed content, and unfinished coverage is always reported.</p></div><span id="mode" class="local-badge">Full coverage</span></section>
+    <section class="intro"><div><h1>Model-assisted assessment</h1><p>Ask a decision model about every observed file using shared directory context. Inspection priority is metadata-based review value, not confirmed content, and unfinished coverage is always reported.</p></div><span id="mode" class="local-badge">Full coverage</span></section>
     <p id="assessment-error" class="error-banner" role="alert" hidden></p>
 
     <section class="ranking-panel" aria-labelledby="run-title">
@@ -46,15 +46,15 @@
     <section class="ranking-panel" aria-labelledby="results-title">
       <h2 id="results-title">Model-assisted candidates</h2>
       <div class="ranking-controls">
-        <label>Label<select id="label"><option value="">All labels</option><option value="high">High</option><option value="moderate">Moderate</option><option value="low">Low</option><option value="insufficient">Insufficient evidence</option></select></label>
-        <label class="checkbox-label"><input id="missed" type="checkbox"> Only high value missed by rules</label>
+        <label>Priority<select id="label"><option value="">All priorities</option><option value="4">4 Immediate</option><option value="3">3 Strong</option><option value="2">2 Likely</option><option value="1">1 Possible</option><option value="0">0 Minimal</option></select></label>
+        <label class="checkbox-label"><input id="missed" type="checkbox"> Only strong value missed by rules</label>
         <button id="refresh-results" class="button" type="button">Refresh</button>
       </div>
       <p id="results-summary" role="status">Prepare and run an assessment to see candidates.</p>
       <div class="table-shell ranking-table-shell">
         <table class="ranking-table">
           <colgroup><col class="ranking-priority-column"><col class="ranking-file-column"><col class="ranking-location-column"><col class="ranking-reasons-column"></colgroup>
-          <thead><tr><th scope="col">Label</th><th scope="col">File</th><th scope="col">Observed location</th><th scope="col">Distribution</th></tr></thead>
+          <thead><tr><th scope="col">Priority</th><th scope="col">File</th><th scope="col">Observed location</th><th scope="col">Distribution</th></tr></thead>
           <tbody id="assessment-files"></tbody>
         </table>
       </div>

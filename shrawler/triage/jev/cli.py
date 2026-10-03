@@ -16,7 +16,7 @@ from typing import Any, Dict, List, Optional
 from ...output import escape_terminal
 from ..rules import load
 from .client import JevClient
-from .config import REVIEW_LABELS, JevConfig
+from .config import PRIORITY_LEVELS, JevConfig
 from .planner import TokenCounter
 from .runner import JevRunner
 from .storage import JevStore, RunBusyError
@@ -55,10 +55,11 @@ def _print_status(payload: Dict[str, Any]) -> None:
 
 def _print_list(payload: Dict[str, Any]) -> None:
     print(f"Run {payload['run_id']} | scan {payload['scan_id']}")
-    print("LABEL       FILE ID                   UNC PATH")
+    print("PRIORITY    FILE ID                   UNC PATH")
     for item in payload["items"]:
+        label = f"{item['priority']} {item['priority_name']}".strip()
         print(
-            f"{item['choice']:<10}  {item['file_id']}  "
+            f"{label:<10}  {item['file_id']}  "
             f"{escape_terminal(item['unc_path'])}"
         )
     print(payload["note"])
@@ -106,11 +107,15 @@ def main(argv: Optional[List[str]] = None) -> int:
     listing = commands.add_parser("list", help="model-assisted analyst view")
     listing.add_argument("database", type=Path)
     listing.add_argument("--run", dest="run_id")
-    listing.add_argument("--label", choices=REVIEW_LABELS)
+    listing.add_argument("--label", choices=PRIORITY_LEVELS)
     listing.add_argument("--directory", type=int)
     listing.add_argument("--limit", type=int, default=100)
     listing.add_argument("--offset", type=int, default=0)
-    listing.add_argument("--missed", action="store_true", help="high value missed by rules")
+    listing.add_argument(
+        "--missed",
+        action="store_true",
+        help="priority at/above the rule-expansion threshold missed by rules",
+    )
 
     for command in (check, prepare, preview, run, status, listing):
         command.add_argument("--json", action="store_true", help="machine-readable output")

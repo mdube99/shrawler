@@ -32,12 +32,15 @@
     nemesisEnabled: false,
     rankingRuns: [],
     rankingSignature: '',
+    jevRuns: [],
+    jevSignature: '',
     sortDirection: 'desc',
     revision: 0,
     observedRevision: 0,
     displayedFileCount: 0,
     latestFileCount: 0,
     pendingRankingRuns: null,
+    pendingJevRuns: null,
     applyingUpdates: false,
     scanActive: false
   };
@@ -192,7 +195,8 @@
     return {q: $('query').value, host: $('host').value, share: $('share').value, extension: $('extension').value,
       rule: $('rule').value, triage: $('triage').value, permission: $('permission').value, activity: $('activity').value,
       ranking_run: $('ranking').value, ranking_category: $('ranking-category').value,
-      ranking_min: $('ranking-min').value, sort: $('sort').value, direction: state.sortDirection};
+      ranking_min: $('ranking-min').value, jev_run: $('jev-run').value,
+      sort: $('sort').value, direction: state.sortDirection};
   }
 
   function filterParams(includePage = false) {
@@ -251,8 +255,34 @@
     }
   }
 
+  function appendJevOptions(runs) {
+    const selected = $('jev-run').value;
+    while ($('jev-run').options.length > 1) $('jev-run').remove(1);
+    runs.filter(run => ['completed', 'partial'].includes(run.status)).forEach(run => {
+      const option = document.createElement('option');
+      option.value = run.id;
+      option.textContent = `${run.created_at} · ${Number(run.total_observed || 0).toLocaleString()} files · ${run.status}`;
+      $('jev-run').append(option);
+    });
+    if (runs.some(run => run.id === selected)) $('jev-run').value = selected;
+    updateJevControls();
+  }
+
+  function updateJevControls() {
+    const available = state.jevRuns.some(run => ['completed', 'partial'].includes(run.status));
+    $('jev-run').disabled = !available;
+    const sortOption = $('sort').querySelector('option[value="jev"]');
+    if (sortOption) sortOption.disabled = !available;
+    const header = document.querySelector('.sort-header[data-sort="jev"]');
+    if (header) header.disabled = !available;
+    if (!available && $('sort').value === 'jev') {
+      $('sort').value = 'path';
+      state.sortDirection = 'asc';
+    }
+  }
+
   function sortName(value) {
-    return {path: 'Path', type: 'Type', file: 'File', location: 'Location', priority: 'Rating', size: 'Size', modified: 'Modified'}[value] || 'Path';
+    return {path: 'Path', type: 'Type', file: 'File', location: 'Location', priority: 'Rating', jev: 'Jev priority', size: 'Size', modified: 'Modified'}[value] || 'Path';
   }
 
   function renderSortHeaders() {
@@ -272,7 +302,7 @@
     if ($('sort').value === column) state.sortDirection = state.sortDirection === 'asc' ? 'desc' : 'asc';
     else {
       $('sort').value = column;
-      state.sortDirection = ['priority', 'size', 'modified'].includes(column) ? 'desc' : 'asc';
+      state.sortDirection = ['priority', 'jev', 'size', 'modified'].includes(column) ? 'desc' : 'asc';
     }
     state.page = 1;
     renderSortHeaders();
@@ -295,6 +325,7 @@
       ['permission', 'Share-root permission', permissionName(values.permission)], ['activity', 'Activity', values.activity ? activityLabel(values.activity) : ''],
       ['ranking', 'Ranking', values.ranking_run ? 'Selected' : ''], ['ranking-category', 'Rank category', values.ranking_category],
       ['ranking-min', 'Minimum rating', values.ranking_min ? `${values.ranking_min}+` : ''],
+      ['jev-run', 'Jev run', values.jev_run ? 'Selected' : ''],
       ['sort', 'Sort', values.sort !== 'path' || state.sortDirection !== 'asc' ? `${sortName(values.sort)} ${state.sortDirection === 'desc' ? '↓' : '↑'}` : '']
     ].filter(entry => entry[2]);
     $('clear').hidden = entries.length === 0;
@@ -322,7 +353,7 @@
 
   function clearFilters() {
     $('query').value = '';
-    ['host', 'share', 'extension', 'rule', 'triage', 'permission', 'activity', 'ranking', 'ranking-category', 'ranking-min'].forEach(id => { $(id).value = ''; });
+    ['host', 'share', 'extension', 'rule', 'triage', 'permission', 'activity', 'ranking', 'ranking-category', 'ranking-min', 'jev-run'].forEach(id => { $(id).value = ''; });
     $('sort').value = 'path';
     state.sortDirection = 'asc';
     renderSortHeaders();
@@ -346,6 +377,18 @@
   function ratingBadge(item) {
     const value = element('span', `rating-badge ${item.ranking_run_id ? 'ranked' : 'unranked'}`, ratingText(item));
     value.title = item.ranking_run_id ? `Ranking score: ${ratingText(item)}` : 'No selected ranking';
+    return value;
+  }
+
+  function jevText(item) {
+    if (!item.jev_run_id || item.jev_score === null || item.jev_score === undefined) return '—';
+    return item.jev_priority_name ? `${item.jev_score} ${item.jev_priority_name}` : String(item.jev_score);
+  }
+
+  function jevBadge(item) {
+    const assessed = !!item.jev_run_id && item.jev_score !== null && item.jev_score !== undefined;
+    const value = element('span', `rating-badge ${assessed ? 'ranked' : 'unranked'}`, jevText(item));
+    value.title = assessed ? `Jev inspection priority: ${jevText(item)}` : 'Not assessed by Jev';
     return value;
   }
 
@@ -433,6 +476,7 @@
     const evidence = element('div', 'detail-evidence');
     const matchNames = (item.rule_matches || []).map(match => `${match.rule_name || 'unnamed'}${match.triage ? ` · ${match.triage}` : ''}`);
     evidence.append(metadataField('Ranking', item.ranking_run_id ? ratingText(item) : 'No ranking selected'));
+    evidence.append(metadataField('Jev priority', item.jev_run_id ? jevText(item) : 'Not assessed by Jev'));
     evidence.append(metadataField('Downloaded', item.collection_status === 'collected' ? `Yes${(Number(item.download_count) || 0) > 1 ? ` · ${item.download_count}×` : ''}${item.downloaded_at_utc ? ` · ${formatDate(item.downloaded_at_utc)}` : ''}` : 'No'));
     evidence.append(metadataField('Nemesis', nemesisText(item)));
     const rules = element('section', 'detail-rules');
@@ -496,7 +540,7 @@
     if (!state.items.length) {
       const row = document.createElement('tr');
       const cell = element('td', 'empty-message');
-      cell.colSpan = 8;
+      cell.colSpan = 9;
       cell.append(element('strong', '', 'No files match these filters.'), element('span', '', 'Try a broader search or clear an active filter.'));
       row.append(cell);
       body.append(row);
@@ -534,6 +578,8 @@
       locationCell.append(location);
       const ratingCell = element('td', 'numeric');
       ratingCell.append(ratingBadge(item));
+      const jevCell = element('td', 'numeric');
+      jevCell.append(jevBadge(item));
       const sizeCell = element('td', 'numeric');
       sizeCell.append(element('span', 'size-value', item.readable_size || formatBytes(item.size_bytes)));
       const dateCell = element('td', 'numeric');
@@ -542,7 +588,7 @@
       dateCell.append(time);
       const chevronCell = element('td', 'row-chevron');
       chevronCell.append(icon('chevron'));
-      row.append(selectCell, tagCell, fileCell, locationCell, ratingCell, sizeCell, dateCell, chevronCell);
+      row.append(selectCell, tagCell, fileCell, locationCell, ratingCell, jevCell, sizeCell, dateCell, chevronCell);
       row.addEventListener('click', event => { if (!event.target.closest('button')) toggleTableDetails(item); });
       body.append(row);
 
@@ -550,7 +596,7 @@
         const detailRow = element('tr', 'detail-row');
         detailRow.id = `details-${item.id}`;
         const detailCell = document.createElement('td');
-        detailCell.colSpan = 8;
+        detailCell.colSpan = 9;
         detailCell.append(detailPanel(item, () => toggleTableDetails(item)));
         detailRow.append(detailCell);
         body.append(detailRow);
@@ -572,7 +618,7 @@
     body.replaceChildren();
     for (let rowIndex = 0; rowIndex < 7; rowIndex += 1) {
       const row = element('tr', 'skeleton-row');
-      for (let column = 0; column < 6; column += 1) {
+      for (let column = 0; column < 9; column += 1) {
         const cell = document.createElement('td');
         cell.append(element('div', 'skeleton'));
         row.append(cell);
@@ -838,7 +884,7 @@
   }
 
   function renderPendingUpdates(scanActive = state.scanActive) {
-    const pending = state.observedRevision !== state.revision || state.pendingRankingRuns !== null;
+    const pending = state.observedRevision !== state.revision || state.pendingRankingRuns !== null || state.pendingJevRuns !== null;
     $('pending-updates').hidden = !pending;
     if (!pending) return;
     const added = Math.max(0, state.latestFileCount - state.displayedFileCount);
@@ -879,6 +925,7 @@
     const appliedRevision = state.observedRevision;
     const appliedFileCount = state.latestFileCount;
     const pendingRuns = state.pendingRankingRuns;
+    const pendingJevRuns = state.pendingJevRuns;
     const button = $('show-updates');
     button.disabled = true;
     button.replaceChildren(element('span', 'small-spinner'), document.createTextNode('Updating…'));
@@ -887,6 +934,11 @@
         state.rankingRuns = pendingRuns;
         state.rankingSignature = JSON.stringify(pendingRuns.map(run => [run.id, run.status, run.file_count]));
         appendRankingOptions(state.rankingRuns);
+      }
+      if (pendingJevRuns !== null) {
+        state.jevRuns = pendingJevRuns;
+        state.jevSignature = JSON.stringify(pendingJevRuns.map(run => [run.id, run.status, run.total_observed]));
+        appendJevOptions(state.jevRuns);
       }
       treeCache.clear();
       const scrollTop = window.scrollY;
@@ -897,6 +949,7 @@
       state.revision = appliedRevision;
       state.displayedFileCount = appliedFileCount;
       if (state.pendingRankingRuns === pendingRuns) state.pendingRankingRuns = null;
+      if (state.pendingJevRuns === pendingJevRuns) state.pendingJevRuns = null;
       window.scrollTo({top: scrollTop, behavior: 'auto'});
     } catch (error) {
       showToast(error.message, true);
@@ -1168,6 +1221,9 @@
     state.rankingRuns = status.ranking_runs || [];
     state.rankingSignature = JSON.stringify(state.rankingRuns.map(run => [run.id, run.status, run.file_count]));
     appendRankingOptions(state.rankingRuns);
+    state.jevRuns = status.jev_runs || [];
+    state.jevSignature = JSON.stringify(state.jevRuns.map(run => [run.id, run.status, run.total_observed]));
+    appendJevOptions(state.jevRuns);
     document.body.classList.toggle('compact', state.compact);
     $('density').setAttribute('aria-pressed', String(state.compact));
     setView(state.view === 'tree' ? 'tree' : 'table');
@@ -1196,6 +1252,10 @@
         if (rankingSignature !== state.rankingSignature) {
           state.pendingRankingRuns = latest.ranking_runs || [];
         }
+        const jevSignature = JSON.stringify((latest.jev_runs || []).map(run => [run.id, run.status, run.total_observed]));
+        if (jevSignature !== state.jevSignature) {
+          state.pendingJevRuns = latest.jev_runs || [];
+        }
         renderPendingUpdates(latest.scan_active);
       } catch (_) { /* The normal request UI reports actionable errors. */ }
       finally { statusPolling = false; }
@@ -1207,11 +1267,11 @@
   });
 
   $('query').addEventListener('input', scheduleRefresh);
-  ['host', 'share', 'extension', 'rule', 'triage', 'permission', 'activity', 'ranking-min'].forEach(id => $(id).addEventListener('change', scheduleRefresh));
+  ['host', 'share', 'extension', 'rule', 'triage', 'permission', 'activity', 'ranking-min', 'jev-run'].forEach(id => $(id).addEventListener('change', scheduleRefresh));
   $('ranking').addEventListener('change', () => { updateRankingCategories(); scheduleRefresh(); });
   $('ranking-category').addEventListener('change', scheduleRefresh);
   $('sort').addEventListener('change', () => {
-    state.sortDirection = ['priority', 'size', 'modified'].includes($('sort').value) ? 'desc' : 'asc';
+    state.sortDirection = ['priority', 'jev', 'size', 'modified'].includes($('sort').value) ? 'desc' : 'asc';
     state.page = 1;
     renderSortHeaders();
     refresh();
