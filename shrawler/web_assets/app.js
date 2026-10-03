@@ -1217,6 +1217,7 @@
     renderSelectionToolbar();
     $('status').textContent = `Connected — ${status.file_count.toLocaleString()} files indexed`;
     $('connection-status').classList.add('ready');
+    $('assessment-link').hidden = status.assessment_enabled !== true;
     refreshFacets().catch(() => { /* Results remain usable while facets load. */ });
     state.rankingRuns = status.ranking_runs || [];
     state.rankingSignature = JSON.stringify(state.rankingRuns.map(run => [run.id, run.status, run.file_count]));

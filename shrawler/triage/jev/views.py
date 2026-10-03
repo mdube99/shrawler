@@ -84,10 +84,12 @@ def list_assessed(
 
 
 def highlight_missed(
-    store: JevStore, run_id: str, limit: int = 100
+    store: JevStore, run_id: str, limit: int = 100, offset: int = 0
 ) -> Dict[str, Any]:
     """Model priority at/above the rule-expansion threshold among files the
     deterministic rules left at 0."""
+    if not 1 <= limit <= 10000 or offset < 0:
+        raise ValueError("limit must be 1..10000 and offset nonnegative")
     rows = list(
         store.connection.execute(
             "SELECT r.choice, r.distribution_json, r.deployment_revision, r.model, "
@@ -95,8 +97,8 @@ def highlight_missed(
             "FROM assessment_files f JOIN decision_results r ON r.id=f.result_id "
             "WHERE f.run_id=? AND f.status='assessed' AND f.priority=0 "
             "AND CAST(r.choice AS INTEGER) >= ? "
-            "ORDER BY " + _PRIORITY_ORDER + " LIMIT ?",
-            (run_id, PRIORITY_INSPECT_MIN, limit),
+            "ORDER BY " + _PRIORITY_ORDER + " LIMIT ? OFFSET ?",
+            (run_id, PRIORITY_INSPECT_MIN, limit, offset),
         )
     )
     return {"run_id": run_id, "items": [_summary(row) for row in rows]}

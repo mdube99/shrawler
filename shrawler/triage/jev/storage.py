@@ -545,15 +545,3 @@ class JevStore:
                 (run_id,),
             )
         )
-
-    def results_for_directory(self, run_id: str, directory_id: int) -> List[sqlite3.Row]:
-        return list(
-            self.connection.execute(
-                "SELECT r.choice, r.distribution_json, r.deployment_revision, r.model, "
-                "f.file_id, f.file_name, f.unc_path, f.extension, f.size_bytes, f.mtime_utc "
-                "FROM assessment_files f LEFT JOIN decision_results r ON r.id=f.result_id "
-                "WHERE f.run_id=? AND f.directory_id=? AND f.status='assessed' "
-                "ORDER BY f.file_id",
-                (run_id, directory_id),
-            )
-        )

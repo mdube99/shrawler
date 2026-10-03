@@ -180,6 +180,9 @@ def _pack(
             question_total = 0
             longest_question = 0
             byte_total = 0
+            # Recompute against the emptied batch; the previous projection was
+            # measured against the batch that was just flushed.
+            projected = state_tokens + record_tokens
         # A single candidate must still fit an otherwise empty batch; context
         # reduction is a documented policy, not a silent filename drop.
         if (

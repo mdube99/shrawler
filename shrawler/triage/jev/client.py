@@ -14,9 +14,6 @@ import requests
 
 from .config import ADAPTER_VERSION, JevConfig
 
-# Only these answer keys are ever read from a response.
-QUESTION_TYPES = ("choice", "score", "noul")
-
 
 class ProtocolError(ValueError):
     """A response that cannot be attributed to the request that produced it."""
@@ -121,6 +118,11 @@ class JevClient:
             "latency_ms": latency_ms,
             "endpoint": self.config.endpoint,
             "adapter": self.adapter_version,
+            # Default to the negative so a non-object JSON body can still be
+            # reported as a shape mismatch instead of raising KeyError.
+            "resolved_model": None,
+            "returns_answers": False,
+            "returns_usage": False,
         }
         try:
             body = response.json()
@@ -131,6 +133,9 @@ class JevClient:
             answers = body.get("answers")
             report["returns_answers"] = isinstance(answers, dict)
             report["returns_usage"] = isinstance(body.get("usage"), dict)
+        # A JSON body that is not an object (array, scalar, string) cannot be a
+        # System One response regardless of status code.
+        non_object = response.status_code == 200 and not isinstance(body, dict)
         error = _error_message(body) if isinstance(body, dict) else ""
         if response.status_code in (401, 403):
             report["reachable"] = False
@@ -141,15 +146,20 @@ class JevClient:
                 f"{self.config.endpoint}"
             )
             return report
-        if response.status_code != 200 or (error and not report["returns_answers"]):
-            # A non-200 status or an error body means the endpoint does not
-            # speak System One even when it answers HTTP 200 (for example an
-            # OpenAI-compatible server's catch-all route).
+        if (
+            response.status_code != 200
+            or non_object
+            or (error and not report["returns_answers"])
+        ):
+            # A non-200 status, a non-object body, or an error body means the
+            # endpoint does not speak System One even when it answers HTTP 200
+            # (for example an OpenAI-compatible server's catch-all route).
             report["reachable"] = False
             report["speaks_systemone"] = False
+            reason = "non-object body" if non_object else (error or "no answers")
             report["error"] = (
                 f"endpoint does not accept the System One request shape "
-                f"(HTTP {response.status_code}): {error or 'no answers'}"
+                f"(HTTP {response.status_code}): {reason}"
             )
             return report
         report["speaks_systemone"] = report["returns_answers"]

@@ -6,6 +6,7 @@ answers are persisted per batch and partial answers are kept.
 """
 
 import os
+import sqlite3
 import threading
 import time
 from contextlib import closing
@@ -21,7 +22,9 @@ from .planner import TokenCounter, plan_directory
 from .snapshot import source_fingerprint, stage
 from .storage import JevStore, utc_now
 
-PAUSE_CHECK_SECONDS = 60.0
+# A long gateway request must not outlive the lease; renew it independently of
+# how long a single dispatch blocks.
+LEASE_HEARTBEAT_SECONDS = 60.0
 WORK_STATUSES = ("pending", "failed", "input-error")
 
 
@@ -88,6 +91,8 @@ class JevRunner:
         deadline = time.monotonic() + budget if budget else None
         next: Dict[str, Any] = {"status": "completed", "error": None}
         last_heartbeat = time.monotonic()
+        lease_thread = LeaseThread(self.store, run_id, owner)
+        lease_thread.start()
         try:
             self._requeue_expired(run_id)
             while True:
@@ -130,6 +135,7 @@ class JevRunner:
         except requests.RequestException as exc:
             next = {"status": "failed", "error": f"gateway request failed: {exc}"}
         finally:
+            lease_thread.stop()
             counts = self.store.overall_counts(run_id)
             unresolved = sum(counts.get(state, 0) for state in WORK_STATUSES)
             status = next["status"]
@@ -351,19 +357,36 @@ class JevRunner:
 
 
 class LeaseThread(threading.Thread):
-    """Background heartbeat so a long dispatch keeps a live lease."""
+    """Background heartbeat so a long dispatch keeps a live lease.
+
+    The store connection is not shared across threads, so this opens its own
+    connection to the assessment database and renews the lease independently of
+    how long a single gateway request blocks.
+    """
 
     def __init__(self, store: JevStore, run_id: str, owner: str) -> None:
-        super().__init__(daemon=True)
-        self.store = store
+        super().__init__(daemon=True, name="jev-lease")
+        self.path = store.path
         self.run_id = run_id
         self.owner = owner
-        self._stop = threading.Event()
+        # Named _stop_event, not _stop: threading.Thread uses _stop internally.
+        self._stop_event = threading.Event()
 
     def run(self) -> None:
-        while not self._stop.wait(60):
-            if not self.store.heartbeat(self.run_id, self.owner):
-                return
+        connection = sqlite3.connect(self.path, timeout=30)
+        try:
+            while not self._stop_event.wait(LEASE_HEARTBEAT_SECONDS):
+                cursor = connection.execute(
+                    "UPDATE assessment_runs SET heartbeat_at=? "
+                    "WHERE id=? AND lease_owner=?",
+                    (utc_now(), self.run_id, self.owner),
+                )
+                connection.commit()
+                if cursor.rowcount != 1:
+                    return
+        finally:
+            connection.close()
 
     def stop(self) -> None:
-        self._stop.set()
+        self._stop_event.set()
+        self.join(timeout=5)

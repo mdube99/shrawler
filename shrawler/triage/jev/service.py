@@ -42,9 +42,6 @@ class JevService:
 
     # -- availability -----------------------------------------------------
 
-    def available(self) -> bool:
-        return assessment_path(self.database).exists()
-
     def status(self) -> Optional[Dict[str, Any]]:
         with self._lock:
             return copy.deepcopy(self._job)
@@ -254,13 +251,10 @@ class JevService:
             selected = store.select_run(run_id)
             identifier = str(selected["id"])
             if missed:
-                return highlight_missed(store, identifier, limit)
+                return highlight_missed(store, identifier, limit, offset)
             return list_assessed(
                 store, identifier, label, directory_id, limit, offset
             )
-
-    def client(self) -> JevClient:
-        return JevClient(self.config)
 
     def check(self) -> Dict[str, Any]:
         client = JevClient(self.config)

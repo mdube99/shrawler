@@ -6,7 +6,6 @@ small integer directory IDs so the ledger stays compact.
 """
 
 import hashlib
-import re
 from contextlib import closing
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
@@ -25,8 +24,6 @@ from .storage import JevStore, utc_now
 FLUSH_ROWS = 5000
 # Directory aggregate rows mirrored per run into a disk-backed table.
 CONTEXT_MARKER_EXAMPLES = 12
-
-_EXTENSION_RE = re.compile(r"^.*(\.[^.]*)$")
 
 
 def _extension(name: str) -> str:

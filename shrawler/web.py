@@ -1930,6 +1930,7 @@ class WebHandler(BaseHTTPRequestHandler):
             return
         if parsed.path.startswith("/api/triage/"):
             self._triage_get(parsed)
+            return
         if parsed.path.startswith("/api/assessment/"):
             self._assessment_get(parsed)
             return
@@ -2410,11 +2411,15 @@ def run(config: WebConfig, auth: Optional[SMBAuth]) -> int:
         runtime,
         threading.BoundedSemaphore(2),
         TriageService(config.database_path, runtime),
+        # [jev] enabled is an explicit opt-in: without it the WebUI exposes no
+        # assessment page or API and reports assessment as disabled.
         JevService(
             config.database_path,
             runtime,
             config.jev or JevConfig.from_mapping({}),
-        ),
+        )
+        if config.jev is not None and config.jev.enabled
+        else None,
         config.nemesis,
         config.nemesis_max_bytes,
     )
