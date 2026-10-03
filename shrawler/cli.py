@@ -679,9 +679,17 @@ def main(argv: Optional[List[str]] = None) -> None:
             except ValueError as exc:
                 parser.error(str(exc))
         from .nemesis import configuration
+        from .triage.jev.config import JevConfig
 
         try:
             nemesis = configuration(options)
+        except ValueError as exc:
+            parser.error(str(exc))
+        try:
+            jev_section = load_config().get("jev", {})
+            if jev_section and not isinstance(jev_section, dict):
+                raise ValueError("configuration field [jev] must be a table")
+            jev = JevConfig.from_mapping(jev_section)
         except ValueError as exc:
             parser.error(str(exc))
         config = WebConfig(
@@ -694,6 +702,7 @@ def main(argv: Optional[List[str]] = None) -> None:
             nemesis_max_bytes=options.nemesis_max_size,
             page_size=options.page_size,
             bind=options.bind,
+            jev=jev,
         )
         raise SystemExit(run(config, auth))
     if command in SCAN_MODES:

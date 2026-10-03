@@ -25,6 +25,24 @@ mode = "off"             # Options: "off", "matches", "downloads"
 upload_workers = 2
 retries = 2
 queue_size = 100
+
+[jev]
+# Model-assisted full-coverage assessment. See `shrawler triage jev check`.
+enabled = false
+endpoint = "https://api.typesafe.ai/v1/systemone"  # default Jev route; hosted
+#   https://jevtypesafeai.com/api/v1/decide and a team LiteLLM proxy also work
+api_key_env = "JEV_API_KEY"      # environment variable holding the bearer key
+model = "jev-latest"             # or a pinned version such as jev-1.13.0
+deployment_revision = ""         # operator-pinned immutable revision; defaults to model
+objective = ""                   # blank uses the built-in objective text
+max_input_tokens = 60000         # state + all questions, under the 64k ceiling
+max_state_longest_question_tokens = 30000  # state + longest question, under 32k
+max_questions_per_request = 200  # verify the real cap with `check`
+request_timeout_seconds = 120
+retries = 2
+workers = 4
+rate_limit_per_minute = 0        # 0 = unset
+time_budget_seconds = 0          # 0 = unlimited; a budget pauses, never samples
 """
 
 CONFIG_OPTIONS = """Shrawler configuration options
@@ -50,6 +68,22 @@ Top level:
 [snaffle]:
   rules     Snaffler rules directory (required by snaffle mode)
   interest  0 | 1 | 2 | 3 (default: 0)
+
+[jev]:
+  enabled                          boolean (default: false)
+  endpoint                         decision endpoint URL
+  api_key_env                      environment variable holding the bearer key
+  model                            served model alias (default: jev-latest)
+  deployment_revision              immutable revision; defaults to model
+  objective                        assessment objective text (blank = built-in)
+  max_input_tokens                 state + all questions budget (default: 60000)
+  max_state_longest_question_tokens  state + longest question budget (default: 30000)
+  max_questions_per_request        candidate cap per request (default: 200)
+  request_timeout_seconds          per-request timeout (default: 120)
+  retries                          retries before a candidate is failed (default: 2)
+  workers                          reserved for future bounded concurrency (default: 4)
+  rate_limit_per_minute            request cap per minute; 0 = unset
+  time_budget_seconds              run budget; 0 = unlimited (pauses, never samples)
 
 Command-line arguments override values from the configuration file.
 Run `shrawler COMMAND --help` for scan and integration controls.

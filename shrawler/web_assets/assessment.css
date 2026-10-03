@@ -1,0 +1,23 @@
+/* Assessment page reuses the ranking table styles; only small additions here. */
+#coverage-directories {
+  margin-top: 12px;
+  max-height: 320px;
+  overflow: auto;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.82rem;
+  line-height: 1.5;
+  color: var(--text-muted, #9aa4b2);
+}
+
+#coverage-directories p {
+  margin: 2px 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+#assessment-files td.ranking-empty {
+  text-align: center;
+  color: var(--text-muted, #9aa4b2);
+  padding: 16px;
+}

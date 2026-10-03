@@ -29,6 +29,8 @@ from .search_index import (
 )
 from .smb import SMBAuth, close_smb, connect_smb
 from .store import SCHEMA_VERSION
+from .triage.jev.config import JevConfig
+from .triage.jev.service import JevBusyError, JevService
 from .triage.review import ReviewStore
 from .triage.service import TriageBusyError, TriageService
 from .triage.storage import (
@@ -1666,6 +1668,7 @@ class WebState:
     runtime_dir: Path
     retrievals: threading.BoundedSemaphore
     triage: Optional[TriageService] = None
+    jev: Optional[JevService] = None
     nemesis: Optional[NemesisConfig] = None
     nemesis_max: int = 50 * 1024**2
     index_status: Dict[str, Any] = field(
@@ -1684,6 +1687,7 @@ class WebConfig:
     bind: str = "127.0.0.1"
     nemesis: Optional[NemesisConfig] = None
     nemesis_max_bytes: int = 50 * 1024**2
+    jev: Optional[JevConfig] = None
 
 
 class WebServer(ThreadingHTTPServer):
@@ -1780,6 +1784,9 @@ class WebHandler(BaseHTTPRequestHandler):
             "/triage": ("triage.html", "text/html; charset=utf-8"),
             "/assets/triage.js": ("triage.js", "text/javascript; charset=utf-8"),
             "/assets/triage.css": ("triage.css", "text/css; charset=utf-8"),
+            "/assessment": ("assessment.html", "text/html; charset=utf-8"),
+            "/assets/assessment.js": ("assessment.js", "text/javascript; charset=utf-8"),
+            "/assets/assessment.css": ("assessment.css", "text/css; charset=utf-8"),
         }
         if parsed.path in assets:
             name, content_type = assets[parsed.path]
@@ -1823,6 +1830,8 @@ class WebHandler(BaseHTTPRequestHandler):
             return
         if parsed.path.startswith("/api/triage/"):
             self._triage_get(parsed)
+        if parsed.path.startswith("/api/assessment/"):
+            self._assessment_get(parsed)
             return
         if parsed.path == "/api/status":
             status = state.index.status()
@@ -1832,6 +1841,7 @@ class WebHandler(BaseHTTPRequestHandler):
                     "download_max_bytes": state.download_max,
                     "retrieval_enabled": state.pool is not None,
                     "triage_enabled": state.triage is not None,
+                    "assessment_enabled": state.jev is not None,
                     "nemesis_enabled": state.nemesis is not None,
                     "nemesis_max_bytes": state.nemesis_max,
                     "index_optimization": dict(state.index_status),
@@ -2134,6 +2144,45 @@ class WebHandler(BaseHTTPRequestHandler):
         except (ValueError, KeyError, OSError, sqlite3.Error) as exc:
             self._error(400, str(exc), "invalid_query")
 
+    def _assessment_get(self, parsed: urllib.parse.SplitResult) -> None:
+        service = self.server.state.jev
+        if service is None:
+            self._error(404, "Assessment is unavailable", "not_found")
+            return
+        query = urllib.parse.parse_qs(parsed.query)
+        if any(len(values) != 1 or len(values[0]) > 512 for values in query.values()):
+            self._error(400, "Invalid assessment query", "invalid_query")
+            return
+        try:
+            run_id = query.get("run", [None])[0]
+            path = parsed.path
+            if path == "/api/assessment/check":
+                self._json(service.check())
+            elif path == "/api/assessment/job":
+                self._json({"job": service.status()})
+            elif path == "/api/assessment/catalog":
+                self._json(service.catalog())
+            elif path == "/api/assessment/status":
+                self._json(service.run_status(run_id))
+            elif path == "/api/assessment/coverage":
+                self._json(service.coverage(run_id))
+            elif path == "/api/assessment/files":
+                directory = query.get("directory", [None])[0]
+                self._json(
+                    service.files(
+                        run_id,
+                        query.get("label", [None])[0],
+                        int(directory) if directory is not None else None,
+                        min(500, int(query.get("limit", ["100"])[0])),
+                        int(query.get("offset", ["0"])[0]),
+                        query.get("missed", ["0"])[0] == "1",
+                    )
+                )
+            else:
+                self._error(404, "Unknown assessment endpoint", "not_found")
+        except (ValueError, KeyError, OSError, sqlite3.Error) as exc:
+            self._error(400, str(exc), "invalid_query")
+
     def do_POST(self) -> None:
         if not self._guard():
             self.close_connection = True
@@ -2152,11 +2201,6 @@ class WebHandler(BaseHTTPRequestHandler):
             self.close_connection = True
             self._error(403, "Invalid local request", "invalid_origin")
             return
-        service = self.server.state.triage
-        if service is None:
-            self.close_connection = True
-            self._error(404, "Ranking unavailable", "not_found")
-            return
         try:
             length = int(self.headers.get("Content-Length", "0"))
             if not 1 <= length <= 131072:
@@ -2167,6 +2211,25 @@ class WebHandler(BaseHTTPRequestHandler):
                 raise ValueError("expected a JSON object")
             payload = cast(Dict[str, Any], payload)
             path = urllib.parse.urlsplit(self.path).path
+            if path.startswith("/api/assessment/"):
+                assessment = self.server.state.jev
+                if assessment is None:
+                    self.close_connection = True
+                    self._error(404, "Assessment is unavailable", "not_found")
+                    return
+                if path == "/api/assessment/jobs":
+                    self._json(assessment.start(payload), 202)
+                elif path == "/api/assessment/cancel":
+                    assessment.cancel()
+                    self._json({"cancel_requested": True})
+                else:
+                    self._error(404, "Unknown assessment endpoint", "not_found")
+                return
+            service = self.server.state.triage
+            if service is None:
+                self.close_connection = True
+                self._error(404, "Ranking unavailable", "not_found")
+                return
             if path == "/api/nemesis/send":
                 state = self.server.state
                 if state.nemesis is None:
@@ -2223,7 +2286,7 @@ class WebHandler(BaseHTTPRequestHandler):
                 self._json({"cancel_requested": True})
             else:
                 self._error(404, "Unknown ranking endpoint", "not_found")
-        except (TriageBusyError, CollectionBusyError) as exc:
+        except (TriageBusyError, CollectionBusyError, JevBusyError) as exc:
             self._error(409, str(exc), "job_running")
         except (ValueError, OSError, sqlite3.Error, TypeError, KeyError) as exc:
             self.close_connection = True
@@ -2245,6 +2308,11 @@ def run(config: WebConfig, auth: Optional[SMBAuth]) -> int:
         runtime,
         threading.BoundedSemaphore(2),
         TriageService(config.database_path, runtime),
+        JevService(
+            config.database_path,
+            runtime,
+            config.jev or JevConfig.from_mapping({}),
+        ),
         config.nemesis,
         config.nemesis_max_bytes,
     )
@@ -2339,6 +2407,8 @@ def run(config: WebConfig, auth: Optional[SMBAuth]) -> int:
         server.server_close()
         if state.triage:
             state.triage.close()
+        if state.jev:
+            state.jev.close()
         if state.pool:
             state.pool.close()
         shutil.rmtree(runtime, ignore_errors=True)

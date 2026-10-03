@@ -46,6 +46,13 @@ def _print_list(result: Dict[str, Any]) -> None:
 
 
 def main(argv: Optional[List[str]] = None) -> int:
+    raw = list(sys.argv[1:] if argv is None else argv)
+    # The jev subcommand owns its own parser (with subcommands and --json), so
+    # dispatch it before the flat triage parser sees its arguments.
+    if raw and raw[0] == "jev":
+        from .jev.cli import main as jev_main
+
+        return jev_main(raw[1:])
     parser = argparse.ArgumentParser(
         prog="shrawler triage",
         description="Rank saved file metadata offline; no SMB credentials or remote access.",
@@ -86,7 +93,12 @@ def main(argv: Optional[List[str]] = None) -> int:
         command.add_argument(
             "--json", action="store_true", help="machine-readable output"
         )
-    args = parser.parse_args(argv)
+    # "jev" is dispatched above from raw argv; register it so it still appears
+    # in `shrawler triage --help` without argparse consuming its options.
+    commands.add_parser(
+        "jev", help="model-assisted full-coverage assessment (prepare/run/status/list)"
+    )
+    args = parser.parse_args(raw)
     try:
         if args.command == "run":
             result = rank(

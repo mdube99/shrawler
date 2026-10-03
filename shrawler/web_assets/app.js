@@ -7,6 +7,7 @@
 
   const $ = id => document.getElementById(id);
   $('ranked-review-link').href = '/triage' + (token ? `#token=${encodeURIComponent(token)}` : '');
+  $('assessment-link').href = '/assessment' + (token ? `#token=${encodeURIComponent(token)}` : '');
   const previewable = new Set('.txt .log .csv .json .xml .ini .conf .config .cnf .properties .prop .yaml .yml .md .rst .py .js .ts .jsx .tsx .java .cs .go .rs .rb .php .ps1 .bat .cmd .vbs .sh .sql .pem .key .png .jpg .jpeg .gif .webp .pdf'.split(' '));
   const sensitiveTypes = new Set('.env .pem .key .kdbx .pst .ost .sql .bak .config .conf .ini .yaml .yml .pfx .p12 .kirbi .ccache'.split(' '));
   const executableTypes = new Set('.zip .7z .rar .tar .gz .exe .dll .msi .ps1 .bat .cmd .vbs .sh .jar'.split(' '));
