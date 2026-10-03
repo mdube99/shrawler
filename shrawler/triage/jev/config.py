@@ -184,6 +184,16 @@ class JevConfig:
             return self.api_key
         return os.environ.get(self.api_key_env, "")
 
+    def key_source(self) -> str:
+        """Describe where the credential is expected to come from.
+
+        Used for auth-failure messages so they never point at an environment
+        variable that is not actually in play.
+        """
+        if self.api_key:
+            return "the [jev] api_key in the Shrawler configuration file"
+        return f"the ${self.api_key_env} environment variable"
+
     def to_table(self) -> Dict[str, Any]:
         """All fields as a mapping acceptable to ``from_mapping``."""
         from dataclasses import asdict

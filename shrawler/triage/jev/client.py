@@ -137,7 +137,7 @@ class JevClient:
             report["speaks_systemone"] = False
             report["error"] = (
                 f"authentication failed (HTTP {response.status_code}); "
-                f"set ${self.config.api_key_env} to a valid key for "
+                f"check {self.config.key_source()} for "
                 f"{self.config.endpoint}"
             )
             return report
@@ -179,8 +179,8 @@ class JevClient:
         if response.status_code in (401, 403):
             raise AuthError(
                 f"authentication failed at {self.config.endpoint} "
-                f"(HTTP {response.status_code}); check the key in "
-                f"${self.config.api_key_env}"
+                f"(HTTP {response.status_code}); check "
+                f"{self.config.key_source()}"
             )
         if _is_input_error(response.status_code, message):
             raise InputError(f"input budget exceeded ({message})")
