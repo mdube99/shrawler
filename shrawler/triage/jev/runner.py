@@ -15,7 +15,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 import requests
 
 from ..storage import connect_readonly, select_scan
-from .client import InputError, JevClient, ProtocolError, load_payload
+from .client import AuthError, InputError, JevClient, ProtocolError, load_payload
 from .config import JevConfig
 from .planner import TokenCounter, plan_directory
 from .snapshot import source_fingerprint, stage
@@ -125,6 +125,8 @@ class JevRunner:
                     last_heartbeat = time.monotonic()
         except KeyboardInterrupt:
             next = {"status": "cancelled", "error": "interrupted"}
+        except AuthError as exc:
+            next = {"status": "failed", "error": str(exc)}
         except requests.RequestException as exc:
             next = {"status": "failed", "error": f"gateway request failed: {exc}"}
         finally:
@@ -154,6 +156,14 @@ class JevRunner:
         started = time.perf_counter()
         try:
             response = self.client.decide(payload)
+        except AuthError as exc:
+            # Credentials are wrong; retrying every batch cannot help. Abort
+            # the whole run so the operator sees the real problem immediately.
+            self.store.set_file_status(
+                str(batch["run_id"]), members, "pending", error=str(exc)
+            )
+            self.store.commit()
+            raise
         except InputError as exc:
             # Reshaping a single oversized request is a planner concern; record
             # the whole batch as an input error rather than retrying unchanged.

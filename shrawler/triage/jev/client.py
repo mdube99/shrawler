@@ -26,6 +26,10 @@ class InputError(ValueError):
     """The request exceeded an input budget and must be reshaped."""
 
 
+class AuthError(ValueError):
+    """The endpoint rejected our credentials; retrying cannot help."""
+
+
 @dataclass
 class Answer:
     file_id: str
@@ -127,19 +131,28 @@ class JevClient:
             answers = body.get("answers")
             report["returns_answers"] = isinstance(answers, dict)
             report["returns_usage"] = isinstance(body.get("usage"), dict)
-            # A non-zero status or an error body means the endpoint does not
+        error = _error_message(body) if isinstance(body, dict) else ""
+        if response.status_code in (401, 403):
+            report["reachable"] = False
+            report["speaks_systemone"] = False
+            report["error"] = (
+                f"authentication failed (HTTP {response.status_code}); "
+                f"set ${self.config.api_key_env} to a valid key for "
+                f"{self.config.endpoint}"
+            )
+            return report
+        if response.status_code != 200 or (error and not report["returns_answers"]):
+            # A non-200 status or an error body means the endpoint does not
             # speak System One even when it answers HTTP 200 (for example an
             # OpenAI-compatible server's catch-all route).
-            error = _error_message(body)
-            if response.status_code != 200 or (error and not report["returns_answers"]):
-                report["reachable"] = False
-                report["speaks_systemone"] = False
-                report["error"] = (
-                    f"endpoint does not accept the System One request shape "
-                    f"(HTTP {response.status_code}): {error or 'no answers'}"
-                )
-                return report
-            report["speaks_systemone"] = report["returns_answers"]
+            report["reachable"] = False
+            report["speaks_systemone"] = False
+            report["error"] = (
+                f"endpoint does not accept the System One request shape "
+                f"(HTTP {response.status_code}): {error or 'no answers'}"
+            )
+            return report
+        report["speaks_systemone"] = report["returns_answers"]
         return report
 
     # -- dispatch ---------------------------------------------------------
@@ -163,6 +176,12 @@ class JevClient:
                 latency_ms=latency_ms,
             )
         message = _error_message(body) or response.reason
+        if response.status_code in (401, 403):
+            raise AuthError(
+                f"authentication failed at {self.config.endpoint} "
+                f"(HTTP {response.status_code}); check the key in "
+                f"${self.config.api_key_env}"
+            )
         if _is_input_error(response.status_code, message):
             raise InputError(f"input budget exceeded ({message})")
         raise ProtocolError(
