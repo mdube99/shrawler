@@ -31,7 +31,8 @@ queue_size = 100
 enabled = false
 endpoint = "https://api.typesafe.ai/v1/systemone"  # default Jev route; hosted
 #   https://jevtypesafeai.com/api/v1/decide and a team LiteLLM proxy also work
-api_key_env = "JEV_API_KEY"      # environment variable holding the bearer key
+api_key_env = "JEV_API_KEY"      # NAME of the environment variable holding the key
+api_key = ""                     # or paste the key here (kept in this file, mode 0600)
 model = "jev-latest"             # or a pinned version such as jev-1.13.0
 deployment_revision = ""         # operator-pinned immutable revision; defaults to model
 objective = ""                   # blank uses the built-in objective text
@@ -72,7 +73,8 @@ Top level:
 [jev]:
   enabled                          boolean (default: false)
   endpoint                         decision endpoint URL
-  api_key_env                      environment variable holding the bearer key
+  api_key_env                      NAME of the environment variable holding the key
+  api_key                          the key itself, if not using api_key_env
   model                            served model alias (default: jev-latest)
   deployment_revision              immutable revision; defaults to model
   objective                        assessment objective text (blank = built-in)

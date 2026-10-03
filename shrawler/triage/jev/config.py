@@ -8,6 +8,7 @@ preprocessing policy, served model, and immutable deployment revision.
 import hashlib
 import json
 import os
+import re
 from dataclasses import dataclass
 from typing import Any, Dict, Mapping, Optional
 
@@ -98,6 +99,23 @@ def _require_int(
     return value
 
 
+def _require_env_name(value: Any, field_name: str) -> str:
+    """Validate a variable *name*, never a secret value.
+
+    Catching this at load time stops a key being pasted into ``api_key_env``,
+    which would otherwise silently leave ``api_key`` empty and echo the secret
+    in later error messages. Names are conventionally upper-case; anything long
+    or mixed-case looks like a credential and is rejected.
+    """
+    text = _require_str(value, field_name)
+    if not re.fullmatch(r"[A-Z][A-Z0-9_]*", text) or len(text) > 64:
+        raise ValueError(
+            f"[jev] {field_name} must be an environment variable name such as "
+            f"JEV_API_KEY (upper case); put the credential itself in api_key"
+        )
+    return text
+
+
 @dataclass(frozen=True)
 class JevConfig:
     enabled: bool = False
@@ -135,7 +153,9 @@ class JevConfig:
                 raise ValueError("[jev] endpoint must be an http(s) URL")
             values["endpoint"] = endpoint
         if "api_key_env" in table:
-            values["api_key_env"] = _require_str(table["api_key_env"], "api_key_env")
+            values["api_key_env"] = _require_env_name(
+                table["api_key_env"], "api_key_env"
+            )
         if "api_key" in table:
             values["api_key"] = _require_str(
                 table["api_key"], "api_key", allow_empty=True
@@ -187,8 +207,9 @@ class JevConfig:
     def key_source(self) -> str:
         """Describe where the credential is expected to come from.
 
-        Used for auth-failure messages so they never point at an environment
-        variable that is not actually in play.
+        Used for auth-failure messages. The environment variable branch is only
+        taken when api_key is empty, and validation guarantees api_key_env is a
+        bare variable name rather than a pasted secret.
         """
         if self.api_key:
             return "the [jev] api_key in the Shrawler configuration file"
