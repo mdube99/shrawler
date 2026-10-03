@@ -451,6 +451,37 @@ points = 15
 [rules.when]
 parent_name_contains_any = ["finance", "accounting", "invoices", "banking", "ledger", "remittance"]
 
+# The immediate-parent rules above miss files nested below a labelled
+# directory (for example /Finance/Accounts Payable/2025/2024/). These path
+# segment rules match the label at any depth; they share the sensitive-parent
+# group, so they cap with the parent rules instead of stacking.
+[[rules]]
+id = "builtin.finance-path"
+description = "File nested anywhere below a finance or accounting directory"
+category = "financial-data"
+signal_group = "sensitive-parent"
+points = 15
+[rules.when]
+path_segment_any = ["finance", "accounting", "invoices", "banking", "ledger", "remittance"]
+
+[[rules]]
+id = "builtin.hr-path"
+description = "File nested anywhere below a personnel or confidential directory"
+category = "personal-information"
+signal_group = "sensitive-parent"
+points = 15
+[rules.when]
+path_segment_any = ["payroll", "personnel", "humanresources", "human resources", "confidential", "pii"]
+
+[[rules]]
+id = "builtin.secret-directory"
+description = "File inside a password, secret, or credential directory"
+category = "credentials"
+signal_group = "sensitive-parent"
+points = 25
+[rules.when]
+path_segment_any = ["passwords", "password", "secrets", "secret", "credentials", "credential", "vault", "private-keys", "keyfiles"]
+
 # --- Additional filename tokens ---
 
 [[rules]]

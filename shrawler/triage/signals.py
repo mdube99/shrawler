@@ -136,14 +136,9 @@ class InventorySignals:
     @staticmethod
     def _record(
         result: Dict[str, Any],
-        matched: Dict[Tuple[str, str], int],
         config: Dict[str, Any],
         evidence: Dict[str, Any],
     ) -> None:
-        matched[(config["category"], config["signal_group"])] = max(
-            matched.get((config["category"], config["signal_group"]), 0),
-            config["points"],
-        )
         result["signals"].append(
             {
                 "rule_id": config["id"],
@@ -165,7 +160,6 @@ class InventorySignals:
                 if self._has_when and self.engine is not None
                 else {}
             )
-            matched: Dict[Tuple[str, str], int] = {}
             if self._directories:
                 key = self.key(metadata)
                 directory = key[:3]
@@ -190,7 +184,6 @@ class InventorySignals:
                         continue
                     self._record(
                         result,
-                        matched,
                         config,
                         {
                             "observed_files": total,
@@ -211,7 +204,6 @@ class InventorySignals:
                         continue
                     self._record(
                         result,
-                        matched,
                         config,
                         {
                             "filename": metadata["file_name"],
@@ -220,13 +212,33 @@ class InventorySignals:
                             "scope": "environment",
                         },
                     )
-            category_points: Dict[str, int] = {}
-            for (category, _group), points in matched.items():
-                category_points[category] = category_points.get(category, 0) + points
-            for category, points in category_points.items():
-                total = result["category_scores"].get(category, 0) + points
-                result["category_scores"][category] = total
-                result["priority"] = max(result["priority"], total)
+            # Recompute at category/signal-group granularity so a rarity
+            # population signal cannot add to a rule that already occupies the
+            # same group (for example builtin.operational-executable and
+            # builtin.stray-executable). Within a group only the highest weight
+            # contributes, exactly like Engine.evaluate; category scores are the
+            # sum of their independent group maxima.
+            groups: Dict[Tuple[str, str], int] = {}
+            for signal in result["signals"]:
+                key = (signal["category"], signal["signal_group"])
+                groups[key] = max(groups.get(key, 0), signal["points"])
+            scores: Dict[str, int] = {}
+            for (category, _group), points in groups.items():
+                scores[category] = scores.get(category, 0) + points
+            result["category_scores"] = scores
+            result["priority"] = max(scores.values(), default=0)
+            credited: Dict[Tuple[str, str], str] = {}
+            for signal in sorted(
+                result["signals"],
+                key=lambda item: (-item["points"], item["rule_id"]),
+            ):
+                key = (signal["category"], signal["signal_group"])
+                if key in credited:
+                    signal["credited_points"] = 0
+                    signal["capped_by_rule"] = credited[key]
+                else:
+                    signal["credited_points"] = signal["points"]
+                    credited[key] = signal["rule_id"]
         family = family_key(metadata)
         result["family_id"] = family
         # An explicit file decision overrides a family decision. Undo exposes

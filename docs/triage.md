@@ -135,8 +135,13 @@ identifies them:
   `web.config.bak` or `appsettings.json.old` score 35. A lone `web.config` now
   ranks instead of dropping to fallback review.
 - **Location**: files under `.ssh` score 20, under cloud credential directories
-  (`.aws`, `.azure`, `.gcloud`, `.kube`) 25, and under finance or personnel
-  directories 15 in `financial-data` or `personal-information`.
+  (`.aws`, `.azure`, `.gcloud`, `.kube`) 25, and under directories named for
+  passwords, secrets, credentials, or vaults 25 in `credentials`. Finance or
+  personnel directories score 15 in `financial-data` or `personal-information`.
+  Location rules match the labelled directory itself and any file nested below
+  it, so `/IT/Passwords/Q2/2023/notes.xlsx` and
+  `/Finance/Accounts Payable/2025/2024/report.xlsx` are labelled even though
+  their immediate parent is a date folder.
 
 Exact-name rules share a signal group with the token rule for the same kind of
 file, so `.git-credentials` keeps the stronger 50 rather than adding the
@@ -466,6 +471,14 @@ this filename occurs in at most `maximum_occurrences` of them. It is how
 ubiquitous runtime binaries are suppressed without a name blocklist: they appear
 many times and never match. Environment-scope counting uses the case-insensitive
 filename, not the full path.
+
+A rarity signal merges with rule signals at category/signal-group granularity:
+when a rarity and a rule occupy the same group, only the highest weight
+contributes to the category score. For example `builtin.stray-executable` (25)
+and `builtin.operational-executable` (15) share `executables/executable-location`,
+so an executable in an automation directory scores 25 for that group, not 40.
+The remaining matched signal stays in the explanation with zero
+`credited_points`.
 
 Optional `[rarity.when]` conditions gate either scope per file using the same
 condition vocabulary as rules (for example `extension_any`, `max_size_bytes`, or
