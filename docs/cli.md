@@ -135,8 +135,9 @@ shrawler spider 'DOMAIN/user@server' \
   --view progress
 ```
 
-JSON results are always written. `--format csv` adds CSV files. Available views
-depend on the command and include `summary`, `progress`, `matches`, and `tree`.
+JSON results are always written. `--format csv` adds CSV files. `shares` always
+prints the share listing; recursive `spider` and `snaffle` scans accept `--view`
+(`summary`, `progress`, `matches`, or `tree`).
 
 ## Resume
 

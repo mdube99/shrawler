@@ -16,11 +16,11 @@ Explicit arguments override profile defaults.
 ## Host concurrency
 
 ```bash
-shrawler shares TARGET --hosts-file hosts.txt --workers 4 --view tree
+shrawler shares TARGET --hosts-file hosts.txt --workers 4
 ```
 
-In `shares --view tree`, each completed host prints as one contiguous block.
-Blocks appear in completion order, which may differ from hosts-file order.
+`shares` always prints one contiguous block per host. Blocks appear in
+completion order, which may differ from hosts-file order.
 
 Recursive `spider --view tree` and `snaffle --view tree` scans use one effective
 host worker so terminal trees do not interleave. Select `progress`, `matches`,

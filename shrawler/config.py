@@ -13,7 +13,7 @@ except ModuleNotFoundError:
 DEFAULT_CONFIG = """# Shrawler defaults. Command-line options override these values.
 # Run `shrawler config options` to see valid values and environment alternatives.
 profile = "balanced"
-view = "progress"
+view = "progress"                 # recursive spider/snaffle rendering (shares always lists)
 format = "console"
 include_all_shares = false
 
@@ -31,7 +31,7 @@ CONFIG_OPTIONS = """Shrawler configuration options
 
 Top level:
   profile   quiet | balanced | fast (default: balanced)
-  view      summary | progress | matches | tree (mode/profile dependent)
+  view      summary | progress | matches | tree (spider/snaffle only)
   format    console | csv (default: console; JSON is always saved)
   output    results directory path
   shares    list of included share names

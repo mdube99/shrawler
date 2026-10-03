@@ -129,21 +129,17 @@ def _scan_parser(mode: str) -> argparse.ArgumentParser:
         choices=FORMATS,
         help="write CSV reports in addition to the always-saved JSON result (default: console)",
     )
-    views = (
-        ("summary", "progress", "tree")
-        if mode == "shares"
-        else ("summary", "progress", "matches", "tree")
-    )
-    output.add_argument(
-        "--view",
-        "--output-mode",
-        dest="view",
-        choices=views,
-        help=(
-            "terminal rendering; shares tree blocks are grouped by host in "
-            "completion order, while recursive tree output is serialized"
-        ),
-    )
+    if mode != "shares":
+        output.add_argument(
+            "--view",
+            "--output-mode",
+            dest="view",
+            choices=("summary", "progress", "matches", "tree"),
+            help=(
+                "terminal rendering; recursive tree output is serialized "
+                "across hosts"
+            ),
+        )
     output.add_argument(
         "--resume",
         nargs="?",
@@ -363,7 +359,7 @@ def _normalize(
     explicit_permission_check = parsed.permission_check is not None
     parsed.permission_check = pick("permission_check", "read-write")
     parsed.file_write_check = bool(parsed.file_write_check)
-    parsed.output_mode = pick("view", "tree" if mode == "shares" else defaults[1])
+    parsed.output_mode = "tree" if mode == "shares" else pick("view", defaults[1])
     parsed.output_dir = pick("output", "shrawler")
     fmt = pick("format", "console")
     parsed.csv_output = fmt == "csv"

@@ -235,7 +235,7 @@ def format_share_info(
         write = "No"
 
     # fmt: off
-    return f"     {prefix} {share_name.ljust(largest_share_name + 20)} | Read: {read.ljust(3)} | Write: {write.ljust(3)} | Comment: {share_comment if share_comment else 'N/A'}{snaffler_marker}"
+    return f"     {prefix} {share_name.ljust(largest_share_name)}  Read: {read}  Write: {write}  Comment: {share_comment if share_comment else 'N/A'}{snaffler_marker}"
 
 
 def print_share_info(
@@ -1535,7 +1535,10 @@ class Shrawler(SnafflerEngineMixin):
                 reason = "administrative share (default exclusion)"
             if reason:
                 skipped.append((share_name, reason))
-                logging.info(f"Skipping share {target}\\{share_name}: {reason}")
+                if self.args.spider:
+                    logging.info(
+                        f"Skipping share {target}\\{share_name}: {reason}"
+                    )
                 self._record_skipped_share(
                     target, share_name, share_comment, share_type, reason
                 )
@@ -3030,9 +3033,13 @@ class Shrawler(SnafflerEngineMixin):
             )
         else:
             lines.append(f"     {Fore.YELLOW}No shares displayed{Style.RESET_ALL}")
+        grouped_skips: Dict[str, List[str]] = {}
         for share_name, reason in result.skipped_shares:
+            grouped_skips.setdefault(reason, []).append(share_name)
+        for reason, names in grouped_skips.items():
+            listed = ", ".join(escape_terminal(name) for name in names)
             lines.append(
-                f"     {Fore.YELLOW}[SKIP]{Style.RESET_ALL} {escape_terminal(share_name)}: {escape_terminal(reason)}"
+                f"     {Fore.YELLOW}[SKIP]{Style.RESET_ALL} {listed}: {escape_terminal(reason)}"
             )
         return "\n".join(lines)
 
