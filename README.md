@@ -368,6 +368,17 @@ shrawler triage jev run ./results/shrawler.db
 shrawler triage jev status ./results/shrawler.db
 ```
 
+Only the signals the rubric uses are sent: each candidate's filename, its
+directory path and sibling markers, and a short key derived from the file ID
+that binds the answer. File size, modification time, extension counts, and
+directory file counts are not sent, and every answer is still attributed to the
+exact file ID. Multi-directory packing is the default: many small directories
+share one request, which cuts request count and cost, and it passed the live
+rubric evaluation 10/10 at 17/17. `triage jev status` reports the real billed
+input tokens and an estimated cost at the route's published rate. At the hosted
+rate dense shares cost about $3 per million files; shares of single-file
+directories cost more because each directory block bills per file.
+
 The 0-4 inspection-priority rubric is metadata-only: file contents are never
 sent, so an unambiguous credential filename (for example `logins.txt`,
 `payroll login.txt`, `password.txt`, `id_rsa`, `.env`, or

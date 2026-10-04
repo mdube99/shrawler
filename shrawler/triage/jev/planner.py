@@ -16,11 +16,23 @@ local estimator; a configured tokenizer validates complete state/question
 sections once per batch and its result is cached by exact text.
 """
 
+import base64
+import hashlib
 import json
 import uuid
 from collections import OrderedDict, deque
 from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, Iterator, List, Optional, Tuple
+from typing import (
+    Any,
+    Callable,
+    Dict,
+    Iterator,
+    List,
+    Mapping,
+    Optional,
+    Sequence,
+    Tuple,
+)
 
 from .config import (
     CONTEXT_VERSION,
@@ -49,6 +61,62 @@ COMMIT_EVERY_BATCHES = 64
 # pure one-token-per-byte estimator. A configured ``tokenize_endpoint`` still
 # measures complete payload sections exactly.
 FALLBACK_BYTES_PER_TOKEN = 3
+# Characters of the binding key that names a candidate in one request. The key
+# is derived from the file ID rather than generated, so replanning the same
+# candidates reproduces the same request and the exact-request cache still hits.
+# Eight base64url characters carry 48 bits, far more than a request's candidate
+# count can ever exercise; measured cost is about 14 tokens per candidate line
+# where the 22-character file ID costs about 29.
+BINDING_KEY_LENGTH = 8
+# Widening attempts before a colliding candidate falls back to its full file ID.
+# The fallback cannot itself collide because file IDs are unique within a run.
+BINDING_KEY_ATTEMPTS = 8
+
+
+def binding_key(file_id: str) -> str:
+    """Short, deterministic, request-local key derived from a file ID.
+
+    The key ties a candidate line in the shared state to its question and its
+    answer. It is a pure function of the file ID, so a batch that is replanned
+    after a crash or a split produces byte-identical requests and the
+    exact-request cache keeps working.
+
+    Random high-entropy characters matter here: an earlier *sequential* alias
+    (``c1..cN``) collapsed answer attribution once a request carried more than a
+    few candidates, while a derived key reproduced the full-ID behaviour in every
+    live run up to 534 candidates per request.
+    """
+    digest = hashlib.sha256(file_id.encode("utf-8")).digest()
+    return base64.urlsafe_b64encode(digest).decode("ascii")[:BINDING_KEY_LENGTH]
+
+
+def resolve_binding_keys(
+    entries: Sequence[Mapping[str, Any]],
+    key_for: Callable[[str], str] = binding_key,
+) -> Dict[str, str]:
+    """Map each entry's file ID to a key that is unique within one request.
+
+    Two file IDs can theoretically share a short prefix. Widening is
+    deterministic, and a candidate that still collides falls back to its full
+    file ID, so a request can never contain two identical binding keys.
+    """
+    keys: Dict[str, str] = {}
+    used: Dict[str, str] = {}
+    for entry in entries:
+        file_id = str(entry["file_id"])
+        if file_id in keys:
+            continue
+        key = key_for(file_id)
+        attempt = 0
+        while key in used:
+            attempt += 1
+            if attempt > BINDING_KEY_ATTEMPTS:
+                key = file_id
+                break
+            key = key_for(f"{file_id}#{attempt}")
+        keys[file_id] = key
+        used[key] = file_id
+    return keys
 
 
 def _fallback_tokens(text: str) -> int:
@@ -113,58 +181,75 @@ class TokenCounter:
 
 
 def question_for(
-    file_id: str, config: JevConfig, directory_label: str = ""
+    key: str, config: JevConfig, directory_label: str = ""
 ) -> Dict[str, Any]:
-    where = f" in directory block {directory_label}" if directory_label else ""
+    """One choice question keyed elsewhere by the candidate's binding key.
+
+    The instruction names the candidate and nothing else. Measured against the
+    live endpoint it is the dominant per-question cost (119 input tokens per
+    question with the previous verbose instruction, 82 with compact criteria, 36
+    with no instruction at all), so it is kept as short as attribution allows.
+    It cannot be dropped: with no instruction the model stopped discriminating and
+    promoted every benign control in the labeled fixture.
+
+    The instruction never names the filename: a filename is data and must not be
+    interpolated into the instruction channel. The five level keys are sent
+    without descriptions because the objective already states the full rubric
+    once per request and the endpoint reads a bare criterion from its name alone.
+    """
+    where = f" in {directory_label}" if directory_label else ""
     return {
         "type": "choice",
-        "instructions": (
-            f"Assess candidate {file_id}{where} using its directory block and "
-            "metadata. Return the inspection-priority level the objective and "
-            "rubric support."
-        ),
+        "instructions": f"Rate {key}{where}.",
         "criteria": dict(RUBRIC_CRITERIA),
     }
 
 
-def candidate_record(member: Dict[str, Any]) -> str:
-    return (
-        f"  {member['file_id']} | {member['file_name']} | "
-        f"{member['size_bytes']} bytes | {member['mtime_utc'] or 'unknown'}"
-    )
+def candidate_record(member: Dict[str, Any], key: str) -> str:
+    """Candidate line: binding key plus the filename.
+
+    The key is the model's binding key, not the ledger file ID; the runner maps
+    it back to the file ID when it persists the answer. Size, mtime, and the
+    extension histogram are deliberately not sent; none of them help classify the
+    file.
+    """
+    return f"  {key} | {member['file_name']}"
 
 
 def directory_header(context: Dict[str, Any]) -> str:
-    lines = [
-        f"Directory {context.get('label', 'D000001')}:",
-        f"  Path: \\\\{context['host']}\\{context['share']}{context['directory']}",
-        f"  Observed files: {context['observed_files']}",
-        "  Extensions: "
-        + (
-            ", ".join(
-                f"{item['extension']}={item['count']}"
-                for item in context.get("extensions", [])
-            )
-            or "(none)"
-        ),
-        "  Ancestors: " + ("/".join(context.get("ancestors", [])) or "(none)"),
-        "  Sibling markers: "
-        + (", ".join(context.get("sibling_markers", [])) or "(none)"),
-        f"  Completeness: {context['enumeration']}",
-        "  Candidates:",
-    ]
-    return "\n".join(lines)
+    """Directory block carrying only the signals the rubric actually uses.
+
+    The path supplies the directory names and the sibling markers supply the
+    credential-adjacent-sibling signal. Observed file counts, extension
+    histograms, the ancestor list (already inside the path), and the
+    completeness phrase were low-value overhead and are no longer sent. The label
+    and the path share one line because a block is repeated for every directory
+    in the request and an inventory of tiny directories pays that per file.
+    """
+    label = context.get("label", "D000001")
+    return "\n".join(
+        [
+            f"{label} \\\\{context['host']}\\{context['share']}{context['directory']}:",
+            "  Siblings: "
+            + (", ".join(context.get("sibling_markers", [])) or "(none)"),
+            "  Candidates:",
+        ]
+    )
 
 
 def state_text(context: Dict[str, Any], candidates: List[Dict[str, Any]]) -> str:
     """Back-compat single-directory renderer used by preview tooling."""
     stored = {**context, "objective": context.get("objective", "")}
+    keys = resolve_binding_keys(candidates)
     sections = [
         f"Objective: {stored.get('objective', '')}",
         "",
         directory_header({**stored, "label": context.get("label", "D000001")}),
     ]
-    sections.extend(candidate_record(candidate) for candidate in candidates)
+    sections.extend(
+        candidate_record(candidate, keys[str(candidate["file_id"])])
+        for candidate in candidates
+    )
     return "\n".join(sections)
 
 
@@ -213,16 +298,25 @@ def render_batch(
         directory_id: f"D{index + 1:06d}"
         for index, directory_id in enumerate(directory_order)
     }
+    # One short key per candidate binds the candidate line, its question, and its
+    # answer. Keys are derived from the file ID so replanning reproduces this
+    # request exactly; they are resolved per batch so a short-prefix collision can
+    # never put two candidates under one key.
+    keys = resolve_binding_keys(entries)
     sections = [f"Objective: {objective}"]
     for directory_id, context, _hash in directories:
         sections.append("")
         sections.append(directory_header({**context, "label": labels[directory_id]}))
         for member in members_by_directory[directory_id]:
-            sections.append(candidate_record(member))
+            sections.append(
+                candidate_record(member, keys[str(member["file_id"])])
+            )
     state = "\n".join(sections)
     questions = {
-        str(entry["file_id"]): question_for(
-            str(entry["file_id"]), config, labels[int(entry["directory_id"])]
+        keys[str(entry["file_id"])]: question_for(
+            keys[str(entry["file_id"])],
+            config,
+            labels[int(entry["directory_id"])],
         )
         for entry in entries
     }
@@ -276,7 +370,9 @@ class _Packer:
         return self.counter.estimate(directory_header({**context, "label": "D000000"}) + "\n")
 
     def _question_cost(self) -> int:
-        placeholder = canonical(question_for("F000000000000", self.config, "D000000"))
+        placeholder = canonical(
+            question_for(binding_key("F000000000000"), self.config, "D000000")
+        )
         return self.counter.estimate(placeholder) + self.config.instruction_overhead_tokens
 
     def add(self, entry: Dict[str, Any]) -> bool:
@@ -290,7 +386,9 @@ class _Packer:
         new_directory = directory_id not in self.directory_ids
         if new_directory and len(self.directory_ids) >= self.max_directories:
             return False
-        record_cost = self.counter.estimate(candidate_record(entry) + "\n")
+        record_cost = self.counter.estimate(
+            candidate_record(entry, binding_key(str(entry["file_id"]))) + "\n"
+        )
         dir_cost = self._dir_cost(directory_id) if new_directory else 0
         question_cost = self._question_cost()
         projected_state = self.state_tokens + dir_cost + record_cost
@@ -347,7 +445,7 @@ def _pending_candidates(
             values.extend([last[0], last[0], last[1], last[1], last[2]])
         values.append(STREAM_CHUNK)
         rows = store.connection.execute(
-            "SELECT file_id,file_name,size_bytes,mtime_utc,directory_id,priority "
+            "SELECT file_id,file_name,size_bytes,directory_id,priority "
             "FROM assessment_files WHERE run_id=? AND status='pending'" + clause +
             " ORDER BY priority DESC,directory_id,file_id LIMIT ?",
             values,
@@ -359,7 +457,6 @@ def _pending_candidates(
                 "file_id": str(row["file_id"]),
                 "file_name": str(row["file_name"]),
                 "size_bytes": int(row["size_bytes"]),
-                "mtime_utc": row["mtime_utc"],
                 "directory_id": int(row["directory_id"]),
             }
         last_row = rows[-1]
@@ -697,7 +794,7 @@ def plan_directory(
     context = {**context, "directory_id": directory_id}
     context_hash = str(directory["context_hash"])
     rows = store.connection.execute(
-        "SELECT file_id,file_name,size_bytes,mtime_utc,directory_id "
+        "SELECT file_id,file_name,size_bytes,directory_id "
         "FROM assessment_files WHERE run_id=? AND directory_id=? AND status='pending' "
         "ORDER BY file_id",
         (run_id, directory_id),
@@ -707,7 +804,6 @@ def plan_directory(
             "file_id": str(row["file_id"]),
             "file_name": str(row["file_name"]),
             "size_bytes": int(row["size_bytes"]),
-            "mtime_utc": row["mtime_utc"],
             "directory_id": int(row["directory_id"]),
         }
         for row in rows
@@ -728,10 +824,26 @@ def plan_directory(
     return batch_ids
 
 
+def answer_keys(payload: Mapping[str, Any], members: Sequence[str]) -> Dict[str, str]:
+    """Map each ledger file ID to the binding key used in a stored request.
+
+    ``render_batch`` emits questions in member order, so inverting the stored
+    question map reconstructs the mapping the planner used. A payload whose
+    question count does not match its membership cannot be inverted safely and
+    yields an empty mapping; callers then fall back to the file ID itself, which
+    is exactly what pre-payload-4 requests keyed questions by.
+    """
+    keys = list(payload.get("questions") or {})
+    if len(keys) != len(members):
+        return {}
+    return {str(file_id): str(key) for file_id, key in zip(members, keys)}
+
+
 def _member_weight(member: Dict[str, Any], config: JevConfig, counter: TokenCounter) -> int:
+    key = binding_key(str(member["file_id"]))
     return (
-        len(candidate_record(member).encode("utf-8"))
-        + len(canonical(question_for(str(member["file_id"]), config, "D000000")).encode("utf-8"))
+        len(candidate_record(member, key).encode("utf-8"))
+        + len(canonical(question_for(key, config, "D000000")).encode("utf-8"))
     )
 
 
@@ -752,7 +864,7 @@ def split_input_error_batch(
     """
     batch_id = str(batch["id"])
     rows = store.connection.execute(
-        "SELECT f.file_id,f.file_name,f.size_bytes,f.mtime_utc,f.directory_id "
+        "SELECT f.file_id,f.file_name,f.size_bytes,f.directory_id "
         "FROM batch_members m JOIN assessment_files f ON f.run_id=m.run_id "
         "AND f.file_id=m.file_id WHERE m.batch_id=? ORDER BY m.ordinal",
         (batch_id,),
@@ -762,7 +874,6 @@ def split_input_error_batch(
             "file_id": str(row["file_id"]),
             "file_name": str(row["file_name"]),
             "size_bytes": int(row["size_bytes"]),
-            "mtime_utc": row["mtime_utc"],
             "directory_id": int(row["directory_id"]),
         }
         for row in rows

@@ -5,6 +5,7 @@ only through the legacy end-to-end suite.
 """
 
 import json
+import re
 import sqlite3
 import tempfile
 import threading
@@ -173,10 +174,12 @@ class PlannerPackingTests(unittest.TestCase):
             row = store.batch_rows(run_id)[0]
             # The first example must render one labeled block per directory.
             payload = json.loads(row["payload_json"])
-            self.assertIn("Directory D000001:", payload["state"])
-            self.assertEqual(payload["state"].count("Directory D"), len(
-                store.batch_directory_hashes(str(row["id"]))
-            ))
+            self.assertRegex(payload["state"], r"(?m)^D000001 .*$")
+            # Exactly one block header line per recorded directory.
+            self.assertEqual(
+                len(re.findall(r"(?m)^D\d{6} ", payload["state"])),
+                len(store.batch_directory_hashes(str(row["id"]))),
+            )
 
     def test_wide_directory_repeats_context_across_requests(self) -> None:
         root = Path(self.tmp.name) / "wide"
@@ -192,9 +195,9 @@ class PlannerPackingTests(unittest.TestCase):
             result = plan_run(store, run_id, config, counter)
             self.assertEqual(result.batches, 6)
             for batch_id in result.batch_ids:
-                self.assertIn("Directory D000001:", store.connection.execute(
+                self.assertRegex(store.connection.execute(
                     "SELECT state_json FROM request_batches WHERE id=?", (batch_id,)
-                ).fetchone()[0])
+                ).fetchone()[0], r"(?m)^D000001 .*$")
 
     def test_run_wide_ordinals_are_globally_increasing(self) -> None:
         config = self.config()

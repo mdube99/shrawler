@@ -23,17 +23,20 @@ FIXTURE = Path(__file__).resolve().parents[1] / "scripts" / "jev_rubric_cases.js
 
 
 def test_level_4_is_not_gated_behind_file_contents() -> None:
-    assert RUBRIC_VERSION == "4"
+    assert RUBRIC_VERSION == "5"
     lowered = DEFAULT_OBJECTIVE.casefold()
-    assert "file contents are not available" in lowered
+    # Contents are explicitly unavailable and must not gate level 4.
+    assert "file contents" in lowered
+    assert "not available" in lowered
     # The pre-change level 4 required content evidence; it must not return.
     assert "available contents reveal" not in lowered
-    assert "contents are unavailable" in lowered
 
 
 def test_rubric_keys_and_criteria_stay_aligned() -> None:
     assert tuple(RUBRIC) == PRIORITY_LEVELS
+    # Criteria carry keys only; descriptions live once in the objective.
     assert set(RUBRIC_CRITERIA) == set(PRIORITY_LEVELS)
+    assert all(value is None for value in RUBRIC_CRITERIA.values())
 
 
 def test_fixture_retains_credential_benign_and_secondary_classes() -> None:

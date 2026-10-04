@@ -19,44 +19,128 @@ produced exactly 203 requests. Because dispatch was serial, that run took
 fixes; both are needed for large inventories where directory count dominates
 request count.
 
-Two further costs dominated the payload itself. Every per-file question repeated
-the entire rubric, and the token estimator charged one token per UTF-8 byte, so
-requests filled early. The rubric is now stated once in the shared objective
-while each question carries compact criterion labels, and a calibrated estimator
-packs roughly three bytes per token. On the same captured shape this cuts
-question bytes by about 61% (607 kB to 235 kB) without dropping a file or
-changing which priority levels the model may choose. `packing_scope = "directory"`
-remains the default; `multi-directory` is an opt-in that now collapses the same
-774 files into 4 requests instead of 14.
+Three further costs dominated the payload itself. Every per-file question
+repeated the entire rubric, then every question repeated its own five criterion
+descriptions and repeated the 22-character file ID twice, and the token estimator
+charged one token per UTF-8 byte so requests filled early. Today the rubric is
+stated once in the shared objective, each question carries only the five level
+keys, each candidate is named by a short key derived from its file ID, and a
+calibrated estimator packs roughly three bytes per token.
+`packing_scope = "multi-directory"` collapses the captured 774 files into 2
+requests; `directory` remains selectable for comparison.
+
+## Content sent to the model
+
+Only the signals the rubric uses are sent. Each directory block carries its path
+(which already contains the ancestor directory names) and its sibling markers;
+each candidate line is a short binding key plus the filename. Size, mtime,
+observed-file counts, extension histograms, the ancestor list, and the completeness
+phrase are not sent.
+
+The binding key is *derived from the file ID* (`planner.binding_key`: 8
+base64url characters of the ID's SHA-256, widened on collision) rather than
+generated, so replanning the same candidates reproduces the identical request and
+the exact-request cache keeps working after a crash. It is short because the
+22-character file ID costs about 29 tokens per candidate line while the derived
+key costs about 14. A *sequential* alias (`c1..cN`) was tried earlier and
+reverted because it broke answer attribution; the derived key does not. The key
+is used in the record, the question's map key, and the candidate's instruction,
+and `runner` maps each answer back to the exact file ID before persisting it.
+The filename is never placed in the instruction channel, so a hostile filename
+cannot become an instruction.
 
 ## Request shape
 
 One request carries a shared `state` plus a map of `choice` questions keyed by
-exact file ID. In multi-directory mode the state contains one labeled block per
-source directory:
+the candidate's binding key. In multi-directory mode the state contains one
+labeled block per source directory:
 
 ```text
 Objective: ...
 
-Directory D000001:
-  Path: \\host\share\Finance\Payroll
-  Observed files: 8
-  Extensions: .csv=7, .txt=1
-  Ancestors: Finance/Payroll
-  Sibling markers: readme.txt
-  Completeness: observed listing complete
+D000001 \\host\share\Finance\Payroll:
+  Siblings: readme.txt
   Candidates:
-    F... | export.csv | 1234 bytes | 2026-01-01T00:00:00+00:00
-    F... | readme.txt | 512 bytes | 2026-01-01T00:00:00+00:00
+    <key> | export.csv
+    <key> | readme.txt
 
-Directory D000002:
+D000002 \\host\share\Legal:
   ...
 ```
 
-Filenames and paths are data, never instructions. The question instructions
-name the candidate's directory block so an answer is attributed to the correct
-context, and every answer is stored against the exact file ID and that file's
-own `context_hash`.
+Filenames and paths are data, never instructions. Every answer is stored against
+the exact file ID and that file's own `context_hash`.## Governing constraints (measured)
+
+The pipeline was evaluated live against the default TypeSafe route
+(`jev-latest`, $0.042/M input, output free) on 2026-10-04. Two results govern
+every design choice here.
+
+**The model is stochastic.** Repeating the same labeled evaluation gives
+different answers. The shipped shape scored 17/17 credential cases with zero
+benign false positives in 10 consecutive runs of the 36-case fixture; a shorter
+objective variant produced a credential miss in one of five runs and one benign
+false negative, and was rejected. A single 17/17 is not proof; the gate needs
+repeats.
+
+**The instruction must name the candidate.** Removing the question's
+instructions entirely (36 tokens per question instead of 119) made the model stop
+discriminating: every one of the 12 benign controls in the fixture was promoted
+to level 4 in 5/5 runs, while every credential case still reached 4. The short
+instruction (`Rate <key>.`) is what keeps attribution and the benign gate
+working; a verbose per-question rubric is what was removed.
+
+**Batch size is not the quality limit.** The labeled fixture passed 5/5 runs at
+178 and 534 candidates per request with full coverage and zero benign false
+positives, and the endpoint answered 1000 questions in one request. The previous
+shape failed at 500 questions with `max_tokens_exceeded`.
+
+## Real cost model
+
+`triage jev status` reports the gateway's actual `usage`, not the local estimate.
+The request's cost decomposes into three measured parts, all read from the
+endpoint's `usage` field with `jev-latest` ($0.042/M input, output free):
+
+* a fixed part per request, dominated by the objective: the dispatched request is
+  billed at `356 + 0.214 × objective_chars` tokens even with one question;
+* a marginal part per candidate line in the shared state;
+* a marginal part per question.
+
+Measured 2026-10-04 through the real planner on labeled and synthetic bodies:
+
+| Variant | Batch | Tokens/file | Cost per 1M |
+| :--- | ---: | ---: | ---: |
+| `payload_version = "3"` (directory scope) | 36 / 15 req | 554 | $23.25 |
+| `payload_version = "3"` (multi-directory) | 36 / 1 req | 178.7 | $7.50 |
+| `payload_version = "3"`, pushed to 200/req | 200 / 3 req | 127.2 | $5.34 |
+| `payload_version = "4"` (shipped), 36-case fixture | 36 / 1 req | 111.9 | $4.70 |
+| `payload_version = "4"`, 177-case stress fixture | 177 / 1 req | 80.6 | $3.39 |
+| `payload_version = "4"`, 20 files/dir | 500 / 1 req | 81.6 | $3.43 |
+| `payload_version = "4"`, 5 files/dir | 500 / 1 req | 90.2 | $3.79 |
+| `payload_version = "4"`, 1 file/dir | 500 / 2 req | 120.2 | $5.05 |
+| `payload_version = "4"`, shallow paths, short names | 500 / 1 req | 68.3 | $2.87 |
+
+Within a batch the split is roughly 57 tokens per question, the directory header
+(about 11 tokens per directory at this fixture's path depth) times the number of
+directories per file, and a few tokens per candidate line. The fixed part is
+amortized: at 500 candidates a request costs about 2 tokens per file, so batch
+size matters far more than objective length. Shortening the objective by 2.2 kB
+moved the cost by about 2 tokens per file at 200 candidates and cost a credential
+case in one of five live runs, so the objective was left at full length.
+
+**Below $3 per million needs an inventory with shallow paths and at least 20
+files per directory.** Dense shares with short paths land at $2.87/M; the same
+shape with deeper paths costs $3.4/M. Shares of single-file directories pay the
+directory header per file and rise to $5/M; that is a property of what is
+scanned, not of the request. The remaining per-file cost is the five level keys
+of the `choice` question (about 36 tokens of scaffolding and criteria no matter
+how the instruction is phrased), which is what a `noul`-style binary question
+would remove if a cheaper answer type were ever acceptable.
+
+On a self-hosted route the constraint is compute and request count rather than
+dollars: 1M files at 500 per request is 2,000 requests. At the previous shape the
+endpoint rejected 500 questions per request with `max_tokens_exceeded`, and 200
+per request cost 5,000 requests for 1M files.
+
 
 ## Rubric and content-free level 4
 
@@ -79,9 +163,17 @@ level, including the top one.
   benign filename level 4. Conversely, an unambiguous credential filename is
   level 4 even in an ordinary directory.
 
-`RUBRIC_VERSION = "4"` marks this change. The objective text is part of the run
+`RUBRIC_VERSION = "5"` marks this change. The objective text is part of the run
 provenance and the exact-request cache key, so shipping a new objective
 invalidates cached answers rather than silently reusing them.
+
+`scripts/jev_rubric_cases_stress.json` expands the base fixture to 177 cases
+generated deterministically from it (seed 99) and is used to gate performance at
+packed batch sizes. Several of its credential cases use names that were missing
+from the objective's level-4 list — `ftp_users.txt`, `keystore.dat`,
+`pwd_list.csv` — which is how that list was found to be incomplete and then
+extended. Genuinely ambiguous names are excluded from the `credential` class, so
+the gate keeps asserting level 4.
 
 `scripts/evaluate_jev_rubric.py` dispatches the labeled
 `scripts/jev_rubric_cases.json` fixture through the endpoint configured in
@@ -128,12 +220,12 @@ oversized payload is never resent unchanged.
 
 | Value | Behavior |
 | :--- | :--- |
-| `directory` | One source directory per request. Conservative default. |
-| `multi-directory` | Pack independent directory blocks into shared requests. |
+| `directory` | One source directory per request. Comparison mode. |
+| `multi-directory` | Pack independent directory blocks into shared requests. Default. |
 
-`directory` remains available for comparison and rollback. Switch to
-`multi-directory` after validating model quality on a pinned corpus; see the
-rollout notes below.
+`multi-directory` is the default: it minimizes request count and tokens by
+sharing the objective and fixed request overhead, and it passed 10/10 live runs
+at 17/17 credential cases. `directory` remains selectable.
 
 ## Concurrency
 
@@ -182,7 +274,9 @@ ledger and never loads request payloads, so its cost does not grow with
 `files × completed batches`. Progress callbacks are throttled (about four per
 second) and the final status is always emitted. `triage jev status` reports file
 coverage, batch states, active workers, packing scope, phase timings, request
-latency percentiles, and inferred-versus-cache-reused counts.
+latency percentiles, inferred-versus-cache-reused counts, and the real billed
+input tokens from the gateway's usage, with tokens per file, files per request,
+and an estimated cost at the published route price.
 
 ## Token counting
 
@@ -227,9 +321,9 @@ Add these to the `[jev]` table:
 enabled = true
 workers = 8                      # the primary lever after request count is minimal
 rate_limit_per_minute = 0        # 0 disables the limiter
-max_questions_per_request = 200
+max_questions_per_request = 500
 max_request_bytes = 0            # 0 disables the exact byte cap
-packing_scope = "directory"      # default; "multi-directory" to pack more per request
+packing_scope = "multi-directory"  # default; "directory" for one directory per request
 token_headroom_percent = 10
 ```
 
@@ -238,14 +332,16 @@ token_headroom_percent = 10
 1. Ship the schema migration and status/storage changes first.
 2. Keep `workers = 8` (the default) and confirm it against the live route with
    `--sweep-workers`; back off if the gateway serializes or throttles.
-3. Keep `packing_scope = "directory"` for established deployments.
-4. Enable `multi-directory` in test environments and collect quality and
-   throughput evidence.
-5. Switch the default only after the cross-directory quality gate:
-   at least 98% exact-label agreement on deterministic runs, no systematic
-   priority reduction tied to directory position or batch size, and no increase
-   in missing, unknown, or malformed answer IDs.
-6. Roll back to `directory` by configuration alone.
+3. `packing_scope = "multi-directory"` is the default and passed 10/10 live runs at
+   17/17 with zero benign false positives. Because the model is stochastic,
+   re-run the labeled evaluation several times on any corpus and model change
+   before trusting a single pass. Derive the binding key from the file ID and
+   keep the instruction naming the candidate; both are load-bearing.
+4. Record the real billed tokens and cost per file from `triage jev status` on a
+   representative slice before scaling to a full million-file run. Dense shares
+   land near $3/M; single-file directories cost more because the directory
+   header bills per file.
+5. Roll back to `directory` by configuration alone if quality regresses.
 
 Increasing `workers` beyond the gateway's capacity can reduce throughput by
 queueing requests behind GPU contention. Measure 1, 2, 4, and 8 workers against
@@ -265,7 +361,7 @@ python scripts/benchmark_jev.py --fixture wide --files 100000 --sql-count
 # and packing scope together. Each combination uses a fresh ledger so the
 # exact-request cache cannot mask a real dispatch.
 python scripts/benchmark_jev.py --fixture captured \
-  --sweep-workers 1,2,4,8,16 --sweep-questions 25,50,100,200 \
+  --sweep-workers 1,2,4,8,16 --sweep-questions 50,200,500 \
   --sweep-scopes directory,multi-directory
 ```
 

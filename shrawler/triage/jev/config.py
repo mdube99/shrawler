@@ -17,17 +17,25 @@ ADAPTER_VERSION = "systemone-1"
 # blocks are now labeled inside one shared state. Historical runs keep their
 # stored context hashes and payloads; these versions only affect new work.
 CONTEXT_VERSION = "2"
-# Planner version 3 re-queues byte-budget overflow into the next batch (instead
-# of dropping it) and orders candidates by presentation priority. Both change
+# Planner version 4 packs independent directories by default and re-queues
+# byte-budget overflow into the next batch (instead of dropping it). Both change
 # which files share a request, so the exact-request cache identity changes.
-PLANNER_VERSION = "3"
-PAYLOAD_VERSION = "2"
-# Rubric version 4 makes level 4 ("Immediate") reachable from filename and
-# directory context alone: an unambiguous credential/secret/private-key name no
-# longer requires file contents, which the pipeline does not collect. It keeps
-# sending compact criterion labels per question; the full rubric text is carried
-# once in the shared objective rather than repeated per file.
-RUBRIC_VERSION = "4"
+PLANNER_VERSION = "4"
+# Payload version 4 sends only the signals the rubric uses: the filename, the
+# directory context (path and sibling markers), and a short deterministic binding
+# key that ties a candidate line to its question. Size, mtime, observed counts,
+# extension histograms, the ancestor list, and the completeness phrase are not
+# sent. The binding key is derived from the file ID (see ``planner.binding_key``)
+# so it stays stable across replanning, which keeps the exact-request cache and
+# resume valid. A *sequential* alias (c1..cN) was tried and rejected: it broke
+# answer attribution once a request carried more than a few candidates.
+PAYLOAD_VERSION = "4"
+# Rubric version 5 stops repeating the level descriptions on every question. The
+# objective already states the full 0-4 rubric once per request and the endpoint
+# reads a criterion with no description from its name alone, so each question now
+# carries only the five level keys. It also names three credential indicators the
+# level-4 list was missing (ftp_users, a bare keystore basename, pwd).
+RUBRIC_VERSION = "5"
 PREPROCESSING_VERSION = "1"
 
 # Planning scopes. ``directory`` keeps one source directory per request (the
@@ -40,16 +48,21 @@ PACKING_SCOPES = ("directory", "multi-directory")
 # forwards the same request shape are drop-in alternates.
 DEFAULT_ENDPOINT = "https://api.typesafe.ai/v1/systemone"
 
+# Published list price for the default TypeSafe route, used only to turn real
+# billed input tokens into an estimated dollar figure for reporting. The hosted
+# route (jevtypesafeai.com) is $0.25-$0.42/M. This never affects what is sent.
+DEFAULT_INPUT_PRICE_PER_MTOK = 0.042
+
 DEFAULT_OBJECTIVE = (
     "Assess how strongly the available evidence supports prioritizing this file for analyst inspection to identify sensitive information exposed through a file share.\n\n"
     "Sensitive information includes authentication credentials, passwords, private keys, tokens and secrets; personal and medical records; financial records; and confidential business information.\n\n"
-    "Evidence available: the candidate's filename, its full path and directory context (ancestor directory names, sibling filenames, and extension counts), size, and modification time. File contents are not available; do not require them, and never treat missing contents as making a file safe. Judge the candidate's own filename together with its directory context.\n\n"
+    "Evidence available: the candidate's filename and its directory context, which is the directory path including ancestor directory names plus the sibling filenames. File contents, size, and modification time are not available; do not require them, and never treat missing evidence as making a file safe. Judge the candidate's own filename together with its directory context.\n\n"
     "Apply this inspection-priority rubric:\n"
     "0 — Minimal: The filename and directory context indicate ordinary, public, or nonsensitive material.\n"
     "1 — Possible: Weak or generic indicators of sensitive information warrant lower-priority review.\n"
     "2 — Likely: A specific sensitive indicator, such as a suggestive filename or a sensitive directory (for example HR, Finance, Medical, or Passwords), without strong sensitive-record or credential evidence, warrants analyst inspection.\n"
     "3 — Strong: Strong indicators of sensitive personal, medical, financial, or confidential records (for example SSN, patient, medical, payroll, invoice, tax, or credit-card names), or a credential-adjacent filename that is only suggestive (for example 'compass' or 'mapping'), warrant prompt inspection.\n"
-    "4 — Immediate: The filename alone, or the filename together with its directory context, unambiguously denotes authentication credentials, secrets, or private keys. Treat a candidate as level 4 whenever its own name contains or matches any of: password, passwd, passphrase, login, logon, credential(s), secret(s), token, api-key, apikey, private-key, private key, ssh key; the SSH key names id_rsa, id_dsa, id_ecdsa, id_ed25519; authorized_keys; credential or private-key extensions such as .pem, .key, .ppk, .p12, .pfx, .jks, and .keystore; password-database names such as .kdbx; environment and cloud credential files such as .env, .netrc, .npmrc, aws_credentials, azure_credentials, service-account.json, and kubeconfig; and secret-store names such as secrets.yml or vault-token. Rate level 4 even when the extension is a common data format such as .json, .yml, .txt, .xlsx, or .csv, because these names are unambiguous credential indicators on their own. Do not reserve level 4 for confirmed contents.\n\n"
+    "4 — Immediate: The filename alone, or the filename together with its directory context, unambiguously denotes authentication credentials, secrets, or private keys. Treat a candidate as level 4 whenever its own name contains or matches any of: password, passwd, pwd, passphrase, login, logon, credential(s), secret(s), token, api-key, apikey, private-key, private key, ssh key; the SSH key names id_rsa, id_dsa, id_ecdsa, id_ed25519; authorized_keys; account files such as ftp_users; credential or private-key extensions such as .pem, .key, .ppk, .p12, .pfx, .jks, and .keystore, or a basename of keystore; password-database names such as .kdbx; environment and cloud credential files such as .env, .netrc, .npmrc, aws_credentials, azure_credentials, service-account.json, and kubeconfig; and secret-store names such as secrets.yml or vault-token. Rate level 4 even when the extension is a common data format such as .json, .yml, .txt, .xlsx, or .csv, because these names are unambiguous credential indicators on their own. Do not reserve level 4 for confirmed contents.\n\n"
     "Combination rule: if a filename contains a credential word together with another sensitive word, the credential word controls. For example, 'payroll login.txt' and 'admin password.xlsx' are level 4, not level 3, because they denote credentials.\n\n"
     "Level-4 guidance: Reserve level 4 for candidates whose own filename indicates credentials, secrets, or private keys. A sensitive directory name such as 'Passwords' or 'HR', or a credential-like sibling file, on its own raises priority but does not make a benign filename level 4. Never downgrade an unambiguous credential filename to level 3 because its contents are unavailable.\n\n"
     "Assess inspection priority, not confirmed vulnerability severity. Score every candidate on the same 0-4 scale."
@@ -73,11 +86,12 @@ PRIORITY_NAMES = {
     "3": "Strong",
     "4": "Immediate",
 }
-# Compact per-question criteria. The objective already states every level's full
-# description once, so repeating it on each file only inflates request tokens.
-# Keys must match ``RUBRIC``/``PRIORITY_LEVELS``; the client validates the model's
-# returned choice against these keys.
-RUBRIC_CRITERIA = {key: PRIORITY_NAMES[key] for key in RUBRIC}
+# Per-question criteria. The objective states every level's full description
+# once per request, and the endpoint reads a criterion with no description from
+# its name alone, so only the level keys are sent. Keys must match
+# ``RUBRIC``/``PRIORITY_LEVELS``; the client validates the model's returned
+# choice against these keys.
+RUBRIC_CRITERIA: Dict[str, None] = dict.fromkeys(RUBRIC)
 # A rule-missed file is surfaced for rule expansion only when the model rates it
 # at least this strongly (3 = "Strong", 4 = "Immediate").
 PRIORITY_INSPECT_MIN = 3
@@ -178,7 +192,12 @@ class JevConfig:
     objective: str = DEFAULT_OBJECTIVE
     max_input_tokens: int = 60000
     max_state_longest_question_tokens: int = 30000
-    max_questions_per_request: int = 200
+    # Candidates per request. Larger batches amortize the fixed per-request cost
+    # (the objective plus the gateway's own scaffolding) over more files. At the
+    # payload-4 request shape the endpoint answered 1000 questions in one request,
+    # and 500 stayed inside every local budget; the previous shape failed at 500
+    # with ``max_tokens_exceeded``. The token budget is still the binding limit.
+    max_questions_per_request: int = 500
     request_timeout_seconds: int = 120
     retries: int = 2
     # Bounded simultaneous decision requests. Higher values are the primary
@@ -192,7 +211,14 @@ class JevConfig:
     tokenize_endpoint: str = ""
     instruction_overhead_tokens: int = 24
     state_overhead_tokens: int = 8
-    packing_scope: str = "directory"
+    # Multi-directory packing is the default: it shares the objective and fixed
+    # request overhead across packed directories, cutting request count and
+    # tokens. On 2026-10-04 the live rubric evaluation passed 6/6 at 17/17
+    # credential cases with zero benign false positives (one request for 36
+    # cases), and a 20-file wide directory passed 10/10. ``directory`` remains
+    # selectable. Retain the real file ID as the binding key: a short alias
+    # broke attribution and is reverted. See docs/jev-assessment-scaling.md.
+    packing_scope: str = "multi-directory"
     token_headroom_percent: int = 10
 
     @classmethod

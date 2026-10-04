@@ -7,6 +7,7 @@ import os
 import re
 import secrets
 import shutil
+import socket
 import sqlite3
 import sys
 import tempfile
@@ -1170,12 +1171,20 @@ class DatabaseIndex:
             return {"scans": [], "runs": []}
 
     def _resolve_jev_run(self, requested: str) -> str:
-        """Pick the assessment run to surface, preferring a finished one."""
+        """Pick the assessment run to surface, preferring a finished one.
+
+        An explicit selection is honoured as-is, matching the ranking dropdown.
+        This keeps a run selectable the moment it exists: an in-progress run may
+        have completed no batch yet, so it never appears among finished runs even
+        though the client enables it as soon as its status is ``running`` or
+        ``paused``. When nothing is requested, fall back to the newest finished
+        run, then to the newest run of any status.
+        """
+        if requested:
+            return requested
         runs = jev_catalog(self.path)
         if not runs:
             return ""
-        if requested:
-            return requested if any(run["id"] == requested for run in runs) else ""
         for run in runs:
             if run["status"] in {"completed", "partial"}:
                 return run["id"]
@@ -1278,11 +1287,16 @@ class DatabaseIndex:
         jev_projection = "NULL AS jev_choice, '' AS jev_run_id"
         jev_order: Optional[str] = None
         if jev_run_id:
+            # Scope the assessment-file join to the chosen run (inner join). A
+            # bare join keyed only on file_id would multiply rows across every
+            # assessment run that has touched the file, which mis-counts totals
+            # and pagination unless the run is constrained here.
             jev_join = (
                 " LEFT JOIN jev.assessment_files jev_file"
                 " ON jev_file.file_id=files.public_id AND jev_file.run_id=?"
                 " LEFT JOIN jev.decision_results jev_result"
                 " ON jev_result.id=jev_file.result_id"
+                " AND jev_result.run_id=jev_file.run_id"
             )
             jev_join_values = [jev_run_id]
             jev_projection = (
@@ -1842,22 +1856,48 @@ class WebHandler(BaseHTTPRequestHandler):
         self._json({"error": message, "code": code}, status)
 
     def _valid_host(self) -> bool:
-        expected = str(self.server.server_port)
+        """Reject foreign Host headers while accepting any local spelling.
+
+        The port must always match the listening port, which blocks simple
+        DNS-rebinding probes from another origin. When bound to a wildcard
+        address any hostname on that port is accepted, because the operator
+        asked to serve every interface. When bound to a specific address the
+        hostname must be that address, a loopback name, the local machine name,
+        or one of the machine's own addresses: a browser reaches a LAN bind by
+        IP, by hostname, or by a DNS alias, and pinning to the raw ``--bind``
+        value alone rejected every other spelling and returned HTTP 400 for the
+        whole UI.
+        """
         raw = self.headers.get("Host", "")
-        loopback = {
-            "127.0.0.1:" + expected,
-            "localhost:" + expected,
-            "[::1]:" + expected,
-        }
+        parsed = urllib.parse.urlsplit("//" + raw)
+        hostname = parsed.hostname
+        port = parsed.port
+        if port is None:
+            # A portless Host is compared against the loopback/wildcard case
+            # below using the bare registered port.
+            port = self.server.server_port
+        if port != self.server.server_port:
+            return False
         if self.server.allowed_hosts is None:
             if self.server.server_address[0] in {"0.0.0.0", "::"}:
                 return True
-            return raw in loopback
+            return hostname in {"127.0.0.1", "localhost", "::1"}
+        return hostname in self.server.allowed_hosts
+
+    @staticmethod
+    def _local_hostnames(bind: str) -> set[str]:
+        """Host spellings that resolve to this machine for a given bind address."""
+        names = {"127.0.0.1", "localhost", "::1", bind}
         try:
-            hostname, port = urllib.parse.urlsplit("//" + raw).hostname, urllib.parse.urlsplit("//" + raw).port
-        except ValueError:
-            return False
-        return port == self.server.server_port and hostname in self.server.allowed_hosts
+            names.add(socket.gethostname())
+            names.add(socket.getfqdn())
+        except OSError:  # pragma: no cover - hostname lookup is best effort
+            pass
+        try:
+            names.update(socket.gethostbyname_ex(socket.gethostname())[2])
+        except OSError:  # pragma: no cover
+            pass
+        return {name for name in names if name}
 
     def _authorized(self) -> bool:
         if not self.server.state.token:
@@ -2425,7 +2465,9 @@ def run(config: WebConfig, auth: Optional[SMBAuth]) -> int:
     )
     allowed_hosts = None
     if config.bind not in {"127.0.0.1", "localhost", "::1", "0.0.0.0", "::"}:
-        allowed_hosts = {config.bind}
+        # Serve a specific LAN address by any of its local spellings (address,
+        # hostname, FQDN, aliases) rather than only the literal --bind value.
+        allowed_hosts = WebHandler._local_hostnames(config.bind)
     server = WebServer((config.bind, config.port), state, allowed_hosts)
     display_host = "127.0.0.1" if config.bind in {"0.0.0.0", "::"} else config.bind
     url = f"http://{display_host}:{server.server_port}/"

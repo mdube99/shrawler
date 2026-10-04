@@ -538,8 +538,10 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument("--rate-limit", type=int, default=0, dest="rate_limit")
     parser.add_argument("--latency-ms", type=int, default=150, dest="latency_ms")
     parser.add_argument("--max-concurrency", type=int, default=0, dest="max_concurrency")
-    parser.add_argument("--packing-scope", default="directory", dest="packing_scope")
-    parser.add_argument("--max-questions", type=int, default=200, dest="max_questions")
+    parser.add_argument(
+        "--packing-scope", default="multi-directory", dest="packing_scope"
+    )
+    parser.add_argument("--max-questions", type=int, default=500, dest="max_questions")
     parser.add_argument("--max-request-bytes", type=int, default=0, dest="max_request_bytes")
     parser.add_argument(
         "--sweep-workers",

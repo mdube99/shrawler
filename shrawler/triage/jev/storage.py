@@ -18,6 +18,7 @@ Version-1 databases migrate in one transaction; the migration leaves
 """
 
 import hashlib
+import json
 import sqlite3
 import uuid
 from contextlib import contextmanager
@@ -264,6 +265,17 @@ def assessment_path(database: Path) -> Path:
 def _chunked(values: Sequence[Any], size: int = SQLITE_CHUNK) -> Iterator[Sequence[Any]]:
     for start in range(0, len(values), size):
         yield values[start : start + size]
+
+
+def _usage_field(usage: Dict[str, Any], names: Tuple[str, ...]) -> int:
+    """First present numeric token field among ``names`` (bools excluded)."""
+    for name in names:
+        value = usage.get(name)
+        if isinstance(value, bool):
+            continue
+        if isinstance(value, (int, float)):
+            return int(value)
+    return 0
 
 
 @contextmanager
@@ -706,6 +718,12 @@ class JevStore:
         are replanned after a crash.
         """
         payload_hash = hashlib.sha256(canonical(payload).encode()).hexdigest()
+        # The payload is serialized in insertion order, not as ``canonical``'s
+        # sorted form: each question's map position pairs with the member at the
+        # same position, and the runner recovers that mapping from the stored
+        # payload. ``payload_sha256`` and the exact-request cache key keep using
+        # the sorted canonical form, so this cannot change any identity.
+        payload_json = json.dumps(payload, sort_keys=False, separators=(",", ":"), ensure_ascii=True)
         transaction = self.connection if commit else _NO_COMMIT()
         with transaction:
             self.connection.execute(
@@ -718,7 +736,7 @@ class JevStore:
                     primary_directory_id,
                     request_id,
                     ordinal,
-                    canonical(payload),
+                    payload_json,
                     payload_hash,
                     input_tokens,
                     state,
@@ -1131,6 +1149,37 @@ class JevStore:
                 (run_id,),
             )
         }
+
+    def usage_totals(self, run_id: str) -> Dict[str, int]:
+        """Sum billed token usage across every batch that recorded it.
+
+        The gateway's ``usage`` object is stored per batch; its key names vary
+        by provider (``input_tokens``, ``prompt_tokens``, ``input``). This reads
+        whatever is present so the reported cost comes from real usage rather
+        than a local estimate.
+        """
+        totals = {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}
+        for row in self.connection.execute(
+            "SELECT usage_json FROM request_batches WHERE run_id=? "
+            "AND usage_json IS NOT NULL",
+            (run_id,),
+        ):
+            try:
+                usage = json.loads(row["usage_json"])
+            except (TypeError, ValueError):
+                continue
+            if not isinstance(usage, dict):
+                continue
+            totals["input_tokens"] += _usage_field(
+                usage, ("input_tokens", "prompt_tokens", "input")
+            )
+            totals["output_tokens"] += _usage_field(
+                usage, ("output_tokens", "completion_tokens", "output")
+            )
+            totals["total_tokens"] += _usage_field(
+                usage, ("total_tokens", "total")
+            )
+        return totals
 
     def recent_durations(self, run_id: str, limit: int = 200) -> List[int]:
         """A bounded sample of recent request durations for status percentiles."""

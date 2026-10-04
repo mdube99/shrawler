@@ -1,0 +1,1095 @@
+{
+  "version": 2,
+  "description": "Stress expansion of scripts/jev_rubric_cases.json used to gate request packing at scale. Deterministically generated from the base fixture (seed 99): 20 additional credential cases and 20 additional benign cases spread over 16 directories, plus 34 repeats each of the secondary classes. Several credential cases deliberately use names that were missing from the objective's level-4 list when this fixture was first generated; they probe rubric recall rather than attribution. Genuinely ambiguous names are excluded: the gate asserts level 4, so a case must be an unambiguous credential indicator.",
+  "host": "server",
+  "share": "DATA",
+  "cases": [
+    {
+      "id": "cred_logins_finance_ap",
+      "class": "credential",
+      "file_name": "logins.txt",
+      "remote_path": "/Finance/Accounts Payable/logins.txt",
+      "note": "Pinned target: credential filename inside a financial directory."
+    },
+    {
+      "id": "cred_payroll_login_passwords",
+      "class": "credential",
+      "file_name": "payroll login.txt",
+      "remote_path": "/IT/Passwords/payroll login.txt",
+      "note": "Pinned target: credential filename inside a Passwords directory."
+    },
+    {
+      "id": "cred_password_it",
+      "class": "credential",
+      "file_name": "password.txt",
+      "remote_path": "/IT/password.txt"
+    },
+    {
+      "id": "cred_credentials_root",
+      "class": "credential",
+      "file_name": "credentials",
+      "remote_path": "/IT/credentials"
+    },
+    {
+      "id": "cred_credentials_json",
+      "class": "credential",
+      "file_name": "credentials.json",
+      "remote_path": "/apps/portal/credentials.json"
+    },
+    {
+      "id": "cred_id_rsa_ssh",
+      "class": "credential",
+      "file_name": "id_rsa",
+      "remote_path": "/IT/SSH/id_rsa"
+    },
+    {
+      "id": "cred_id_ed25519_ssh",
+      "class": "credential",
+      "file_name": "id_ed25519",
+      "remote_path": "/home/deploy/.ssh/id_ed25519"
+    },
+    {
+      "id": "cred_private_ppk",
+      "class": "credential",
+      "file_name": "vpn_private_key.ppk",
+      "remote_path": "/IT/VPN/vpn_private_key.ppk"
+    },
+    {
+      "id": "cred_server_pem",
+      "class": "credential",
+      "file_name": "server.pem",
+      "remote_path": "/IT/Certs/server.pem"
+    },
+    {
+      "id": "cred_aws_credentials",
+      "class": "credential",
+      "file_name": "aws_credentials",
+      "remote_path": "/IT/Cloud/aws_credentials"
+    },
+    {
+      "id": "cred_service_account_json",
+      "class": "credential",
+      "file_name": "service-account.json",
+      "remote_path": "/IT/Cloud/service-account.json"
+    },
+    {
+      "id": "cred_dotenv",
+      "class": "credential",
+      "file_name": ".env",
+      "remote_path": "/apps/portal/.env"
+    },
+    {
+      "id": "cred_secrets_yml",
+      "class": "credential",
+      "file_name": "secrets.yml",
+      "remote_path": "/deploy/secrets.yml"
+    },
+    {
+      "id": "cred_keepass_kdbx",
+      "class": "credential",
+      "file_name": "KeePass.kdbx",
+      "remote_path": "/IT/KeePass.kdbx"
+    },
+    {
+      "id": "cred_passwords_hr",
+      "class": "credential",
+      "file_name": "passwords.txt",
+      "remote_path": "/HR/passwords.txt"
+    },
+    {
+      "id": "cred_api_token",
+      "class": "credential",
+      "file_name": "api_token.txt",
+      "remote_path": "/IT/api_token.txt"
+    },
+    {
+      "id": "cred_admin_password_xlsx",
+      "class": "credential",
+      "file_name": "admin password.xlsx",
+      "remote_path": "/IT/admin password.xlsx"
+    },
+    {
+      "id": "benign_readme_passwords",
+      "class": "benign",
+      "file_name": "readme.txt",
+      "remote_path": "/IT/Passwords/readme.txt",
+      "note": "Benign name inside a credential-named directory; must not reach 4."
+    },
+    {
+      "id": "benign_meeting_notes_ap",
+      "class": "benign",
+      "file_name": "Meeting Notes 2024.docx",
+      "remote_path": "/Finance/Accounts Payable/Meeting Notes 2024.docx",
+      "note": "Benign name inside the pinned financial directory."
+    },
+    {
+      "id": "benign_server_inventory_passwords",
+      "class": "benign",
+      "file_name": "Server Inventory 2024.txt",
+      "remote_path": "/IT/Passwords/Server Inventory 2024.txt"
+    },
+    {
+      "id": "benign_readme_ssh",
+      "class": "benign",
+      "file_name": "README.txt",
+      "remote_path": "/IT/SSH/README.txt"
+    },
+    {
+      "id": "benign_readme_certs",
+      "class": "benign",
+      "file_name": "readme.md",
+      "remote_path": "/IT/Certs/readme.md"
+    },
+    {
+      "id": "benign_logo_marketing",
+      "class": "benign",
+      "file_name": "logo.png",
+      "remote_path": "/Marketing/logo.png"
+    },
+    {
+      "id": "benign_photo_hr",
+      "class": "benign",
+      "file_name": "vacation photo.jpg",
+      "remote_path": "/HR/vacation photo.jpg"
+    },
+    {
+      "id": "benign_company_overview",
+      "class": "benign",
+      "file_name": "Company Overview.pdf",
+      "remote_path": "/Marketing/Company Overview.pdf"
+    },
+    {
+      "id": "benign_staff_handbook",
+      "class": "benign",
+      "file_name": "staff_handbook.txt",
+      "remote_path": "/HR/staff_handbook.txt"
+    },
+    {
+      "id": "benign_changelog",
+      "class": "benign",
+      "file_name": "changelog.md",
+      "remote_path": "/apps/portal/changelog.md"
+    },
+    {
+      "id": "benign_package_json",
+      "class": "benign",
+      "file_name": "package.json",
+      "remote_path": "/apps/portal/package.json"
+    },
+    {
+      "id": "benign_architecture",
+      "class": "benign",
+      "file_name": "architecture.png",
+      "remote_path": "/IT/architecture.png"
+    },
+    {
+      "id": "pii_employee_ssn",
+      "class": "pii",
+      "file_name": "employee_ssn.xlsx",
+      "remote_path": "/HR/employee_ssn.xlsx"
+    },
+    {
+      "id": "pii_social_security",
+      "class": "pii",
+      "file_name": "social_security.csv",
+      "remote_path": "/HR/social_security.csv"
+    },
+    {
+      "id": "phi_patient_records",
+      "class": "phi",
+      "file_name": "patient_records.csv",
+      "remote_path": "/Medical/patient_records.csv"
+    },
+    {
+      "id": "financial_credit_card_export",
+      "class": "financial",
+      "file_name": "credit-card-export.csv",
+      "remote_path": "/Finance/credit-card-export.csv"
+    },
+    {
+      "id": "financial_payroll_2024",
+      "class": "financial",
+      "file_name": "payroll_2024.xlsx",
+      "remote_path": "/HR/Payroll/payroll_2024.xlsx"
+    },
+    {
+      "id": "financial_q2_2024",
+      "class": "financial",
+      "file_name": "Q2 2024 Financials.xlsx",
+      "remote_path": "/Finance/Q2 2024 Financials.xlsx"
+    },
+    {
+      "id": "financial_budget_plan_ap",
+      "class": "financial",
+      "file_name": "Budget Plan 2024.xlsx",
+      "remote_path": "/Finance/Accounts Payable/Budget Plan 2024.xlsx",
+      "note": "Financial sibling that supplies directory context for the pinned logins.txt case."
+    },
+    {
+      "id": "stress_cred_0",
+      "class": "credential",
+      "file_name": "ftp_users.txt",
+      "remote_path": "/deploy/ftp_users.txt"
+    },
+    {
+      "id": "stress_cred_1",
+      "class": "credential",
+      "file_name": "vault-token.txt",
+      "remote_path": "/deploy/vault-token.txt"
+    },
+    {
+      "id": "stress_cred_2",
+      "class": "credential",
+      "file_name": "id_dsa",
+      "remote_path": "/HR/Payroll/id_dsa"
+    },
+    {
+      "id": "stress_cred_3",
+      "class": "credential",
+      "file_name": "authorized_keys",
+      "remote_path": "/HR/authorized_keys"
+    },
+    {
+      "id": "stress_cred_4",
+      "class": "credential",
+      "file_name": "server.key",
+      "remote_path": "/Finance/server.key"
+    },
+    {
+      "id": "stress_cred_5",
+      "class": "credential",
+      "file_name": "db.jks",
+      "remote_path": "/Finance/db.jks"
+    },
+    {
+      "id": "stress_cred_6",
+      "class": "credential",
+      "file_name": "azure_credentials",
+      "remote_path": "/IT/Cloud/azure_credentials"
+    },
+    {
+      "id": "stress_cred_7",
+      "class": "credential",
+      "file_name": "service-account.yml",
+      "remote_path": "/IT/Certs/service-account.yml"
+    },
+    {
+      "id": "stress_cred_8",
+      "class": "credential",
+      "file_name": ".npmrc",
+      "remote_path": "/Finance/Accounts Payable/.npmrc"
+    },
+    {
+      "id": "stress_cred_9",
+      "class": "credential",
+      "file_name": "netrc",
+      "remote_path": "/deploy/netrc"
+    },
+    {
+      "id": "stress_cred_10",
+      "class": "credential",
+      "file_name": "wallet.p12",
+      "remote_path": "/IT/Certs/wallet.p12"
+    },
+    {
+      "id": "stress_cred_11",
+      "class": "credential",
+      "file_name": "cert.pfx",
+      "remote_path": "/IT/KeePass/cert.pfx"
+    },
+    {
+      "id": "stress_cred_12",
+      "class": "credential",
+      "file_name": "ssh_private_key",
+      "remote_path": "/HR/Payroll/ssh_private_key"
+    },
+    {
+      "id": "stress_cred_13",
+      "class": "credential",
+      "file_name": "admin_secret.xlsx",
+      "remote_path": "/home/deploy/.ssh/admin_secret.xlsx"
+    },
+    {
+      "id": "stress_cred_14",
+      "class": "credential",
+      "file_name": "secrets.json",
+      "remote_path": "/HR/Payroll/secrets.json"
+    },
+    {
+      "id": "stress_cred_15",
+      "class": "credential",
+      "file_name": "token.env",
+      "remote_path": "/apps/portal/token.env"
+    },
+    {
+      "id": "stress_cred_16",
+      "class": "credential",
+      "file_name": "keystore.dat",
+      "remote_path": "/deploy/keystore.dat"
+    },
+    {
+      "id": "stress_cred_17",
+      "class": "credential",
+      "file_name": "pwd_list.csv",
+      "remote_path": "/HR/Payroll/pwd_list.csv"
+    },
+    {
+      "id": "stress_cred_18",
+      "class": "credential",
+      "file_name": "signing_key.pem",
+      "remote_path": "/IT/Cloud/signing_key.pem"
+    },
+    {
+      "id": "stress_benign_0",
+      "class": "benign",
+      "file_name": "Agenda.docx",
+      "remote_path": "/HR/Agenda.docx",
+      "note": "Benign name inside a sensitive-looking directory."
+    },
+    {
+      "id": "stress_benign_1",
+      "class": "benign",
+      "file_name": "budget_draft.xlsx",
+      "remote_path": "/Marketing/budget_draft.xlsx",
+      "note": "Benign name inside a sensitive-looking directory."
+    },
+    {
+      "id": "stress_benign_2",
+      "class": "benign",
+      "file_name": "team photo.png",
+      "remote_path": "/IT/Certs/team photo.png",
+      "note": "Benign name inside a sensitive-looking directory."
+    },
+    {
+      "id": "stress_benign_3",
+      "class": "benign",
+      "file_name": "Release Notes.md",
+      "remote_path": "/IT/Certs/Release Notes.md",
+      "note": "Benign name inside a sensitive-looking directory."
+    },
+    {
+      "id": "stress_benign_4",
+      "class": "benign",
+      "file_name": "meeting_minutes.docx",
+      "remote_path": "/IT/KeePass/meeting_minutes.docx",
+      "note": "Benign name inside a sensitive-looking directory."
+    },
+    {
+      "id": "stress_benign_5",
+      "class": "benign",
+      "file_name": "roadmap.pptx",
+      "remote_path": "/Marketing/roadmap.pptx",
+      "note": "Benign name inside a sensitive-looking directory."
+    },
+    {
+      "id": "stress_benign_6",
+      "class": "benign",
+      "file_name": "org chart.png",
+      "remote_path": "/deploy/org chart.png",
+      "note": "Benign name inside a sensitive-looking directory."
+    },
+    {
+      "id": "stress_benign_7",
+      "class": "benign",
+      "file_name": "holiday.jpg",
+      "remote_path": "/IT/SSH/holiday.jpg",
+      "note": "Benign name inside a sensitive-looking directory."
+    },
+    {
+      "id": "stress_benign_8",
+      "class": "benign",
+      "file_name": "policy.pdf",
+      "remote_path": "/Finance/Accounts Payable/policy.pdf",
+      "note": "Benign name inside a sensitive-looking directory."
+    },
+    {
+      "id": "stress_benign_9",
+      "class": "benign",
+      "file_name": "training.pptx",
+      "remote_path": "/IT/training.pptx",
+      "note": "Benign name inside a sensitive-looking directory."
+    },
+    {
+      "id": "stress_benign_10",
+      "class": "benign",
+      "file_name": "vendor list.xlsx",
+      "remote_path": "/home/deploy/.ssh/vendor list.xlsx",
+      "note": "Benign name inside a sensitive-looking directory."
+    },
+    {
+      "id": "stress_benign_11",
+      "class": "benign",
+      "file_name": "floorplan.dwg",
+      "remote_path": "/HR/Payroll/floorplan.dwg",
+      "note": "Benign name inside a sensitive-looking directory."
+    },
+    {
+      "id": "stress_benign_12",
+      "class": "benign",
+      "file_name": "readme.md",
+      "remote_path": "/apps/portal/readme.md",
+      "note": "Benign name inside a sensitive-looking directory."
+    },
+    {
+      "id": "stress_benign_13",
+      "class": "benign",
+      "file_name": "license.txt",
+      "remote_path": "/IT/Certs/license.txt",
+      "note": "Benign name inside a sensitive-looking directory."
+    },
+    {
+      "id": "stress_benign_14",
+      "class": "benign",
+      "file_name": "todo.md",
+      "remote_path": "/IT/VPN/todo.md",
+      "note": "Benign name inside a sensitive-looking directory."
+    },
+    {
+      "id": "stress_benign_15",
+      "class": "benign",
+      "file_name": "backup schedule.xlsx",
+      "remote_path": "/HR/Payroll/backup schedule.xlsx",
+      "note": "Benign name inside a sensitive-looking directory."
+    },
+    {
+      "id": "stress_benign_16",
+      "class": "benign",
+      "file_name": "headcount.xlsx",
+      "remote_path": "/IT/VPN/headcount.xlsx",
+      "note": "Benign name inside a sensitive-looking directory."
+    },
+    {
+      "id": "stress_benign_17",
+      "class": "benign",
+      "file_name": "survey results.csv",
+      "remote_path": "/IT/SSH/survey results.csv",
+      "note": "Benign name inside a sensitive-looking directory."
+    },
+    {
+      "id": "stress_benign_18",
+      "class": "benign",
+      "file_name": "office map.png",
+      "remote_path": "/apps/portal/office map.png",
+      "note": "Benign name inside a sensitive-looking directory."
+    },
+    {
+      "id": "stress_benign_19",
+      "class": "benign",
+      "file_name": "onboarding.pptx",
+      "remote_path": "/IT/Cloud/onboarding.pptx",
+      "note": "Benign name inside a sensitive-looking directory."
+    },
+    {
+      "id": "stress_pii_0",
+      "class": "pii",
+      "file_name": "roster_0.xlsx",
+      "remote_path": "/HR/roster_0.xlsx"
+    },
+    {
+      "id": "stress_pii_1",
+      "class": "pii",
+      "file_name": "roster_1.xlsx",
+      "remote_path": "/HR/roster_1.xlsx"
+    },
+    {
+      "id": "stress_pii_2",
+      "class": "pii",
+      "file_name": "roster_2.xlsx",
+      "remote_path": "/HR/roster_2.xlsx"
+    },
+    {
+      "id": "stress_pii_3",
+      "class": "pii",
+      "file_name": "roster_3.xlsx",
+      "remote_path": "/HR/roster_3.xlsx"
+    },
+    {
+      "id": "stress_pii_4",
+      "class": "pii",
+      "file_name": "roster_4.xlsx",
+      "remote_path": "/HR/roster_4.xlsx"
+    },
+    {
+      "id": "stress_pii_5",
+      "class": "pii",
+      "file_name": "roster_5.xlsx",
+      "remote_path": "/HR/roster_5.xlsx"
+    },
+    {
+      "id": "stress_pii_6",
+      "class": "pii",
+      "file_name": "roster_6.xlsx",
+      "remote_path": "/HR/roster_6.xlsx"
+    },
+    {
+      "id": "stress_pii_7",
+      "class": "pii",
+      "file_name": "roster_7.xlsx",
+      "remote_path": "/HR/roster_7.xlsx"
+    },
+    {
+      "id": "stress_pii_8",
+      "class": "pii",
+      "file_name": "roster_8.xlsx",
+      "remote_path": "/HR/roster_8.xlsx"
+    },
+    {
+      "id": "stress_pii_9",
+      "class": "pii",
+      "file_name": "roster_9.xlsx",
+      "remote_path": "/HR/roster_9.xlsx"
+    },
+    {
+      "id": "stress_pii_10",
+      "class": "pii",
+      "file_name": "roster_10.xlsx",
+      "remote_path": "/HR/roster_10.xlsx"
+    },
+    {
+      "id": "stress_pii_11",
+      "class": "pii",
+      "file_name": "roster_11.xlsx",
+      "remote_path": "/HR/roster_11.xlsx"
+    },
+    {
+      "id": "stress_pii_12",
+      "class": "pii",
+      "file_name": "roster_12.xlsx",
+      "remote_path": "/HR/roster_12.xlsx"
+    },
+    {
+      "id": "stress_pii_13",
+      "class": "pii",
+      "file_name": "roster_13.xlsx",
+      "remote_path": "/HR/roster_13.xlsx"
+    },
+    {
+      "id": "stress_pii_14",
+      "class": "pii",
+      "file_name": "roster_14.xlsx",
+      "remote_path": "/HR/roster_14.xlsx"
+    },
+    {
+      "id": "stress_pii_15",
+      "class": "pii",
+      "file_name": "roster_15.xlsx",
+      "remote_path": "/HR/roster_15.xlsx"
+    },
+    {
+      "id": "stress_pii_16",
+      "class": "pii",
+      "file_name": "roster_16.xlsx",
+      "remote_path": "/HR/roster_16.xlsx"
+    },
+    {
+      "id": "stress_pii_17",
+      "class": "pii",
+      "file_name": "roster_17.xlsx",
+      "remote_path": "/HR/roster_17.xlsx"
+    },
+    {
+      "id": "stress_pii_18",
+      "class": "pii",
+      "file_name": "roster_18.xlsx",
+      "remote_path": "/HR/roster_18.xlsx"
+    },
+    {
+      "id": "stress_pii_19",
+      "class": "pii",
+      "file_name": "roster_19.xlsx",
+      "remote_path": "/HR/roster_19.xlsx"
+    },
+    {
+      "id": "stress_pii_20",
+      "class": "pii",
+      "file_name": "roster_20.xlsx",
+      "remote_path": "/HR/roster_20.xlsx"
+    },
+    {
+      "id": "stress_pii_21",
+      "class": "pii",
+      "file_name": "roster_21.xlsx",
+      "remote_path": "/HR/roster_21.xlsx"
+    },
+    {
+      "id": "stress_pii_22",
+      "class": "pii",
+      "file_name": "roster_22.xlsx",
+      "remote_path": "/HR/roster_22.xlsx"
+    },
+    {
+      "id": "stress_pii_23",
+      "class": "pii",
+      "file_name": "roster_23.xlsx",
+      "remote_path": "/HR/roster_23.xlsx"
+    },
+    {
+      "id": "stress_pii_24",
+      "class": "pii",
+      "file_name": "roster_24.xlsx",
+      "remote_path": "/HR/roster_24.xlsx"
+    },
+    {
+      "id": "stress_pii_25",
+      "class": "pii",
+      "file_name": "roster_25.xlsx",
+      "remote_path": "/HR/roster_25.xlsx"
+    },
+    {
+      "id": "stress_pii_26",
+      "class": "pii",
+      "file_name": "roster_26.xlsx",
+      "remote_path": "/HR/roster_26.xlsx"
+    },
+    {
+      "id": "stress_pii_27",
+      "class": "pii",
+      "file_name": "roster_27.xlsx",
+      "remote_path": "/HR/roster_27.xlsx"
+    },
+    {
+      "id": "stress_pii_28",
+      "class": "pii",
+      "file_name": "roster_28.xlsx",
+      "remote_path": "/HR/roster_28.xlsx"
+    },
+    {
+      "id": "stress_pii_29",
+      "class": "pii",
+      "file_name": "roster_29.xlsx",
+      "remote_path": "/HR/roster_29.xlsx"
+    },
+    {
+      "id": "stress_pii_30",
+      "class": "pii",
+      "file_name": "roster_30.xlsx",
+      "remote_path": "/HR/roster_30.xlsx"
+    },
+    {
+      "id": "stress_pii_31",
+      "class": "pii",
+      "file_name": "roster_31.xlsx",
+      "remote_path": "/HR/roster_31.xlsx"
+    },
+    {
+      "id": "stress_pii_32",
+      "class": "pii",
+      "file_name": "roster_32.xlsx",
+      "remote_path": "/HR/roster_32.xlsx"
+    },
+    {
+      "id": "stress_pii_33",
+      "class": "pii",
+      "file_name": "roster_33.xlsx",
+      "remote_path": "/HR/roster_33.xlsx"
+    },
+    {
+      "id": "stress_phi_0",
+      "class": "phi",
+      "file_name": "patient_0.csv",
+      "remote_path": "/Medical/patient_0.csv"
+    },
+    {
+      "id": "stress_phi_1",
+      "class": "phi",
+      "file_name": "patient_1.csv",
+      "remote_path": "/Medical/patient_1.csv"
+    },
+    {
+      "id": "stress_phi_2",
+      "class": "phi",
+      "file_name": "patient_2.csv",
+      "remote_path": "/Medical/patient_2.csv"
+    },
+    {
+      "id": "stress_phi_3",
+      "class": "phi",
+      "file_name": "patient_3.csv",
+      "remote_path": "/Medical/patient_3.csv"
+    },
+    {
+      "id": "stress_phi_4",
+      "class": "phi",
+      "file_name": "patient_4.csv",
+      "remote_path": "/Medical/patient_4.csv"
+    },
+    {
+      "id": "stress_phi_5",
+      "class": "phi",
+      "file_name": "patient_5.csv",
+      "remote_path": "/Medical/patient_5.csv"
+    },
+    {
+      "id": "stress_phi_6",
+      "class": "phi",
+      "file_name": "patient_6.csv",
+      "remote_path": "/Medical/patient_6.csv"
+    },
+    {
+      "id": "stress_phi_7",
+      "class": "phi",
+      "file_name": "patient_7.csv",
+      "remote_path": "/Medical/patient_7.csv"
+    },
+    {
+      "id": "stress_phi_8",
+      "class": "phi",
+      "file_name": "patient_8.csv",
+      "remote_path": "/Medical/patient_8.csv"
+    },
+    {
+      "id": "stress_phi_9",
+      "class": "phi",
+      "file_name": "patient_9.csv",
+      "remote_path": "/Medical/patient_9.csv"
+    },
+    {
+      "id": "stress_phi_10",
+      "class": "phi",
+      "file_name": "patient_10.csv",
+      "remote_path": "/Medical/patient_10.csv"
+    },
+    {
+      "id": "stress_phi_11",
+      "class": "phi",
+      "file_name": "patient_11.csv",
+      "remote_path": "/Medical/patient_11.csv"
+    },
+    {
+      "id": "stress_phi_12",
+      "class": "phi",
+      "file_name": "patient_12.csv",
+      "remote_path": "/Medical/patient_12.csv"
+    },
+    {
+      "id": "stress_phi_13",
+      "class": "phi",
+      "file_name": "patient_13.csv",
+      "remote_path": "/Medical/patient_13.csv"
+    },
+    {
+      "id": "stress_phi_14",
+      "class": "phi",
+      "file_name": "patient_14.csv",
+      "remote_path": "/Medical/patient_14.csv"
+    },
+    {
+      "id": "stress_phi_15",
+      "class": "phi",
+      "file_name": "patient_15.csv",
+      "remote_path": "/Medical/patient_15.csv"
+    },
+    {
+      "id": "stress_phi_16",
+      "class": "phi",
+      "file_name": "patient_16.csv",
+      "remote_path": "/Medical/patient_16.csv"
+    },
+    {
+      "id": "stress_phi_17",
+      "class": "phi",
+      "file_name": "patient_17.csv",
+      "remote_path": "/Medical/patient_17.csv"
+    },
+    {
+      "id": "stress_phi_18",
+      "class": "phi",
+      "file_name": "patient_18.csv",
+      "remote_path": "/Medical/patient_18.csv"
+    },
+    {
+      "id": "stress_phi_19",
+      "class": "phi",
+      "file_name": "patient_19.csv",
+      "remote_path": "/Medical/patient_19.csv"
+    },
+    {
+      "id": "stress_phi_20",
+      "class": "phi",
+      "file_name": "patient_20.csv",
+      "remote_path": "/Medical/patient_20.csv"
+    },
+    {
+      "id": "stress_phi_21",
+      "class": "phi",
+      "file_name": "patient_21.csv",
+      "remote_path": "/Medical/patient_21.csv"
+    },
+    {
+      "id": "stress_phi_22",
+      "class": "phi",
+      "file_name": "patient_22.csv",
+      "remote_path": "/Medical/patient_22.csv"
+    },
+    {
+      "id": "stress_phi_23",
+      "class": "phi",
+      "file_name": "patient_23.csv",
+      "remote_path": "/Medical/patient_23.csv"
+    },
+    {
+      "id": "stress_phi_24",
+      "class": "phi",
+      "file_name": "patient_24.csv",
+      "remote_path": "/Medical/patient_24.csv"
+    },
+    {
+      "id": "stress_phi_25",
+      "class": "phi",
+      "file_name": "patient_25.csv",
+      "remote_path": "/Medical/patient_25.csv"
+    },
+    {
+      "id": "stress_phi_26",
+      "class": "phi",
+      "file_name": "patient_26.csv",
+      "remote_path": "/Medical/patient_26.csv"
+    },
+    {
+      "id": "stress_phi_27",
+      "class": "phi",
+      "file_name": "patient_27.csv",
+      "remote_path": "/Medical/patient_27.csv"
+    },
+    {
+      "id": "stress_phi_28",
+      "class": "phi",
+      "file_name": "patient_28.csv",
+      "remote_path": "/Medical/patient_28.csv"
+    },
+    {
+      "id": "stress_phi_29",
+      "class": "phi",
+      "file_name": "patient_29.csv",
+      "remote_path": "/Medical/patient_29.csv"
+    },
+    {
+      "id": "stress_phi_30",
+      "class": "phi",
+      "file_name": "patient_30.csv",
+      "remote_path": "/Medical/patient_30.csv"
+    },
+    {
+      "id": "stress_phi_31",
+      "class": "phi",
+      "file_name": "patient_31.csv",
+      "remote_path": "/Medical/patient_31.csv"
+    },
+    {
+      "id": "stress_phi_32",
+      "class": "phi",
+      "file_name": "patient_32.csv",
+      "remote_path": "/Medical/patient_32.csv"
+    },
+    {
+      "id": "stress_phi_33",
+      "class": "phi",
+      "file_name": "patient_33.csv",
+      "remote_path": "/Medical/patient_33.csv"
+    },
+    {
+      "id": "stress_financial_0",
+      "class": "financial",
+      "file_name": "ledger_0.xlsx",
+      "remote_path": "/Finance/ledger_0.xlsx"
+    },
+    {
+      "id": "stress_financial_1",
+      "class": "financial",
+      "file_name": "ledger_1.xlsx",
+      "remote_path": "/Finance/ledger_1.xlsx"
+    },
+    {
+      "id": "stress_financial_2",
+      "class": "financial",
+      "file_name": "ledger_2.xlsx",
+      "remote_path": "/Finance/ledger_2.xlsx"
+    },
+    {
+      "id": "stress_financial_3",
+      "class": "financial",
+      "file_name": "ledger_3.xlsx",
+      "remote_path": "/Finance/ledger_3.xlsx"
+    },
+    {
+      "id": "stress_financial_4",
+      "class": "financial",
+      "file_name": "ledger_4.xlsx",
+      "remote_path": "/Finance/ledger_4.xlsx"
+    },
+    {
+      "id": "stress_financial_5",
+      "class": "financial",
+      "file_name": "ledger_5.xlsx",
+      "remote_path": "/Finance/ledger_5.xlsx"
+    },
+    {
+      "id": "stress_financial_6",
+      "class": "financial",
+      "file_name": "ledger_6.xlsx",
+      "remote_path": "/Finance/ledger_6.xlsx"
+    },
+    {
+      "id": "stress_financial_7",
+      "class": "financial",
+      "file_name": "ledger_7.xlsx",
+      "remote_path": "/Finance/ledger_7.xlsx"
+    },
+    {
+      "id": "stress_financial_8",
+      "class": "financial",
+      "file_name": "ledger_8.xlsx",
+      "remote_path": "/Finance/ledger_8.xlsx"
+    },
+    {
+      "id": "stress_financial_9",
+      "class": "financial",
+      "file_name": "ledger_9.xlsx",
+      "remote_path": "/Finance/ledger_9.xlsx"
+    },
+    {
+      "id": "stress_financial_10",
+      "class": "financial",
+      "file_name": "ledger_10.xlsx",
+      "remote_path": "/Finance/ledger_10.xlsx"
+    },
+    {
+      "id": "stress_financial_11",
+      "class": "financial",
+      "file_name": "ledger_11.xlsx",
+      "remote_path": "/Finance/ledger_11.xlsx"
+    },
+    {
+      "id": "stress_financial_12",
+      "class": "financial",
+      "file_name": "ledger_12.xlsx",
+      "remote_path": "/Finance/ledger_12.xlsx"
+    },
+    {
+      "id": "stress_financial_13",
+      "class": "financial",
+      "file_name": "ledger_13.xlsx",
+      "remote_path": "/Finance/ledger_13.xlsx"
+    },
+    {
+      "id": "stress_financial_14",
+      "class": "financial",
+      "file_name": "ledger_14.xlsx",
+      "remote_path": "/Finance/ledger_14.xlsx"
+    },
+    {
+      "id": "stress_financial_15",
+      "class": "financial",
+      "file_name": "ledger_15.xlsx",
+      "remote_path": "/Finance/ledger_15.xlsx"
+    },
+    {
+      "id": "stress_financial_16",
+      "class": "financial",
+      "file_name": "ledger_16.xlsx",
+      "remote_path": "/Finance/ledger_16.xlsx"
+    },
+    {
+      "id": "stress_financial_17",
+      "class": "financial",
+      "file_name": "ledger_17.xlsx",
+      "remote_path": "/Finance/ledger_17.xlsx"
+    },
+    {
+      "id": "stress_financial_18",
+      "class": "financial",
+      "file_name": "ledger_18.xlsx",
+      "remote_path": "/Finance/ledger_18.xlsx"
+    },
+    {
+      "id": "stress_financial_19",
+      "class": "financial",
+      "file_name": "ledger_19.xlsx",
+      "remote_path": "/Finance/ledger_19.xlsx"
+    },
+    {
+      "id": "stress_financial_20",
+      "class": "financial",
+      "file_name": "ledger_20.xlsx",
+      "remote_path": "/Finance/ledger_20.xlsx"
+    },
+    {
+      "id": "stress_financial_21",
+      "class": "financial",
+      "file_name": "ledger_21.xlsx",
+      "remote_path": "/Finance/ledger_21.xlsx"
+    },
+    {
+      "id": "stress_financial_22",
+      "class": "financial",
+      "file_name": "ledger_22.xlsx",
+      "remote_path": "/Finance/ledger_22.xlsx"
+    },
+    {
+      "id": "stress_financial_23",
+      "class": "financial",
+      "file_name": "ledger_23.xlsx",
+      "remote_path": "/Finance/ledger_23.xlsx"
+    },
+    {
+      "id": "stress_financial_24",
+      "class": "financial",
+      "file_name": "ledger_24.xlsx",
+      "remote_path": "/Finance/ledger_24.xlsx"
+    },
+    {
+      "id": "stress_financial_25",
+      "class": "financial",
+      "file_name": "ledger_25.xlsx",
+      "remote_path": "/Finance/ledger_25.xlsx"
+    },
+    {
+      "id": "stress_financial_26",
+      "class": "financial",
+      "file_name": "ledger_26.xlsx",
+      "remote_path": "/Finance/ledger_26.xlsx"
+    },
+    {
+      "id": "stress_financial_27",
+      "class": "financial",
+      "file_name": "ledger_27.xlsx",
+      "remote_path": "/Finance/ledger_27.xlsx"
+    },
+    {
+      "id": "stress_financial_28",
+      "class": "financial",
+      "file_name": "ledger_28.xlsx",
+      "remote_path": "/Finance/ledger_28.xlsx"
+    },
+    {
+      "id": "stress_financial_29",
+      "class": "financial",
+      "file_name": "ledger_29.xlsx",
+      "remote_path": "/Finance/ledger_29.xlsx"
+    },
+    {
+      "id": "stress_financial_30",
+      "class": "financial",
+      "file_name": "ledger_30.xlsx",
+      "remote_path": "/Finance/ledger_30.xlsx"
+    },
+    {
+      "id": "stress_financial_31",
+      "class": "financial",
+      "file_name": "ledger_31.xlsx",
+      "remote_path": "/Finance/ledger_31.xlsx"
+    },
+    {
+      "id": "stress_financial_32",
+      "class": "financial",
+      "file_name": "ledger_32.xlsx",
+      "remote_path": "/Finance/ledger_32.xlsx"
+    },
+    {
+      "id": "stress_financial_33",
+      "class": "financial",
+      "file_name": "ledger_33.xlsx",
+      "remote_path": "/Finance/ledger_33.xlsx"
+    }
+  ]
+}

@@ -38,13 +38,13 @@ deployment_revision = ""         # operator-pinned immutable revision; defaults 
 objective = ""                   # blank uses the built-in objective text
 max_input_tokens = 60000         # state + all questions, under the 64k ceiling
 max_state_longest_question_tokens = 30000  # state + longest question, under 32k
-max_questions_per_request = 200  # verify the real cap with `check`
+max_questions_per_request = 200  # cap per request; status shows files/request
 request_timeout_seconds = 120
 retries = 2
 workers = 8                      # concurrent decision requests; sweep vs the route
 rate_limit_per_minute = 0        # 0 = unset
 time_budget_seconds = 0          # 0 = unlimited; a budget pauses, never samples
-packing_scope = "directory"      # directory (default) or multi-directory
+packing_scope = "multi-directory"  # multi-directory (default) or directory
 token_headroom_percent = 10      # estimator safety margin on both token budgets
 max_request_bytes = 0            # 0 = no exact canonical byte cap
 """
@@ -89,7 +89,7 @@ Top level:
   workers                          concurrent decision requests (default: 8)
   rate_limit_per_minute            request cap per minute; 0 = unset
   time_budget_seconds              run budget; 0 = unlimited (pauses, never samples)
-  packing_scope                    directory (default) | multi-directory
+  packing_scope                    multi-directory (default) | directory
   token_headroom_percent           estimator safety margin on token budgets (default: 10)
   max_request_bytes                exact canonical byte cap; 0 = unset
 

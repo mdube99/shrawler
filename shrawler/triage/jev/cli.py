@@ -55,7 +55,7 @@ def _print_status(payload: Dict[str, Any]) -> None:
         f"failed {batches.get('failed', 0)}"
     )
     print(
-        f"packing: {payload.get('packing_scope', 'directory')} | "
+        f"packing: {payload.get('packing_scope', 'multi-directory')} | "
         f"workers: {payload.get('workers', '?')}"
     )
     metrics = payload.get("metrics") or {}
@@ -79,6 +79,15 @@ def _print_status(payload: Dict[str, Any]) -> None:
         print(
             f"request latency: p50 {latency['p50']}ms | p95 {latency.get('p95')}ms "
             f"(n={latency.get('count', 0)})"
+        )
+    usage = payload.get("usage") or {}
+    if usage.get("billed_input_tokens"):
+        price = usage.get("input_price_per_million_tokens", 0.042)
+        print(
+            f"billed input tokens: {usage['billed_input_tokens']} "
+            f"({usage.get('tokens_per_file', 0)}/file, "
+            f"{usage.get('files_per_request', 0)} files/request) | "
+            f"est cost ${usage.get('estimated_cost_usd', 0)} @ ${price}/M"
         )
 
 

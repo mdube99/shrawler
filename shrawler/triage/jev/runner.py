@@ -31,8 +31,8 @@ from .client import (
     ThrottleError,
     load_payload,
 )
-from .config import JevConfig
-from .planner import TokenCounter, plan_run, split_input_error_batch
+from .config import DEFAULT_INPUT_PRICE_PER_MTOK, JevConfig
+from .planner import TokenCounter, answer_keys, plan_run, split_input_error_batch
 from .snapshot import source_fingerprint, stage
 from .storage import JevStore, utc_now
 
@@ -68,6 +68,14 @@ class WorkItem:
     # Precomputed at claim time so persistence never requeries the database:
     # each member's directory context hash, keyed by file ID.
     context_hashes: Dict[str, str] = field(default_factory=dict)
+    # Each member's binding key in this request, keyed by file ID. The request
+    # names candidates by a short key derived from the file ID, so an answer must
+    # be looked up by that key and stored against the exact file ID. A member
+    # missing from the map falls back to its own file ID.
+    keys: Dict[str, str] = field(default_factory=dict)
+
+    def key_for(self, file_id: str) -> str:
+        return self.keys.get(file_id, file_id)
 
 
 @dataclass
@@ -277,13 +285,15 @@ class JevRunner:
                     reused_requests += 1
                     continue
                 self.store.claim_batch(run_id, batch_id, members)
+                payload = load_payload(row)
                 return WorkItem(
                     batch_id=batch_id,
                     run_id=run_id,
                     request_id=str(row["request_id"]),
-                    payload=load_payload(row),
+                    payload=payload,
                     members=members,
                     context_hashes=self.store.member_context_hashes(batch_id),
+                    keys=answer_keys(payload, members),
                 )
 
         def handle_success(result: WorkResult) -> None:
@@ -548,7 +558,7 @@ class JevRunner:
         adapter_version = self.client.adapter_version
         rubric_version = provenance["rubric_version"]
         for file_id in work.members:
-            answer = response.answers.get(file_id)
+            answer = response.answers.get(work.key_for(file_id))
             if answer is None:
                 continue
             answers.append(
@@ -725,6 +735,11 @@ class JevRunner:
             except ValueError:
                 metrics = {}
         durations = sorted(self.store.recent_durations(run_id))
+        usage = self.store.usage_totals(run_id)
+        billed = usage["input_tokens"]
+        completed_batches = batch_counts.get("completed", 0) + batch_counts.get(
+            "partial", 0
+        )
         return {
             "run_id": run_id,
             "scan_id": run["scan_id"],
@@ -742,6 +757,20 @@ class JevRunner:
             "packing_scope": self.config.packing_scope,
             "metrics": metrics,
             "latency_ms": _percentiles(durations),
+            # Real billed usage from the gateway, not a local estimate. Cost is
+            # shown at the published default rate for the configured route.
+            "usage": {
+                "billed_input_tokens": billed,
+                "output_tokens": usage["output_tokens"],
+                "tokens_per_file": round(billed / assessed, 1) if assessed else 0.0,
+                "files_per_request": round(assessed / completed_batches, 1)
+                if completed_batches
+                else 0.0,
+                "input_price_per_million_tokens": DEFAULT_INPUT_PRICE_PER_MTOK,
+                "estimated_cost_usd": round(
+                    billed * DEFAULT_INPUT_PRICE_PER_MTOK / 1_000_000, 4
+                ),
+            },
             "batches": {
                 "total": sum(batch_counts.values()),
                 "completed": batch_counts.get("completed", 0) + batch_counts.get("partial", 0),
