@@ -11,3 +11,5 @@ downloads/
 shrawler_*.csv
 shrawler_results.json
 *.nemesis/
+
+.openchamber/
