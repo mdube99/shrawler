@@ -40,29 +40,50 @@ prints a URL containing a random token in the fragment. The browser removes the
 fragment from the visible URL, keeps the token in memory, and sends it as a
 bearer credential.
 
-## Views
+## Screens
 
-**Ranked review** opens a separate page for scan-specific priorities, category
-filters, saved ranking history, and explanations. Its rule builder supports
-filename fragments, extensions, directory labels, and sibling filename patterns.
-Preview rules against the saved inventory, export their TOML for the CLI, or run
-and save a ranking for paginated review. Jobs report progress and can be cancelled.
-See [Offline metadata triage](triage.md) for rule semantics and limitations.
+The interface has two screens: **Explore** at `/` and **Score** at `/score`.
+`/triage` and `/assessment` redirect to `/score`, so older bookmarks still work.
+
+## Explore
+
+Explore is the landing screen and the default view. The table is the product;
+everything else ranks it.
+
+Search sits above the grid with `/` to focus it. Filters live behind a single
+trigger that shows the active count (`Filters · 3`) and open as a popover, or a
+bottom sheet on narrow viewports. Host, share, file type, Snaffler rule, triage,
+share-root permission, collection state, transfer state, rank category, and
+minimum rule rating are all filterable. Active filters also appear as removable
+chips.
+
+**Engine run selection** is a dedicated control rather than one more filter.
+`Ranking` and `AI` choose which saved runs contribute, and Combined is their
+weighted blend. Deselecting the rule run re-weights Combined to the AI score
+alone instead of filtering rows away; clearing the blend does the reverse. Both
+engines stay visible as their own columns at all times, in their own hues.
+
+Every piece of view state lives in the URL, so any table state can be shared as a
+link. Nothing is kept in `localStorage`.
 
 Table view displays one paginated result set. Select a file to open its UNC
-path, remote path, indexed time, and file actions beneath the row.
+path, remote path, indexed time, and file actions beneath the row. Severity is
+shown as a left rail on the row plus a chip on the Combined score, rather than a
+tinted row background that would hurt the legibility of the path text.
 
-File actions offer **View file**, **Download**, and **Send to Nemesis** separately.
-Sending requires no prior browser download: Shrawler stages the remote bytes,
-uploads them, and deletes the staged copy after success. Failed uploads retain
-their staged copy for local retry. See [Nemesis delivery](nemesis.md) for limits,
-receipts, and recovery. Ranked review links to these same actions.
+File actions offer **View file**, **Download**, and **Queue for collection**.
+Queueing saves a [collection manifest](collection.md) with byte caps and retry;
+it is the only path for anything acting on more than one file.
+
+**Percentage actions** act on a share of a ranked set rather than a hand-picked
+selection. Choose the filtered set or the whole scan, a percentage, and a
+destination. Before anything commits, the preflight reports the file count, the
+bytes, and any files over the per-file cap.
 
 Tree view groups the inventory by host, share, and folder. Branches are queried
 only when expanded so large workspaces are not transferred as one hierarchy.
 
-Search and host, share, file-type, Snaffler rule, triage, permission, and
-collection-status filters apply to both views. File details show matching rules,
+Search and the filters apply to both views. File details show matching rules,
 share-root read/write permissions, collection status, and the indexed evidence
 timestamp. In cumulative database mode these fields come from the latest file
 observation scan, so findings and permissions from separate scanner identities
@@ -99,10 +120,44 @@ rules and level 4 by AI reads 78), while a signal from only one side lands mid
 scale (a rules-missed credential the AI rates 4 reads 50; a rule maximum the AI
 rates 0 reads 50). If neither run is selected the column shows `—`.
 
-The badge carries a coverage marker for which components fed the number: `●`
+The chip carries a coverage marker for which components fed the number: `●`
 both, `◐` rules only, `○` AI only. Sort by **Combined** orders the page by this
 score. Weights and the rating anchor are configurable under `[scoring]` in the
 configuration file (`rating_full`, `rating_weight`, `jev_weight`).
+
+Combined is mapped onto four severity bands, applied as a left rail on the row
+and a chip in the score cell: 0-25 Minimal, 26-50 Likely, 51-75 Strong, 76-100
+Immediate. Rule and AI keep their own hues rather than reusing the bands, so hue
+says which engine produced a number and the rail says how urgent it is.
+
+## Score
+
+**Score** covers both engines and is reached at `/score`. A status strip stays
+visible above the tabs whichever tab is open, because the two engines run
+independently: an AI run started on one tab keeps reporting while you work on
+the other. While a job runs it reports observed files, batches, pending, failed,
+in-flight, reused, and retried requests. Cancel is available for either engine.
+
+**Rule ranking** takes a source scan and optional starter rules. The rule builder
+is a drawer that generates TOML into the editor below it; the editor is the
+honest interface and can be edited directly or imported and exported. Candidates
+list score, file, observed location, reasons, and per-file explanations. Match
+counts and directory examples sit behind a disclosure.
+
+**AI assessment** takes a source scan, staging choice, time budget, and a
+question cap, and can probe the configured endpoint. Coverage reports per-run
+totals, batch progress, latency, and the real billed token and cost figures.
+Candidates can be filtered to strong values the rules missed, which is the
+clearest statement of what the rule engine did not find.
+
+**Collection queue** is shared. Manifests are created from the selected ranking,
+run with retry, and report a per-file outcome. File families group saved metadata
+by possible dates and versions and record review decisions, which a later ranking
+applies. See [File-family review](families.md).
+
+Assets are served from disk through an allow-list of extensions and validated
+with `ETag` and `Last-Modified`, so a reload revalidates instead of re-downloading.
+API responses are never cached and are compressed when the client accepts gzip.
 
 
 ## Preview handling
@@ -142,10 +197,10 @@ committed files appear without restarting the server.
 
 ## Stopping the server
 
-Press `Ctrl+C` in the terminal that started Shrawler. An active ranking job is
-asked to cancel during shutdown; completed rankings remain in the local triage
-database.
+Press `Ctrl+C` in the terminal that started Shrawler. Active ranking and
+assessment jobs are asked to cancel during shutdown; completed runs remain in
+their local databases.
 
-The **Ranked review** page also provides a persistent [collection queue](collection.md): select candidates, save and review a manifest, then collect or retry failed files. CLI and WebUI share the same manifests. Offline sessions support creation and review only.
-
-**Ranked review → File families** groups saved metadata, expands family members, records file/family review decisions, and supports undo. New rankings apply those decisions. Local evidence hashing confirms duplicate content without remote reads. See [File-family review](families.md).
+Collection manifests are shared with the CLI: select candidates, save and review
+a manifest, then collect or retry failed files. Offline sessions support creation
+and review only.

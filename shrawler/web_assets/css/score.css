@@ -1,0 +1,452 @@
+/* Score screen: status strip, tabs, and the panels of the rule, AI, and
+ * collection surfaces. */
+
+.score-head h1 {
+  font-size: 22px;
+  font-weight: 600;
+  letter-spacing: -0.025em;
+}
+
+.score-head p {
+  max-width: 78ch;
+  margin-top: 5px;
+  color: var(--text-dim);
+}
+
+/* -- Status strip ---------------------------------------------------------- */
+
+.status-strip {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-3) var(--space-5);
+  margin-top: var(--space-4);
+  padding: var(--space-3) var(--space-4);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  background: var(--surface-1);
+}
+
+.engine-status {
+  display: grid;
+  grid-template-columns: 8px auto auto;
+  grid-template-areas:
+    "hue name state"
+    "hue meter meter"
+    "hue detail detail";
+  align-items: center;
+  gap: 2px var(--space-2);
+  flex: 1 1 320px;
+  min-width: 260px;
+}
+
+.engine-status__hue {
+  grid-area: hue;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--text-faint);
+  align-self: start;
+  margin-top: 4px;
+}
+
+.engine-status__hue--rule {
+  background: var(--rule-dim);
+}
+
+.engine-status__hue--ai {
+  background: var(--ai-dim);
+}
+
+.engine-status[data-state="running"] .engine-status__hue {
+  background: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-wash);
+  animation: pulse 1.4s ease-in-out infinite;
+}
+
+.engine-status[data-state="completed"] .engine-status__hue {
+  background: var(--success);
+}
+
+.engine-status[data-state="failed"] .engine-status__hue,
+.engine-status[data-state="cancelled"] .engine-status__hue {
+  background: var(--danger);
+}
+
+.engine-status__name {
+  grid-area: name;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.engine-status__state {
+  grid-area: state;
+  color: var(--text-mute);
+  font: 11px var(--font-data);
+  text-transform: lowercase;
+}
+
+.engine-status[data-state="running"] .engine-status__state {
+  color: var(--accent-bright);
+}
+
+.engine-status__meter {
+  grid-area: meter;
+  height: 4px;
+  margin: 2px 0;
+  overflow: hidden;
+  border-radius: 999px;
+  background: var(--surface-3);
+}
+
+.engine-status__meter .meter__fill {
+  height: 100%;
+  border-radius: inherit;
+  background: var(--accent);
+  transition: width 200ms linear;
+}
+
+.engine-status__detail {
+  grid-area: detail;
+  overflow: hidden;
+  color: var(--text-mute);
+  font: 11px/1.5 var(--font-data);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* -- Tabs ------------------------------------------------------------------ */
+
+.tabs {
+  display: flex;
+  gap: var(--space-1);
+  margin-top: var(--space-4);
+  border-bottom: 1px solid var(--line);
+}
+
+.tab {
+  position: relative;
+  padding: var(--space-2) var(--space-4);
+  border: 0;
+  background: transparent;
+  color: var(--text-mute);
+  font-size: 13px;
+  font-weight: 500;
+}
+
+.tab::after {
+  content: "";
+  position: absolute;
+  inset: auto 0 -1px 0;
+  height: 2px;
+  background: transparent;
+}
+
+.tab:hover {
+  color: var(--text-dim);
+}
+
+.tab[aria-selected="true"] {
+  color: var(--text);
+}
+
+.tab[aria-selected="true"]::after {
+  background: var(--accent);
+}
+
+.tab-panel {
+  display: grid;
+  gap: var(--space-4);
+  padding-top: var(--space-4);
+}
+
+.collection-region {
+  display: grid;
+  gap: var(--space-4);
+  padding-top: var(--space-5);
+  margin-top: var(--space-5);
+  border-top: 1px solid var(--line);
+}
+
+/* -- Score panels ---------------------------------------------------------- */
+
+.score-panel {
+  min-width: 0;
+}
+
+.panel__head {
+  flex-wrap: wrap;
+}
+
+.panel__title {
+  flex: 0 0 auto;
+}
+
+.panel__hint {
+  min-width: 0;
+}
+
+/* Grid items default to min-width:auto, which lets a wide table or select set
+ * the track width and push the whole page sideways. Every panel is told it may
+ * shrink, and the table keeps its own scroll container instead. */
+.tab-panel > *,
+.collection-region > * {
+  min-width: 0;
+}
+
+.field-grid {
+  min-width: 0;
+}
+
+.field-grid > .field,
+.field,
+.select,
+.input {
+  min-width: 0;
+}
+
+.select {
+  max-width: 100%;
+}
+
+.rule-drawer {
+  margin: var(--space-3) 0;
+  padding: var(--space-3);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--surface-2);
+}
+
+.rule-drawer .field-grid {
+  margin-top: var(--space-3);
+}
+
+.score-controls {
+  margin-bottom: var(--space-3);
+}
+
+.score-collect-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+  padding: var(--space-2) var(--space-3);
+  margin-bottom: var(--space-3);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--surface-2);
+}
+
+.score-grid-shell {
+  border-radius: var(--radius-sm);
+}
+
+.score-grid {
+  min-width: 900px;
+  table-layout: auto;
+}
+
+.score-grid td {
+  height: auto;
+  padding: var(--space-2) var(--space-3);
+  vertical-align: top;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+.score-grid td.numeric {
+  text-align: left;
+}
+
+.score-grid .rail {
+  box-shadow: none;
+}
+
+.score-grid .rail[data-severity="immediate"] td:first-child {
+  box-shadow: inset 2px 0 var(--sev-immediate);
+}
+
+.score-grid .rail[data-severity="strong"] td:first-child {
+  box-shadow: inset 2px 0 var(--sev-strong);
+}
+
+.score-grid .rail[data-severity="likely"] td:first-child {
+  box-shadow: inset 2px 0 var(--sev-likely);
+}
+
+.score-grid .rail[data-severity="minimal"] td:first-child {
+  box-shadow: inset 2px 0 var(--sev-minimal);
+}
+
+.candidate-link {
+  color: var(--text);
+  font-size: 12.5px;
+  font-weight: 500;
+  text-decoration: none;
+}
+
+.candidate-link:hover {
+  color: var(--accent-bright);
+  text-decoration: underline;
+}
+
+.score-path {
+  color: var(--text-mute);
+  font: 11px/1.5 var(--font-data);
+}
+
+.score-reasons {
+  max-width: 34ch;
+  color: var(--text-dim);
+  font-size: 12px;
+}
+
+.score-list {
+  margin: var(--space-2) 0;
+  padding-left: var(--space-4);
+  color: var(--text-mute);
+  font: 11px/1.7 var(--font-data);
+}
+
+.score-list li {
+  overflow-wrap: anywhere;
+}
+
+.outcome-chip {
+  display: inline-flex;
+  align-items: center;
+  min-height: 20px;
+  padding: 0 7px;
+  border: 1px solid var(--line-strong);
+  border-radius: 999px;
+  background: var(--surface-2);
+  color: var(--text-dim);
+  font: 10px/1 var(--font-data);
+  white-space: nowrap;
+}
+
+.outcome-chip[data-status="collected"],
+.outcome-chip[data-status="completed"] {
+  border-color: hsl(146 36% 40%);
+  background: var(--success-wash);
+  color: hsl(146 42% 72%);
+}
+
+.outcome-chip[data-status="failed"],
+.outcome-chip[data-status="retrieval-failed"] {
+  border-color: hsl(2 55% 46%);
+  background: var(--danger-wash);
+  color: hsl(2 66% 76%);
+}
+
+.outcome-chip[data-status="excluded-limit"],
+.outcome-chip[data-status="excluded-review"],
+.outcome-chip[data-status="previously-collected"] {
+  color: var(--text-faint);
+}
+
+.coverage-directories {
+  max-height: 320px;
+  margin-top: var(--space-3);
+  overflow: auto;
+  padding: var(--space-2);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--bg);
+  color: var(--text-mute);
+  font: 11px/1.6 var(--font-data);
+}
+
+.coverage-directories p {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.stat-row {
+  margin-top: var(--space-2);
+}
+
+.code-block {
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--bg);
+  color: var(--text-mute);
+  font-size: 11px;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.explain-section {
+  margin-top: var(--space-3);
+  padding-top: var(--space-3);
+  border-top: 1px solid var(--line);
+}
+
+.explain-section strong {
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.family-list {
+  display: grid;
+  gap: var(--space-2);
+  margin-top: var(--space-3);
+}
+
+.family {
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--surface-2);
+}
+
+.family > summary {
+  color: var(--text-dim);
+  font-size: 12px;
+}
+
+.family .btn-row {
+  margin-top: var(--space-2);
+}
+
+.family-members {
+  display: grid;
+  gap: var(--space-2);
+  margin-top: var(--space-2);
+}
+
+.family-member {
+  padding-left: var(--space-3);
+  border-left: 1px solid var(--line);
+}
+
+/* -- Responsive ------------------------------------------------------------ */
+
+@media (max-width: 760px) {
+  .status-strip {
+    gap: var(--space-3);
+  }
+
+  .engine-status {
+    flex: 1 1 100%;
+  }
+
+  .tabs {
+    overflow-x: auto;
+  }
+
+  .tab {
+    padding-inline: var(--space-3);
+    white-space: nowrap;
+  }
+}
+
+@keyframes pulse {
+  50% {
+    opacity: 0.45;
+  }
+}

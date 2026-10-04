@@ -214,9 +214,9 @@ class AssessmentHttpTests(unittest.TestCase):
 
     def test_page_and_assets_served(self) -> None:
         for path, marker in (
-            ("/assessment", b"Model-assisted assessment"),
-            ("/assets/assessment.js", b"/api/assessment/jobs"),
-            ("/assets/assessment.css", b"coverage-directories"),
+            ("/score", b"AI assessment"),
+            ("/assets/js/score-ai.js", b"/api/assessment/jobs"),
+            ("/assets/css/score.css", b"coverage-directories"),
         ):
             request = urllib.request.Request(self.base + path, headers={"Authorization": "Bearer token"})
             with urllib.request.urlopen(request, timeout=5) as response:

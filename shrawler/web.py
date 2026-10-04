@@ -1,5 +1,6 @@
 """Local-only, dependency-free WebUI for saved Shrawler inventories."""
 
+import gzip
 import hashlib
 import json
 import logging
@@ -70,7 +71,11 @@ MAGIC = {
     ".pdf": (b"%PDF-",),
 }
 SECURITY_HEADERS = {
-    "Content-Security-Policy": "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' blob:; frame-src blob:; connect-src 'self'; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
+    # ``font-src`` is the only addition over the previous policy: the UI loads
+    # its two typefaces from a CDN so an air-gapped install never has to ship
+    # font binaries. Every other directive is unchanged, so style-src and
+    # script-src stay locked to 'self'.
+    "Content-Security-Policy": "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' blob:; font-src 'self' https://cdn.jsdelivr.net; frame-src blob:; connect-src 'self'; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
     "X-Content-Type-Options": "nosniff",
     "Referrer-Policy": "no-referrer",
     "Permissions-Policy": "camera=(), microphone=(), geolocation=(), payment=(), usb=()",
@@ -79,6 +84,34 @@ SECURITY_HEADERS = {
     "Cache-Control": "no-store",
     "Pragma": "no-cache",
 }
+
+# Cache directives replaced per-response when a caller supplies its own.
+_OVERRIDABLE_HEADERS = frozenset({"Cache-Control", "Pragma"})
+
+ASSET_ROOT = Path(__file__).parent / "web_assets"
+
+# Screens are served from an explicit table: only these two documents exist and
+# their paths are part of the product, not a resource lookup.
+HTML_ROUTES = {
+    "/": "explore.html",
+    "/score": "score.html",
+}
+
+# Legacy pages redirect once so old bookmarks keep working.
+REDIRECTS = {"/triage": "/score", "/assessment": "/score"}
+
+ASSET_TYPES = {
+    ".css": "text/css; charset=utf-8",
+    ".js": "text/javascript; charset=utf-8",
+    ".html": "text/html; charset=utf-8",
+    ".svg": "image/svg+xml",
+    ".png": "image/png",
+    ".woff2": "font/woff2",
+    ".ico": "image/x-icon",
+}
+
+# Below this size the gzip header costs more than it saves.
+GZIP_FLOOR = 512
 
 
 def jev_catalog(database: Path) -> List[Dict[str, Any]]:
@@ -523,8 +556,14 @@ class FileIndex:
         sort: str = "path",
         direction: str = "asc",
         activity: str = "",
+        jev_run: str = "",
     ) -> Dict[str, Any]:
-        """Build a complete host/share/folder hierarchy for matching records."""
+        """Build a complete host/share/folder hierarchy for matching records.
+
+        ``jev_run`` is accepted for parity with the other inventory readers. A
+        JSON result set carries no assessment database, so there is nothing to
+        resolve it against.
+        """
         matches = self._matching(
             q, host, share, extension, rule, triage, permission, collection, activity=activity
         )
@@ -1187,16 +1226,21 @@ class DatabaseIndex:
     def _resolve_jev_run(self, requested: str) -> str:
         """Pick the assessment run to surface, preferring a finished one.
 
-        An explicit selection is honoured as-is, matching the ranking dropdown.
+        A run that exists is honoured as-is, matching the ranking dropdown.
         This keeps a run selectable the moment it exists: an in-progress run may
         have completed no batch yet, so it never appears among finished runs even
         though the client enables it as soon as its status is ``running`` or
         ``paused``. When nothing is requested, fall back to the newest finished
         run, then to the newest run of any status.
+
+        An id that no longer exists resolves to no run at all. Callers join the
+        assessment tables only when this returns something, so a stale id in a
+        shared URL degrades to an inventory without AI scores instead of
+        failing the request with a missing-table error.
         """
-        if requested:
-            return requested
         runs = jev_catalog(self.path)
+        if requested:
+            return requested if any(run["id"] == requested for run in runs) else ""
         if not runs:
             return ""
         for run in runs:
@@ -1417,14 +1461,21 @@ class DatabaseIndex:
             sort_columns["jev"] = [jev_order]
         if combined_expr:
             sort_columns["combined"] = [combined_expr]
-        if sort not in sort_columns or direction not in {"asc", "desc"}:
-            raise ValueError("Invalid inventory sort")
+        if direction not in {"asc", "desc"}:
+            raise ValueError("Invalid inventory sort direction")
+        # A score the caller cannot supply falls back to path order rather than
+        # failing: the UI offers these sorts by default and disables the
+        # unavailable ones, so a stale link must still render an inventory.
+        # This has to happen before the membership check below, otherwise the
+        # fallbacks are unreachable for exactly the keys they guard.
         if sort == "priority" and not ranking_run:
             sort = "path"
         if sort == "jev" and not jev_order:
             sort = "path"
         if sort == "combined" and not combined_expr:
             sort = "path"
+        if sort not in sort_columns:
+            raise ValueError("Invalid inventory sort")
         if sort == "jev":
             # Assessed files first, highest priority first; unassessed rows last
             # regardless of direction.
@@ -1536,8 +1587,16 @@ class DatabaseIndex:
         sort: str = "path",
         direction: str = "asc",
         activity: str = "",
+        jev_run: str = "",
     ) -> Dict[str, Any]:
-        """Return root host nodes; descendants are loaded on expansion."""
+        """Return root host nodes; descendants are loaded on expansion.
+
+        ``jev_run`` is accepted for parity with ``search`` and ``tree_branch``.
+        The root query groups by host and never projects a per-file score, so
+        the run is resolved and then unused: resolving it here keeps the three
+        inventory readers on one selection contract instead of two.
+        """
+        self._resolve_jev_run(jev_run)
         where, where_values = self._where(
             q,
             host,
@@ -1932,11 +1991,22 @@ class WebHandler(BaseHTTPRequestHandler):
     def log_message(self, fmt: str, *args: Any) -> None:
         logging.debug("%s", escape_terminal(fmt % args))
 
-    def _headers(self, status: int, content_type: str, length: int) -> None:
+    def _headers(
+        self,
+        status: int,
+        content_type: str,
+        length: int,
+        extra: Optional[Dict[str, str]] = None,
+    ) -> None:
         self.send_response(status)
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(length))
+        overrides = {name.casefold() for name in (extra or ())}
         for name, value in SECURITY_HEADERS.items():
+            if name.casefold() in overrides:
+                continue
+            self.send_header(name, value)
+        for name, value in (extra or {}).items():
             self.send_header(name, value)
         self.end_headers()
 
@@ -1945,12 +2015,97 @@ class WebHandler(BaseHTTPRequestHandler):
         body: bytes,
         status: int = 200,
         content_type: str = "application/json; charset=utf-8",
+        extra_headers: Optional[Dict[str, str]] = None,
     ) -> None:
-        self._headers(status, content_type, len(body))
+        self._headers(status, content_type, len(body), extra_headers)
         self.wfile.write(body)
 
+    def _empty(self, status: int, extra_headers: Optional[Dict[str, str]] = None) -> None:
+        """Answer a validator hit. A 304 carries no body and no Content-Length."""
+        self.send_response(status)
+        for name, value in SECURITY_HEADERS.items():
+            if name.casefold() in {"cache-control", "pragma"}:
+                continue
+            self.send_header(name, value)
+        for name, value in (extra_headers or {}).items():
+            self.send_header(name, value)
+        self.send_header("Content-Length", "0")
+        self.end_headers()
+
+    def _accepts_gzip(self) -> bool:
+        return "gzip" in self.headers.get("Accept-Encoding", "").lower()
+
+    def _not_modified(self, etag: str, modified: float) -> bool:
+        """True when the client's validators already cover this representation."""
+        stamp = self.date_time_string(int(modified))
+        if_none_match = self.headers.get("If-None-Match", "")
+        if if_none_match:
+            candidates = {value.strip() for value in if_none_match.split(",")}
+            return "*" in candidates or etag in candidates
+        since = self.headers.get("If-Modified-Since")
+        return bool(since) and since.strip() == stamp
+
+    def _asset(self, relative: str) -> None:
+        """Resolve and serve one file from web_assets.
+
+        The extension table is the allow-list: an unknown suffix is refused
+        rather than guessed at, and the resolved path must still sit inside
+        ASSET_ROOT so no crafted traversal reaches the wider package.
+        """
+        if ".." in relative.split("/") or relative.startswith("/"):
+            self._error(404, "Not found", "not_found")
+            return
+        suffix = Path(relative).suffix.lower()
+        content_type = ASSET_TYPES.get(suffix)
+        if content_type is None:
+            self._error(404, "Not found", "not_found")
+            return
+        try:
+            path = (ASSET_ROOT / relative).resolve()
+            path.relative_to(ASSET_ROOT.resolve())
+        except (OSError, ValueError):
+            self._error(404, "Not found", "not_found")
+            return
+        try:
+            body = path.read_bytes()
+            modified = path.stat().st_mtime
+        except OSError:
+            self._error(404, "Not found", "not_found")
+            return
+        # Validators come from the file identity, not the bytes: assets change
+        # only when they are rewritten, so mtime plus size is enough and the
+        # response never has to be hashed on the request path.
+        etag = f'W/"{int(modified * 1000):x}-{len(body):x}"'
+        headers = {
+            "ETag": etag,
+            "Last-Modified": self.date_time_string(int(modified)),
+            # Stylesheets, scripts, and fonts are immutable per deployment, so
+            # they get a long shared lifetime. The two HTML documents are not:
+            # they name their own assets, so caching one would strand the tab
+            # on an older module graph.
+            "Cache-Control": (
+                "no-store"
+                if suffix == ".html"
+                else "public, max-age=3600"
+            ),
+        }
+        if suffix == ".html":
+            headers["Pragma"] = "no-cache"
+        if self._not_modified(etag, modified):
+            self._empty(304, headers)
+            return
+        self._send(body, content_type=content_type, extra_headers=headers)
+
     def _json(self, value: Any, status: int = 200) -> None:
-        self._send(json.dumps(value, ensure_ascii=False).encode("utf-8"), status)
+        body = json.dumps(value, ensure_ascii=False).encode("utf-8")
+        headers: Dict[str, str] = {}
+        # Inventory and job responses are polled constantly and must never be
+        # served from a cache, so they opt out of every revalidation path.
+        if len(body) >= GZIP_FLOOR and self._accepts_gzip():
+            body = gzip.compress(body, 6, mtime=0)
+            headers["Content-Encoding"] = "gzip"
+            headers["Vary"] = "Accept-Encoding"
+        self._send(body, status, extra_headers=headers)
 
     def _error(self, status: int, message: str, code: str) -> None:
         self._json({"error": message, "code": code}, status)
@@ -2015,23 +2170,19 @@ class WebHandler(BaseHTTPRequestHandler):
             return False
         return True
 
+    def _redirect(self, location: str) -> None:
+        self._empty(301, {"Location": location, "Cache-Control": "no-store"})
+
     def do_GET(self) -> None:
         parsed = urllib.parse.urlsplit(self.path)
-        assets = {
-            "/": ("index.html", "text/html; charset=utf-8"),
-            "/assets/app.css": ("app.css", "text/css; charset=utf-8"),
-            "/assets/app.js": ("app.js", "text/javascript; charset=utf-8"),
-            "/triage": ("triage.html", "text/html; charset=utf-8"),
-            "/assets/triage.js": ("triage.js", "text/javascript; charset=utf-8"),
-            "/assets/triage.css": ("triage.css", "text/css; charset=utf-8"),
-            "/assessment": ("assessment.html", "text/html; charset=utf-8"),
-            "/assets/assessment.js": ("assessment.js", "text/javascript; charset=utf-8"),
-            "/assets/assessment.css": ("assessment.css", "text/css; charset=utf-8"),
-        }
-        if parsed.path in assets:
-            name, content_type = assets[parsed.path]
-            body = (Path(__file__).parent / "web_assets" / name).read_bytes()
-            self._send(body, content_type=content_type)
+        if parsed.path in REDIRECTS:
+            self._redirect(REDIRECTS[parsed.path])
+            return
+        if parsed.path.startswith("/assets/"):
+            self._asset(urllib.parse.unquote(parsed.path[len("/assets/") :]))
+            return
+        if parsed.path in HTML_ROUTES:
+            self._asset(HTML_ROUTES[parsed.path])
             return
         if parsed.path == "/favicon.ico":
             self._send(b"", status=204, content_type="image/x-icon")
@@ -2201,7 +2352,10 @@ class WebHandler(BaseHTTPRequestHandler):
             if parsed.path == "/api/tree":
                 self._json(
                     state.index.tree(
-                        *filters[:8], *ranking_args, activity=filters[13]
+                        *filters[:8],
+                        *ranking_args,
+                        activity=filters[13],
+                        jev_run=query.get("jev_run", [""])[0],
                     )
                 )
                 return

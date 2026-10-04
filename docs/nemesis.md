@@ -11,11 +11,12 @@ WebUI with SMB credentials, select a file, and choose one of three actions:
 
 - **View file** opens a supported preview inside Shrawler.
 - **Download** saves the file through your browser.
-- **Send to Nemesis** retrieves and submits the file without a browser download.
+- **Queue for collection** saves a collection manifest that retrieves and
+  submits the file without a browser download.
 
-Ranked review includes a **View / download / Nemesis** link to the same file
-actions. These actions use the inventory's latest observation for that path;
-an older ranking remains a historical snapshot.
+The expanded row and the candidate tables both link to the same file actions.
+These actions use the inventory's latest observation for that path; an older
+ranking remains a historical snapshot.
 
 ```bash
 shrawler web 'DOMAIN/user@server' ./results/shrawler.db

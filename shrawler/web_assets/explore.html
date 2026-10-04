@@ -1,0 +1,131 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <title>Shrawler · Explore</title>
+  <link rel="stylesheet" href="/assets/css/tokens.css">
+  <link rel="stylesheet" href="/assets/css/base.css">
+  <link rel="stylesheet" href="/assets/css/components.css">
+  <link rel="stylesheet" href="/assets/css/explore.css">
+</head>
+<body>
+  <!-- The header is mounted by core.js so both screens share one definition. -->
+  <main class="workspace">
+    <section class="explore-head">
+      <div>
+        <h1>Explore</h1>
+        <p><strong>Find the file that matters.</strong> Read the table to find sensitive files, then view, download, or queue them for collection.</p>
+      </div>
+      <p class="local-badge" id="mode-badge"><span>Connecting…</span></p>
+    </section>
+
+    <section class="search-bar" aria-label="Search and filters">
+      <div class="search-row">
+        <div class="search-field">
+          <span class="search-field__icon" id="search-icon" aria-hidden="true"></span>
+          <span class="spinner spinner--inline search-field__spinner" id="search-spinner" hidden></span>
+          <label class="sr-only" for="query">Search saved file inventory</label>
+          <input id="query" type="search" placeholder="Search filenames, paths, hosts…" autocomplete="off" autofocus>
+          <button id="clear-query" class="copy-btn search-field__clear" type="button" aria-label="Clear search" hidden></button>
+          <kbd aria-label="Keyboard shortcut: slash">/</kbd>
+        </div>
+        <button id="filter-toggle" class="btn" type="button" aria-haspopup="dialog" aria-expanded="false">Filters</button>
+        <div class="segmented" role="group" aria-label="Results view">
+          <button id="view-table" type="button" aria-pressed="true">Table</button>
+          <button id="view-tree" type="button" aria-pressed="false">Tree</button>
+        </div>
+      </div>
+      <div class="engine-bar" aria-label="Ranking engine selection">
+        <label class="engine-field">
+          <span class="engine-field__label engine-field__label--rule">Ranking</span>
+          <select id="ranking-run" class="select"></select>
+        </label>
+        <label class="engine-field">
+          <span class="engine-field__label engine-field__label--ai">AI</span>
+          <select id="jev-run" class="select"></select>
+        </label>
+        <label class="checkbox engine-blend">
+          <input id="blend" type="checkbox" checked>
+          <span>blend into Combined</span>
+        </label>
+        <p class="engine-note" id="engine-note"></p>
+      </div>
+      <div id="active-filters" class="filter-chips" aria-label="Active filters" hidden></div>
+    </section>
+
+    <section class="results" aria-labelledby="results-heading">
+      <h2 id="results-heading" class="sr-only">Inventory results</h2>
+      <div class="results-toolbar">
+        <p id="summary" aria-live="polite">Loading inventory…</p>
+        <div class="btn-row results-toolbar__actions">
+          <div id="pending-updates" class="pending-updates" role="status" hidden>
+            <span id="pending-label"></span>
+            <button id="show-updates" class="btn btn--sm" type="button">Show updates</button>
+          </div>
+          <div id="tree-actions" class="btn-row" hidden>
+            <button id="expand-tree" class="btn btn--sm btn--ghost" type="button">Expand all</button>
+            <button id="collapse-tree" class="btn btn--sm btn--ghost" type="button">Collapse all</button>
+          </div>
+        </div>
+      </div>
+
+      <div id="selection-bar" class="selection-bar" hidden>
+        <div class="selection-bar__summary">
+          <strong id="selection-count">0 selected</strong>
+          <span id="selection-size"></span>
+        </div>
+        <div class="btn-row">
+          <button id="select-percent" class="btn btn--sm" type="button">Act on a percentage…</button>
+          <button id="download-selection" class="btn btn--sm" type="button">Download</button>
+          <button id="queue-selection" class="btn btn--sm btn--primary" type="button">Queue for collection</button>
+          <button id="clear-selection" class="btn btn--sm btn--ghost" type="button">Clear</button>
+        </div>
+      </div>
+
+      <div id="error-banner" class="banner" role="alert" hidden></div>
+
+      <div id="table-view-root">
+        <div class="grid-shell explore-grid-shell">
+          <table class="data-grid explore-grid">
+            <colgroup>
+              <col class="col-check"><col class="col-type"><col class="col-file"><col class="col-location">
+              <col class="col-score"><col class="col-score-narrow"><col class="col-score-narrow">
+              <col class="col-size"><col class="col-modified"><col class="col-chevron">
+            </colgroup>
+            <thead>
+              <tr>
+                <th scope="col"><input id="select-page" class="file-checkbox" type="checkbox" aria-label="Select all files on this page"></th>
+                <th scope="col"><button class="sort-btn" type="button" data-sort="type">Type<span class="sort-caret" aria-hidden="true"></span></button></th>
+                <th scope="col"><button class="sort-btn" type="button" data-sort="file">File / path / evidence<span class="sort-caret" aria-hidden="true"></span></button></th>
+                <th scope="col"><button class="sort-btn" type="button" data-sort="location">Location<span class="sort-caret" aria-hidden="true"></span></button></th>
+                <th class="numeric" scope="col"><button class="sort-btn" type="button" data-sort="combined">Combined<span class="sort-caret" aria-hidden="true"></span></button></th>
+                <th class="numeric" scope="col"><button class="sort-btn" type="button" data-sort="priority">Rule<span class="sort-caret" aria-hidden="true"></span></button></th>
+                <th class="numeric" scope="col"><button class="sort-btn" type="button" data-sort="jev">AI<span class="sort-caret" aria-hidden="true"></span></button></th>
+                <th class="numeric" scope="col"><button class="sort-btn" type="button" data-sort="size">Size<span class="sort-caret" aria-hidden="true"></span></button></th>
+                <th class="numeric" scope="col"><button class="sort-btn" type="button" data-sort="modified">Modified<span class="sort-caret" aria-hidden="true"></span></button></th>
+                <th scope="col"><span class="sr-only">Details</span></th>
+              </tr>
+            </thead>
+            <tbody id="rows"></tbody>
+          </table>
+        </div>
+        <nav class="pagination" aria-label="Results pagination">
+          <button id="previous" class="btn btn--sm" type="button">Previous</button>
+          <span id="page">Page 1</span>
+          <button id="next" class="btn btn--sm" type="button">Next</button>
+        </nav>
+      </div>
+
+      <div id="tree-view-root" hidden>
+        <div class="tree-shell">
+          <div id="tree-loading" class="tree-loading" hidden><span class="spinner"></span><span>Loading hierarchy…</span></div>
+          <ul id="tree" class="file-tree" role="tree" aria-label="Filtered file hierarchy"></ul>
+        </div>
+      </div>
+    </section>
+  </main>
+  <script type="module" src="/assets/js/explore.js"></script>
+</body>
+</html>

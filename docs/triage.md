@@ -40,18 +40,17 @@ The inventory is opened read-only. Results are stored beside it in
 be writable for ranking. The original scan database and downloaded evidence are
 not modified.
 
-## Ranked review in the WebUI
+## Rule ranking in the WebUI
 
 ```bash
 shrawler web --offline ./results/shrawler.db
 ```
 
-Open the printed URL and select **Ranked review**. Offline mode requires no
-SMB credentials and rejects remote preview/download requests. Ranked review is
-also available in a normal authenticated WebUI session; scoring itself always
-uses saved metadata.
+Open the printed URL and select the **Rule ranking** tab on `/score`. Offline
+mode requires no SMB credentials and rejects remote preview/download requests.
+Scoring itself always uses saved metadata, in either mode.
 
-Select a source scan, then preview or save a ranking. **Customize rules** provides
+Select a source scan, then preview or save a ranking. **Rule builder** provides
 a small builder for filename fragments, extensions, nearby directory names,
 sibling markers, and exact subtree labels. Its output goes into an editable TOML
 document. Import/export uses the same custom-rule format as the CLI. Exported

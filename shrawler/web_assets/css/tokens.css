@@ -1,0 +1,138 @@
+/* Shrawler design tokens.
+ *
+ * Every custom property the UI reads is declared here. Screen stylesheets use
+ * these names and nothing else, so the whole application can be re-themed from
+ * this one file.
+ *
+ * Colour carries meaning, not decoration. Two engine hues stay fixed across
+ * every surface (violet for the deterministic rule ranking, cyan for the
+ * probabilistic AI assessment), and the four-band severity ramp belongs to
+ * Combined alone. Learning "rail colour = severity, hue = which engine" once
+ * is the entire visual contract.
+ */
+
+/* Webfonts come from a CDN so an air-gapped install never carries binaries.
+ * font-display:swap means text paints immediately in the fallback stack, and
+ * the stacks below are chosen to look deliberate on their own. */
+@font-face {
+  font-family: "Space Grotesk";
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url(https://cdn.jsdelivr.net/npm/@fontsource/space-grotesk@5.0.20/files/space-grotesk-latin-400-normal.woff2) format("woff2");
+}
+@font-face {
+  font-family: "Space Grotesk";
+  font-style: normal;
+  font-weight: 500;
+  font-display: swap;
+  src: url(https://cdn.jsdelivr.net/npm/@fontsource/space-grotesk@5.0.20/files/space-grotesk-latin-500-normal.woff2) format("woff2");
+}
+@font-face {
+  font-family: "Space Grotesk";
+  font-style: normal;
+  font-weight: 600;
+  font-display: swap;
+  src: url(https://cdn.jsdelivr.net/npm/@fontsource/space-grotesk@5.0.20/files/space-grotesk-latin-600-normal.woff2) format("woff2");
+}
+@font-face {
+  font-family: "Space Grotesk";
+  font-style: normal;
+  font-weight: 700;
+  font-display: swap;
+  src: url(https://cdn.jsdelivr.net/npm/@fontsource/space-grotesk@5.0.20/files/space-grotesk-latin-700-normal.woff2) format("woff2");
+}
+@font-face {
+  font-family: "JetBrains Mono";
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url(https://cdn.jsdelivr.net/npm/@fontsource/jetbrains-mono@5.0.20/files/jetbrains-mono-latin-400-normal.woff2) format("woff2");
+}
+@font-face {
+  font-family: "JetBrains Mono";
+  font-style: normal;
+  font-weight: 500;
+  font-display: swap;
+  src: url(https://cdn.jsdelivr.net/npm/@fontsource/jetbrains-mono@5.0.20/files/jetbrains-mono-latin-500-normal.woff2) format("woff2");
+}
+@font-face {
+  font-family: "JetBrains Mono";
+  font-style: normal;
+  font-weight: 600;
+  font-display: swap;
+  src: url(https://cdn.jsdelivr.net/npm/@fontsource/jetbrains-mono@5.0.20/files/jetbrains-mono-latin-600-normal.woff2) format("woff2");
+}
+
+:root {
+  color-scheme: dark;
+
+  /* Surfaces: near-black with a faint blue cast, hairline borders. */
+  --bg: hsl(215 24% 6%);
+  --surface-1: hsl(215 18% 9%);
+  --surface-2: hsl(214 16% 12%);
+  --surface-3: hsl(213 14% 16%);
+  --surface-4: hsl(213 13% 21%);
+  --line: hsl(214 12% 19%);
+  --line-soft: hsl(214 12% 15%);
+  --line-strong: hsl(213 11% 30%);
+
+  --text: hsl(206 26% 93%);
+  --text-dim: hsl(210 12% 70%);
+  --text-mute: hsl(211 10% 52%);
+  --text-faint: hsl(212 9% 40%);
+
+  /* Engine identity. Fixed everywhere; never reused for decoration. */
+  --rule: hsl(255 74% 74%);
+  --rule-dim: hsl(255 40% 56%);
+  --rule-wash: hsl(255 60% 60% / 0.13);
+  --ai: hsl(186 68% 56%);
+  --ai-dim: hsl(186 38% 44%);
+  --ai-wash: hsl(186 60% 50% / 0.13);
+  --combined: hsl(206 26% 93%);
+
+  /* Severity ramp: four bands, owned by Combined. */
+  --sev-minimal: hsl(212 12% 46%);
+  --sev-likely: hsl(172 48% 44%);
+  --sev-strong: hsl(36 80% 57%);
+  --sev-immediate: hsl(2 68% 60%);
+  --sev-none: hsl(212 10% 38%);
+
+  /* Action colours. Accent is reserved for retrieval and collection. */
+  --accent: hsl(36 80% 57%);
+  --accent-bright: hsl(36 88% 68%);
+  --accent-wash: hsl(36 80% 57% / 0.12);
+  --accent-line: hsl(36 55% 42%);
+  --danger: hsl(2 68% 60%);
+  --danger-wash: hsl(2 68% 60% / 0.12);
+  --success: hsl(146 46% 50%);
+  --success-wash: hsl(146 46% 50% / 0.12);
+  --warn: hsl(36 80% 57%);
+
+  --font-ui: "Space Grotesk", ui-sans-serif, system-ui, "Segoe UI", Roboto, sans-serif;
+  --font-data: "JetBrains Mono", ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
+
+  /* One fixed density. The row carries name, path, and evidence at 38px. */
+  --row-height: 38px;
+  --row-line: 15px;
+  --row-sub: 13px;
+  --control-height: 32px;
+  --header-height: 52px;
+  --radius-sm: 3px;
+  --radius-md: 6px;
+  --radius-lg: 10px;
+
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 24px;
+  --space-6: 32px;
+
+  --focus-ring: 0 0 0 2px hsl(215 24% 6%), 0 0 0 4px var(--accent);
+  --shadow-1: 0 1px 2px hsl(215 40% 3% / 0.5);
+  --shadow-2: 0 8px 24px hsl(215 40% 3% / 0.55), 0 2px 6px hsl(215 40% 3% / 0.4);
+  --shadow-3: 0 18px 48px hsl(215 40% 2% / 0.7);
+
+  --ease: 120ms cubic-bezier(0.2, 0, 0.2, 1);
+}

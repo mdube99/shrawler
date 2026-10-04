@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <title>Shrawler · Score</title>
+  <link rel="stylesheet" href="/assets/css/tokens.css">
+  <link rel="stylesheet" href="/assets/css/base.css">
+  <link rel="stylesheet" href="/assets/css/components.css">
+  <link rel="stylesheet" href="/assets/css/score.css">
+</head>
+<body>
+  <main class="workspace">
+    <section class="score-head">
+      <h1>Score</h1>
+      <p>Rank every observed file with deterministic rules, assess it with a decision model, then queue what matters for collection. Both engines run independently and concurrently.</p>
+    </section>
+
+    <!-- Status strip stays visible on both tabs: the engines are independent,
+         so an AI run started here keeps reporting while you work on rules. -->
+    <section class="status-strip" aria-label="Engine status">
+      <div class="engine-status" id="status-rule">
+        <span class="engine-status__hue engine-status__hue--rule" aria-hidden="true"></span>
+        <span class="engine-status__name">Rule ranking</span>
+        <span class="engine-status__state">idle</span>
+        <div class="engine-status__meter"><div class="meter__fill"></div></div>
+        <span class="engine-status__detail"></span>
+      </div>
+      <div class="engine-status" id="status-ai">
+        <span class="engine-status__hue engine-status__hue--ai" aria-hidden="true"></span>
+        <span class="engine-status__name">AI assessment</span>
+        <span class="engine-status__state">idle</span>
+        <div class="engine-status__meter"><div class="meter__fill"></div></div>
+        <span class="engine-status__detail"></span>
+      </div>
+      <button id="cancel-rule" class="btn btn--sm btn--danger" type="button" hidden>Cancel rule run</button>
+      <button id="cancel-ai" class="btn btn--sm btn--danger" type="button" hidden>Cancel AI run</button>
+    </section>
+
+    <nav class="tabs" role="tablist" aria-label="Scoring engine">
+      <button id="tab-rule" class="tab" type="button" role="tab" aria-selected="true" aria-controls="panel-rule">Rule ranking</button>
+      <button id="tab-ai" class="tab" type="button" role="tab" aria-selected="false" aria-controls="panel-ai">AI assessment</button>
+    </nav>
+
+    <div id="error-banner" class="banner" role="alert" hidden></div>
+
+    <section id="panel-rule" class="tab-panel" role="tabpanel" aria-labelledby="tab-rule"></section>
+    <section id="panel-ai" class="tab-panel" role="tabpanel" aria-labelledby="tab-ai" hidden></section>
+    <section id="panel-collection" class="collection-region"></section>
+  </main>
+  <script type="module" src="/assets/js/score.js"></script>
+</body>
+</html>

@@ -237,16 +237,27 @@ shrawler web 'DOMAIN/user@server' ./results/shrawler.db
 
 Shrawler prints the local URL without opening a browser.
 
-The WebUI provides:
+The WebUI has two screens. **Explore** is the landing screen; **Score** covers
+both ranking engines and the collection queue.
 
-- Paginated Table view for dense file review
-- Lazy-loading Tree view grouped by host, share, and folder
-- Search by filename, path, host, share, or extension
-- Inline file metadata and copyable UNC paths
-- Rule, triage, share-root permission, and collection-status filters
+Explore provides:
+
+- Paginated Table view for dense file review, with lazy-loading Tree view
+- Search by filename, path, host, share, or extension, plus a collapsed filter panel
+- Combined, Rule, and AI scores side by side, with severity on a row rail
+- Run selection in place of a filter: deselecting a run re-weights Combined
+- Every view state carried in the URL, so any table state is a shareable link
+- Shift-click range selection and percentage actions with a byte preflight
 - Findings and collection indicators with evidence from each file's latest scan
 - Conservative text, image, and PDF previews
 - Live file retrieval from the recorded SMB source
+
+Score provides:
+
+- A status strip that keeps reporting both engines whichever tab is open
+- Rule ranking with a rule builder, saved runs, and per-file explanations
+- AI assessment with endpoint checks, coverage, billed tokens, and candidates
+- A shared collection queue, file families, and review decisions
 
 The server binds to `127.0.0.1`. Local browser access does not require a WebUI
 token by default. Add `--token-auth` to require a random bearer token:
@@ -346,8 +357,8 @@ shrawler triage explain ./results/shrawler.db -- FILE_ID
 Triage requires no SMB credentials or remote reads. Scores express review
 priority, with per-rule evidence; they do not confirm sensitive content. See
 [Offline metadata triage](docs/triage.md) for substring rules, sibling context,
-subtree labels, and scan-specific ranking history. Open the **Ranked review**
-page to build, preview, and save rules from the WebUI:
+subtree labels, and scan-specific ranking history. Open the **Rule ranking**
+tab on the WebUI's Score screen to build, preview, and save rules:
 
 ```bash
 shrawler web --offline ./results/shrawler.db
