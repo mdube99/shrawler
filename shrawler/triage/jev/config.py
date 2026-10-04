@@ -17,9 +17,14 @@ ADAPTER_VERSION = "systemone-1"
 # blocks are now labeled inside one shared state. Historical runs keep their
 # stored context hashes and payloads; these versions only affect new work.
 CONTEXT_VERSION = "2"
-PLANNER_VERSION = "2"
+# Planner version 3 re-queues byte-budget overflow into the next batch (instead
+# of dropping it) and orders candidates by presentation priority. Both change
+# which files share a request, so the exact-request cache identity changes.
+PLANNER_VERSION = "3"
 PAYLOAD_VERSION = "2"
-RUBRIC_VERSION = "2"
+# Rubric version 3 sends compact criterion labels per question; the full rubric
+# text is carried once in the shared objective rather than repeated per file.
+RUBRIC_VERSION = "3"
 PREPROCESSING_VERSION = "1"
 
 # Planning scopes. ``directory`` keeps one source directory per request (the
@@ -72,6 +77,11 @@ PRIORITY_NAMES = {
     "3": "Strong",
     "4": "Immediate",
 }
+# Compact per-question criteria. The objective already states every level's full
+# description once, so repeating it on each file only inflates request tokens.
+# Keys must match ``RUBRIC``/``PRIORITY_LEVELS``; the client validates the model's
+# returned choice against these keys.
+RUBRIC_CRITERIA = {key: PRIORITY_NAMES[key] for key in RUBRIC}
 # A rule-missed file is surfaced for rule expansion only when the model rates it
 # at least this strongly (3 = "Strong", 4 = "Immediate").
 PRIORITY_INSPECT_MIN = 3
@@ -175,7 +185,11 @@ class JevConfig:
     max_questions_per_request: int = 200
     request_timeout_seconds: int = 120
     retries: int = 2
-    workers: int = 4
+    # Bounded simultaneous decision requests. Higher values are the primary
+    # lever once request count is minimal; sweep 1/2/4/8 against the real route
+    # (scripts/benchmark_jev.py --sweep-workers) and back off if the gateway
+    # serializes or throttles.
+    workers: int = 8
     rate_limit_per_minute: int = 0
     time_budget_seconds: int = 0
     max_request_bytes: int = 0

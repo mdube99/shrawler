@@ -8,6 +8,8 @@ returns an ``answers`` map keyed by question ID. The requests are issued with
 import json
 import time
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 from typing import Any, Dict, Optional
 
 import requests
@@ -25,6 +27,19 @@ class InputError(ValueError):
 
 class AuthError(ValueError):
     """The endpoint rejected our credentials; retrying cannot help."""
+
+
+class ThrottleError(Exception):
+    """The endpoint asked us to slow down (HTTP 429/503).
+
+    ``retry_after`` carries the server's requested cooldown in seconds, or 0
+    when the response did not specify one. The coordinator applies a coordinated
+    pause so concurrent workers do not amplify a rate limit.
+    """
+
+    def __init__(self, message: str, retry_after: float = 0.0) -> None:
+        super().__init__(message)
+        self.retry_after = max(0.0, float(retry_after or 0.0))
 
 
 @dataclass
@@ -194,6 +209,11 @@ class JevClient:
             )
         if _is_input_error(response.status_code, message):
             raise InputError(f"input budget exceeded ({message})")
+        if response.status_code in (429, 503):
+            raise ThrottleError(
+                f"decision endpoint throttled (HTTP {response.status_code}): {message}",
+                _retry_after(response),
+            )
         raise ProtocolError(
             f"decision endpoint returned {response.status_code}: {message}"
         )
@@ -252,6 +272,33 @@ def _error_message(body: Dict[str, Any]) -> str:
 def _is_input_error(status: int, message: str) -> bool:
     lowered = message.casefold()
     return status == 413 or "max_tokens_exceeded" in lowered or "too long" in lowered
+
+
+def _retry_after(response: Any) -> float:
+    """Seconds from a ``Retry-After`` header, accepting delay or HTTP-date."""
+    headers = getattr(response, "headers", None)
+    if not headers:
+        return 0.0
+    try:
+        value = headers.get("Retry-After")
+    except AttributeError:
+        return 0.0
+    if not value:
+        return 0.0
+    text = str(value).strip()
+    try:
+        return max(0.0, float(text))
+    except ValueError:
+        pass
+    try:
+        when = parsedate_to_datetime(text)
+    except (TypeError, ValueError):
+        return 0.0
+    if when is None:
+        return 0.0
+    if when.tzinfo is None:
+        when = when.replace(tzinfo=timezone.utc)
+    return max(0.0, (when - datetime.now(timezone.utc)).total_seconds())
 
 
 def _selected_choice(question: Dict[str, Any], answer: Dict[str, Any]) -> str:

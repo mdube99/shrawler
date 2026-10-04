@@ -28,6 +28,7 @@ from .client import (
     DecisionResponse,
     InputError,
     JevClient,
+    ThrottleError,
     load_payload,
 )
 from .config import JevConfig
@@ -38,12 +39,18 @@ from .storage import JevStore, utc_now
 # A long gateway request must not outlive the lease; renew it independently of
 # how long a single dispatch blocks.
 LEASE_HEARTBEAT_SECONDS = 60.0
-WORK_STATUSES = ("pending", "failed", "input-error")
+# Every file status that is not a durable terminal answer. ``planned`` and
+# ``in-flight`` are included so finalization can never report a run complete
+# while work is still queued.
+WORK_STATUSES = ("pending", "planned", "in-flight", "failed", "input-error")
 # Progress is emitted at most this often; the final status is always emitted.
 PROGRESS_INTERVAL_SECONDS = 0.25
 # Bounded exponential backoff (with jitter) between retry waves.
 RETRY_BACKOFF_BASE_SECONDS = 0.05
 RETRY_BACKOFF_MAX_SECONDS = 0.5
+# A gateway Retry-After longer than this is clamped so one throttled request
+# cannot stall the run indefinitely.
+MAX_THROTTLE_SECONDS = 60.0
 # Maximum time the coordinator blocks waiting for a completion before it
 # re-checks cancellation, deadline, rate limit, and lease heartbeat.
 MAX_WAIT_SECONDS = 0.5
@@ -236,6 +243,9 @@ class JevRunner:
         peak_in_flight = 0
         next_heartbeat = time.monotonic() + 30
         last_progress = 0.0
+        # Monotonic instant before which admission stays paused after the
+        # gateway asked us to slow down (429/503 with Retry-After).
+        throttle_until = 0.0
 
         def emit_progress(force: bool = False) -> None:
             nonlocal last_progress
@@ -248,29 +258,33 @@ class JevRunner:
 
         def claim_next() -> Optional[WorkItem]:
             nonlocal reused_requests
-            row = self.store.next_planned_batch(run_id)
-            if row is None:
-                return None
-            batch_id = str(row["id"])
-            members = tuple(self.store.batch_members(batch_id))
-            if not members:
-                self.store.finish_batch(batch_id, "failed", error="empty batch")
-                return None
-            cached = self.store.cached_completed_batch(
-                run_id, str(row["cache_key"]), batch_id
-            )
-            if cached is not None and self._reuse_cache(row, cached):
-                reused_requests += 1
-                return None
-            self.store.claim_batch(run_id, batch_id, members)
-            return WorkItem(
-                batch_id=batch_id,
-                run_id=run_id,
-                request_id=str(row["request_id"]),
-                payload=load_payload(row),
-                members=members,
-                context_hashes=self.store.member_context_hashes(batch_id),
-            )
+            # A cache-reused batch is completed and skipped here rather than
+            # returned as ``None``: returning None used to end admission, which
+            # could report a run complete while later planned batches remained.
+            while True:
+                row = self.store.next_planned_batch(run_id)
+                if row is None:
+                    return None
+                batch_id = str(row["id"])
+                members = tuple(self.store.batch_members(batch_id))
+                if not members:
+                    self.store.finish_batch(batch_id, "failed", error="empty batch")
+                    continue
+                cached = self.store.cached_completed_batch(
+                    run_id, str(row["cache_key"]), batch_id
+                )
+                if cached is not None and self._reuse_cache(row, cached):
+                    reused_requests += 1
+                    continue
+                self.store.claim_batch(run_id, batch_id, members)
+                return WorkItem(
+                    batch_id=batch_id,
+                    run_id=run_id,
+                    request_id=str(row["request_id"]),
+                    payload=load_payload(row),
+                    members=members,
+                    context_hashes=self.store.member_context_hashes(batch_id),
+                )
 
         def handle_success(result: WorkResult) -> None:
             nonlocal persistence_ms
@@ -319,7 +333,7 @@ class JevRunner:
             stop_reason = "auth"
 
         def process(result: WorkResult) -> None:
-            nonlocal remote_ms_sum, completed_requests, peak_in_flight
+            nonlocal remote_ms_sum, completed_requests, peak_in_flight, throttle_until
             remote_ms_sum += result.duration_ms
             peak_in_flight = max(peak_in_flight, len(active))
             if result.error is None and result.response is not None:
@@ -329,6 +343,14 @@ class JevRunner:
                 handle_auth(result)
             elif isinstance(result.error, InputError):
                 handle_input(result)
+            elif isinstance(result.error, ThrottleError):
+                delay = float(getattr(result.error, "retry_after", 0.0) or 0.0)
+                if delay <= 0:
+                    delay = RETRY_BACKOFF_MAX_SECONDS
+                throttle_until = max(
+                    throttle_until, time.monotonic() + min(delay, MAX_THROTTLE_SECONDS)
+                )
+                handle_retry(result)
             else:
                 handle_retry(result)
 
@@ -336,8 +358,18 @@ class JevRunner:
         lease_thread.start()
         try:
             self._requeue_expired(run_id)
-            # Fast-fail canary: one planned batch before the pool opens.
-            if not self.store.has_successful_batch(run_id):
+            # Fast-fail canary: one planned batch before the pool opens. It is
+            # skipped once an earlier run with the same endpoint/model/objective
+            # and input-shaping versions already answered a request, so repeat
+            # assessments do not pay a serial round-trip. Any deployment change
+            # that alters the fingerprint forces a fresh canary, which still
+            # fails on exactly one request for a bad key. (The secret value is
+            # deliberately not part of the fingerprint, so rotating only the key
+            # is not detected here; a bad key still aborts on the first AuthError
+            # after at most one in-flight wave.)
+            if not self.store.has_successful_batch(
+                run_id
+            ) and not self.store.has_proven_credentials(self.config.fingerprint()):
                 canary = claim_next()
                 if canary is not None:
                     process(self._execute(canary))
@@ -356,6 +388,8 @@ class JevRunner:
                             stop_reason = "paused"
                     while stop_reason is None and len(active) < workers:
                         now = time.monotonic()
+                        if now < throttle_until:
+                            break
                         if limiter.blocked(now):
                             break
                         work = claim_next()
@@ -366,6 +400,18 @@ class JevRunner:
                     if not active:
                         if stop_reason is not None:
                             break
+                        # Planned work with an empty pool means admission is
+                        # gated (throttle or rate limit): wait for the gate to
+                        # open instead of replanning or reporting completion.
+                        if self.store.planned_batch_count(run_id) > 0:
+                            gate = self._wait_timeout(
+                                limiter, deadline, next_heartbeat, throttle_until
+                            )
+                            if gate > 0:
+                                time.sleep(min(gate, MAX_WAIT_SECONDS))
+                            continue
+                        # A pending file without a planned batch (retry or split
+                        # overflow) must be replanned before finishing.
                         if self.store.status_counts(run_id).get("pending", 0) > 0:
                             if self._replan(run_id):
                                 self._retry_pending = False
@@ -374,7 +420,9 @@ class JevRunner:
                             break
                         break
                     peak_in_flight = max(peak_in_flight, len(active))
-                    timeout = self._wait_timeout(limiter, deadline, next_heartbeat)
+                    timeout = self._wait_timeout(
+                        limiter, deadline, next_heartbeat, throttle_until
+                    )
                     done, _ = concurrent.futures.wait(
                         active, timeout=timeout,
                         return_when=concurrent.futures.FIRST_COMPLETED,
@@ -420,7 +468,9 @@ class JevRunner:
                     status = "partial"
             if stop_reason == "paused":
                 status = "paused"
-            elif stop_reason == "cancelled" and status == "completed":
+            elif stop_reason == "cancelled":
+                # Cancellation is a deliberate stop, not a coverage failure; the
+                # durable ledger already holds every completed answer.
                 status = "cancelled"
             wall_ms = int((time.monotonic() - wall_started) * 1000)
             self.metrics.update(
@@ -464,12 +514,15 @@ class JevRunner:
         limiter: RateLimiter,
         deadline: Optional[float],
         next_heartbeat: float,
+        throttle_until: float = 0.0,
     ) -> float:
         now = time.monotonic()
         timeout = MAX_WAIT_SECONDS
         if deadline is not None:
             timeout = min(timeout, max(0.0, deadline - now))
         timeout = min(timeout, max(0.0, next_heartbeat - now))
+        if throttle_until > now:
+            timeout = min(timeout, throttle_until - now)
         if limiter.per_minute > 0:
             timeout = min(timeout, limiter.next_slot(now) or MAX_WAIT_SECONDS)
         return max(0.0, timeout)

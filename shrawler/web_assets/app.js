@@ -255,10 +255,14 @@
     }
   }
 
+  // In-progress runs are selectable too: assessed files appear as batches land,
+  // so the analyst sees useful results before the whole inventory is done.
+  const JEV_USABLE_STATUSES = ['completed', 'partial', 'running', 'paused'];
+
   function appendJevOptions(runs) {
     const selected = $('jev-run').value;
     while ($('jev-run').options.length > 1) $('jev-run').remove(1);
-    runs.filter(run => ['completed', 'partial'].includes(run.status)).forEach(run => {
+    runs.filter(run => JEV_USABLE_STATUSES.includes(run.status)).forEach(run => {
       const option = document.createElement('option');
       option.value = run.id;
       option.textContent = `${run.created_at} · ${Number(run.total_observed || 0).toLocaleString()} files · ${run.status}`;
@@ -269,7 +273,7 @@
   }
 
   function updateJevControls() {
-    const available = state.jevRuns.some(run => ['completed', 'partial'].includes(run.status));
+    const available = state.jevRuns.some(run => JEV_USABLE_STATUSES.includes(run.status));
     $('jev-run').disabled = !available;
     const sortOption = $('sort').querySelector('option[value="jev"]');
     if (sortOption) sortOption.disabled = !available;

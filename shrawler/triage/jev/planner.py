@@ -18,7 +18,7 @@ sections once per batch and its result is cached by exact text.
 
 import json
 import uuid
-from collections import OrderedDict
+from collections import OrderedDict, deque
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, Iterator, List, Optional, Tuple
 
@@ -27,7 +27,7 @@ from .config import (
     PAYLOAD_VERSION,
     PLANNER_VERSION,
     PREPROCESSING_VERSION,
-    RUBRIC,
+    RUBRIC_CRITERIA,
     JevConfig,
     canonical,
     fingerprint,
@@ -43,6 +43,25 @@ CONTEXT_CACHE_SIZE = 256
 # single fsync per batch dominated planning at scale; a lost uncommitted tail
 # is safe because those files remain pending and are replanned.
 COMMIT_EVERY_BATCHES = 64
+# Conservative fallback when no tokenizer is configured. Natural-language and
+# JSON fragments average roughly three to four UTF-8 bytes per token, so one
+# token per three bytes keeps a safety margin without the ~4x overcount of a
+# pure one-token-per-byte estimator. A configured ``tokenize_endpoint`` still
+# measures complete payload sections exactly.
+FALLBACK_BYTES_PER_TOKEN = 3
+
+
+def _fallback_tokens(text: str) -> int:
+    """Token estimate for text when no tokenizer is available."""
+    return max(1, -(-len(text.encode("utf-8")) // FALLBACK_BYTES_PER_TOKEN))
+
+
+def token_budgets(config: JevConfig) -> Tuple[int, int]:
+    """Effective (input, longest-question) token budgets after headroom."""
+    headroom = (100 - config.token_headroom_percent) / 100.0
+    max_input = max(1, int(config.max_input_tokens * headroom))
+    max_longest = max(1, int(config.max_state_longest_question_tokens * headroom))
+    return max_input, max_longest
 
 
 class CandidateTooLargeError(ValueError):
@@ -72,10 +91,10 @@ class TokenCounter:
             value = self.client.count_tokens(text)
             if value is not None:
                 return int(value) + self.config.state_overhead_tokens
-        # One token per UTF-8 byte plus a fixed per-fragment overhead. This is
-        # deliberately conservative so a real 413 is handled by the split path,
-        # not by silently dropping candidates.
-        return len(text.encode("utf-8")) + self.config.state_overhead_tokens
+        # A calibrated per-byte estimate plus a fixed per-fragment overhead. It
+        # stays conservative enough that a real 413 is handled by the split
+        # path, never by silently dropping candidates.
+        return _fallback_tokens(text) + self.config.state_overhead_tokens
 
     def measure(self, text: str) -> int:
         if not self.config.tokenize_endpoint:
@@ -100,11 +119,11 @@ def question_for(
     return {
         "type": "choice",
         "instructions": (
-            f"Assess candidate {file_id}{where} using that directory block and "
-            "the candidate's own metadata. Return the inspection-priority level "
-            "that the declared objective and rubric support."
+            f"Assess candidate {file_id}{where} using its directory block and "
+            "metadata. Return the inspection-priority level the objective and "
+            "rubric support."
         ),
-        "criteria": dict(RUBRIC),
+        "criteria": dict(RUBRIC_CRITERIA),
     }
 
 
@@ -234,9 +253,11 @@ class _Packer:
         self.context_loader = context_loader
         self.max_directories = max_directories
         # Apply the estimator safety headroom once, up front.
-        headroom = (100 - config.token_headroom_percent) / 100.0
-        self.max_input = max(1, int(config.max_input_tokens * headroom))
-        self.max_longest = max(1, int(config.max_state_longest_question_tokens * headroom))
+        self.max_input, self.max_longest = token_budgets(config)
+        # Entry cap. It starts at the configured question cap and can shrink when
+        # exact byte validation drops trailing entries, so future batches stop
+        # at the size that actually fit instead of re-accumulating overflow.
+        self.max_entries = config.max_questions_per_request
         self.reset()
 
     def reset(self) -> None:
@@ -279,7 +300,7 @@ class _Packer:
                 return False
             if projected_state + max(self.longest_question, question_cost) > self.max_longest:
                 return False
-            if len(self.entries) >= self.config.max_questions_per_request:
+            if len(self.entries) >= self.max_entries:
                 return False
         if (
             projected_state + projected_questions > self.max_input
@@ -304,18 +325,32 @@ def _pending_candidates(
     run_id: str,
     cancelled: Optional[Callable[[], bool]] = None,
 ) -> Iterator[Dict[str, Any]]:
-    """Stream pending candidates in stable order without loading a directory."""
-    last_directory = -1
-    last_file = ""
+    """Stream pending candidates highest presentation priority first.
+
+    The assessment is full-coverage, but dispatching the rule-most-interesting
+    files first means useful results land in the analyst's view during a long
+    run rather than only at the end. Ordering keyset is
+    ``(priority DESC, directory_id, file_id)`` so it stays stable, streams
+    without materializing the directory, and needs no sort buffer.
+    """
+    last: Optional[Tuple[int, int, str]] = None
     while True:
         if cancelled and cancelled():
             raise KeyboardInterrupt
+        clause = ""
+        values: List[Any] = [run_id]
+        if last is not None:
+            clause = (
+                " AND (priority<? OR (priority=? AND (directory_id>? OR "
+                "(directory_id=? AND file_id>?))))"
+            )
+            values.extend([last[0], last[0], last[1], last[1], last[2]])
+        values.append(STREAM_CHUNK)
         rows = store.connection.execute(
-            "SELECT file_id,file_name,size_bytes,mtime_utc,directory_id "
-            "FROM assessment_files WHERE run_id=? AND status='pending' "
-            "AND (directory_id>? OR (directory_id=? AND file_id>?)) "
-            "ORDER BY directory_id,file_id LIMIT ?",
-            (run_id, last_directory, last_directory, last_file, STREAM_CHUNK),
+            "SELECT file_id,file_name,size_bytes,mtime_utc,directory_id,priority "
+            "FROM assessment_files WHERE run_id=? AND status='pending'" + clause +
+            " ORDER BY priority DESC,directory_id,file_id LIMIT ?",
+            values,
         ).fetchall()
         if not rows:
             return
@@ -327,8 +362,12 @@ def _pending_candidates(
                 "mtime_utc": row["mtime_utc"],
                 "directory_id": int(row["directory_id"]),
             }
-        last_directory = int(rows[-1]["directory_id"])
-        last_file = str(rows[-1]["file_id"])
+        last_row = rows[-1]
+        last = (
+            int(last_row["priority"]),
+            int(last_row["directory_id"]),
+            str(last_row["file_id"]),
+        )
 
 
 def _context_loader(store: JevStore, run_id: str) -> Callable[[int], Tuple[Dict[str, Any], str]]:
@@ -375,21 +414,64 @@ def _cache_key(batch: Batch, config: JevConfig, objective: str) -> str:
     )
 
 
-def _trim_to_byte_limit(
+def _trim_to_limits(
     batch: Batch,
     objective: str,
     context_loader: Callable[[int], Tuple[Dict[str, Any], str]],
     config: JevConfig,
     counter: TokenCounter,
 ) -> Batch:
-    """Drop trailing candidates until the exact canonical payload fits."""
-    if not config.max_request_bytes:
+    """Drop trailing candidates until the exact payload fits every budget.
+
+    Validates the complete rendered payload (measured tokens and canonical
+    bytes) rather than only the estimator the packer used, so a configured
+    tokenizer or exact byte cap is honoured before persistence.
+    """
+    max_input, _max_longest = token_budgets(config)
+    byte_limit = config.max_request_bytes
+
+    def over_limit(candidate: Batch) -> bool:
+        if byte_limit and candidate.byte_length > byte_limit:
+            return True
+        return candidate.input_tokens > max_input
+
+    if not over_limit(batch):
         return batch
     entries = list(batch.entries)
-    while len(entries) > 1 and batch.byte_length > config.max_request_bytes:
+    while len(entries) > 1 and over_limit(batch):
         entries.pop()
         batch = render_batch(objective, entries, context_loader, config, counter)
     return batch
+
+
+def _flush_batch(
+    packer: "_Packer",
+    objective: str,
+    context_loader: Callable[[int], Tuple[Dict[str, Any], str]],
+    config: JevConfig,
+    counter: TokenCounter,
+) -> Tuple[Batch, List[Dict[str, Any]]]:
+    """Render and trim the packer's entries; return the batch and overflow.
+
+    Overflow entries are the trailing candidates that did not fit the exact
+    limits. Callers re-queue them so they are packed into the next request
+    instead of being silently dropped.
+    """
+    entries = list(packer.entries)
+    batch = _trim_to_limits(
+        render_batch(objective, entries, context_loader, config, counter),
+        objective,
+        context_loader,
+        config,
+        counter,
+    )
+    dropped = entries[len(batch.entries):]
+    if dropped:
+        # Keep future batches at the size that actually fit the exact limit so a
+        # trim does not force repeated re-accumulation of the same overflow.
+        packer.max_entries = min(packer.max_entries, max(1, len(batch.entries)))
+    packer.reset()
+    return batch, dropped
 
 
 def _persist_batch(
@@ -434,54 +516,70 @@ def _iter_batches(
     oversized: Callable[[str, str], None],
 ) -> Iterator[Batch]:
     packer = _Packer(config, counter, context_loader, max_directories)
-    for entry in candidates:
+    # Candidates that did not fit a flushed batch are re-queued at the front so
+    # no file is dropped when a byte or measured-token limit trims the tail.
+    queue: "deque[Dict[str, Any]]" = deque()
+    source = iter(candidates)
+    exhausted = False
+
+    def pull() -> Optional[Dict[str, Any]]:
+        nonlocal exhausted
+        if queue:
+            return queue.popleft()
+        if exhausted:
+            return None
+        try:
+            return next(source)
+        except StopIteration:
+            exhausted = True
+            return None
+
+    def requeue(dropped: List[Dict[str, Any]], following: List[Dict[str, Any]]) -> None:
+        # Preserve order: overflow entries first, then whatever triggered the
+        # flush, so the stream's stable ordering survives the reshuffle.
+        for item in reversed([*dropped, *following]):
+            queue.appendleft(item)
+
+    while True:
+        entry = pull()
+        if entry is None:
+            break
+        added = False
         while True:
             try:
                 added = packer.add(entry)
             except CandidateTooLargeError as exc:
-                if not packer.empty:
-                    # Flush and retry the entry against an empty request.
-                    yield _trim_to_byte_limit(
-                        render_batch(objective, packer.entries, context_loader, config, counter),
-                        objective,
-                        context_loader,
-                        config,
-                        counter,
-                    )
-                    packer.reset()
-                    continue
-                # A single candidate cannot fit even an empty request: it is a
-                # visible input error, never a silent omission.
-                oversized(str(entry["file_id"]), str(exc))
+                if packer.empty:
+                    # A single candidate cannot fit an empty request: it is a
+                    # visible input error, never a silent omission.
+                    oversized(str(entry["file_id"]), str(exc))
+                    break
+                batch, dropped = _flush_batch(
+                    packer, objective, context_loader, config, counter
+                )
+                yield batch
+                requeue(dropped, [entry])
                 break
             if added:
                 break
             # Batch full: flush and retry the same entry in a fresh batch.
-            yield _trim_to_byte_limit(
-                render_batch(objective, packer.entries, context_loader, config, counter),
-                objective,
-                context_loader,
-                config,
-                counter,
+            batch, dropped = _flush_batch(
+                packer, objective, context_loader, config, counter
             )
-            packer.reset()
-        if len(packer.entries) >= config.max_questions_per_request:
-            yield _trim_to_byte_limit(
-                render_batch(objective, packer.entries, context_loader, config, counter),
-                objective,
-                context_loader,
-                config,
-                counter,
+            yield batch
+            requeue(dropped, [entry])
+            break
+        if added and len(packer.entries) >= packer.max_entries:
+            batch, dropped = _flush_batch(
+                packer, objective, context_loader, config, counter
             )
-            packer.reset()
+            yield batch
+            requeue(dropped, [])
     if not packer.empty:
-        yield _trim_to_byte_limit(
-            render_batch(objective, packer.entries, context_loader, config, counter),
-            objective,
-            context_loader,
-            config,
-            counter,
+        batch, _dropped = _flush_batch(
+            packer, objective, context_loader, config, counter
         )
+        yield batch
 
 
 @dataclass

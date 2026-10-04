@@ -980,6 +980,25 @@ class JevStore:
             is not None
         )
 
+    def has_proven_credentials(self, config_fingerprint: str) -> bool:
+        """True when an earlier run with the same config already answered a request.
+
+        Used to skip the serial first-request canary on repeat assessments. The
+        fingerprint covers endpoint, model, objective, and every input-shaping
+        version, so a deployment change forces a fresh canary.
+        """
+        if not config_fingerprint:
+            return False
+        return (
+            self.connection.execute(
+                "SELECT 1 FROM request_batches b JOIN assessment_runs r "
+                "ON r.id=b.run_id WHERE r.config_fingerprint=? AND b.status IN "
+                "('completed','partial') LIMIT 1",
+                (config_fingerprint,),
+            ).fetchone()
+            is not None
+        )
+
     def batch_members(self, batch_id: str) -> List[str]:
         return [
             row["file_id"]

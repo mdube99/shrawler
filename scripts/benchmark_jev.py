@@ -46,7 +46,7 @@ from shrawler.triage.jev.client import (  # noqa: E402
 )
 from shrawler.triage.jev.config import JevConfig  # noqa: E402
 from shrawler.triage.jev.runner import JevRunner  # noqa: E402
-from shrawler.triage.jev.storage import JevStore  # noqa: E402
+from shrawler.triage.jev.storage import JevStore, assessment_path  # noqa: E402
 
 
 def _metadata(host: str, share: str, path: str, size: int, index: int) -> Dict[str, Any]:
@@ -427,6 +427,102 @@ def print_report(report: Dict[str, Any]) -> None:
         print(f"SQL statements: {report['sql_statements']}")
 
 
+def _csv_ints(value: str) -> List[int]:
+    return [int(part) for part in value.split(",") if part.strip()]
+
+
+def _sweep_axis(value: str, default: int) -> List[int]:
+    return _csv_ints(value) if value else [default]
+
+
+def run_sweep(args: argparse.Namespace) -> List[Dict[str, Any]]:
+    """Measure dispatch speed across worker counts, question caps, and scopes.
+
+    Larger requests reduce request count but can raise per-request latency, so
+    the fastest point is an empirical question. This reuses one inventory and
+    runs the matrix against the in-process fake gateway; no live model is called.
+    """
+    root = Path(tempfile.mkdtemp(prefix="jev-sweep-"))
+    database = root / "shrawler.db"
+    counts = FIXTURES[args.fixture](args.files, args)
+    scan_id = build_inventory(root, counts)
+    workers_axis = _sweep_axis(args.sweep_workers, args.workers)
+    questions_axis = _sweep_axis(args.sweep_questions, args.max_questions)
+    scopes_axis = args.sweep_scopes.split(",") if args.sweep_scopes else [args.packing_scope]
+    rows: List[Dict[str, Any]] = []
+    for scope in scopes_axis:
+        for workers in workers_axis:
+            for max_questions in questions_axis:
+                config = JevConfig.from_mapping(
+                    {
+                        "endpoint": "https://benchmark.invalid/v1/systemone",
+                        "model": "jev-benchmark",
+                        "workers": workers,
+                        "rate_limit_per_minute": args.rate_limit,
+                        "packing_scope": scope,
+                        "max_questions_per_request": max_questions,
+                        "max_request_bytes": args.max_request_bytes,
+                    }
+                )
+                gateway = FakeGateway(
+                    latency_seconds=args.latency_ms / 1000.0,
+                    max_concurrency=args.max_concurrency,
+                )
+                # A fresh assessment database per combination: otherwise the
+                # exact-request cache short-circuits later runs (the cache key
+                # ignores worker count) and the sweep measures cache reuse, not
+                # dispatch.
+                jev_path = assessment_path(database)
+                for suffix in ("", "-wal", "-shm"):
+                    Path(str(jev_path) + suffix).unlink(missing_ok=True)
+                with JevStore(database) as store:
+                    runner = JevRunner(database, config, store, client=gateway)
+                    prepared = runner.prepare(scan_id)
+                    run_id = prepared["run_id"]
+                    batches = runner.plan(run_id)
+                    started = time.perf_counter()
+                    outcome = runner.run(run_id, "sweep")
+                    wall_ms = int((time.perf_counter() - started) * 1000)
+                    status = runner.status(run_id)
+                metrics = status["metrics"]
+                files = int(prepared["observed_files"] or 0)
+                rows.append(
+                    {
+                        "scope": scope,
+                        "workers": workers,
+                        "max_questions": max_questions,
+                        "batches": batches,
+                        "status": outcome["status"],
+                        "dispatch_wall_ms": metrics.get("dispatch_wall_ms", wall_ms),
+                        "requests": metrics.get("completed_requests", 0),
+                        "reused": metrics.get("reused_requests", 0),
+                        "peak_in_flight": metrics.get(
+                            "peak_in_flight", gateway.peak_active
+                        ),
+                        "p95_ms": (status.get("latency_ms") or {}).get("p95"),
+                        "files_per_second": round(
+                            files / max(0.001, metrics.get("dispatch_wall_ms", wall_ms) / 1000.0),
+                            2,
+                        ),
+                    }
+                )
+    return rows
+
+
+def print_sweep(rows: List[Dict[str, Any]]) -> None:
+    print(
+        f"{'scope':>15} {'workers':>7} {'maxq':>5} {'reqs':>6} {'wall_ms':>8} "
+        f"{'p95_ms':>7} {'conc':>5} {'files/s':>9} status"
+    )
+    for row in rows:
+        print(
+            f"{row['scope']:>15} {row['workers']:>7} {row['max_questions']:>5} "
+            f"{row['batches']:>6} {row['dispatch_wall_ms']:>8} "
+            f"{row['p95_ms']!s:>7} {row['peak_in_flight']:>5} "
+            f"{row['files_per_second']:>9} {row['status']}"
+        )
+
+
 def main(argv: Optional[List[str]] = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--fixture", choices=sorted(FIXTURES), default="captured")
@@ -445,6 +541,24 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument("--packing-scope", default="directory", dest="packing_scope")
     parser.add_argument("--max-questions", type=int, default=200, dest="max_questions")
     parser.add_argument("--max-request-bytes", type=int, default=0, dest="max_request_bytes")
+    parser.add_argument(
+        "--sweep-workers",
+        default="",
+        dest="sweep_workers",
+        help="comma-separated worker counts to sweep, e.g. 1,2,4,8",
+    )
+    parser.add_argument(
+        "--sweep-questions",
+        default="",
+        dest="sweep_questions",
+        help="comma-separated max_questions_per_request values to sweep",
+    )
+    parser.add_argument(
+        "--sweep-scopes",
+        default="",
+        dest="sweep_scopes",
+        help="comma-separated packing scopes to sweep, e.g. directory,multi-directory",
+    )
     parser.add_argument("--sql-count", action="store_true", dest="sql_count")
     parser.add_argument("--json", action="store_true", dest="as_json")
     args = parser.parse_args(argv)
@@ -454,6 +568,14 @@ def main(argv: Optional[List[str]] = None) -> int:
             "many-tiny": 100000,
             "density": 1000000,
         }.get(args.fixture, 774)
+    sweep = bool(args.sweep_workers or args.sweep_questions or args.sweep_scopes)
+    if sweep:
+        rows = run_sweep(args)
+        if args.as_json:
+            print(json.dumps(rows, indent=2, default=str))
+        else:
+            print_sweep(rows)
+        return 0
     started = time.perf_counter()
     report = run_benchmark(args)
     report["wall_ms"] = int((time.perf_counter() - started) * 1000)

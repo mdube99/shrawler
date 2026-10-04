@@ -41,9 +41,12 @@ max_state_longest_question_tokens = 30000  # state + longest question, under 32k
 max_questions_per_request = 200  # verify the real cap with `check`
 request_timeout_seconds = 120
 retries = 2
-workers = 4
+workers = 8                      # concurrent decision requests; sweep vs the route
 rate_limit_per_minute = 0        # 0 = unset
 time_budget_seconds = 0          # 0 = unlimited; a budget pauses, never samples
+packing_scope = "directory"      # directory (default) or multi-directory
+token_headroom_percent = 10      # estimator safety margin on both token budgets
+max_request_bytes = 0            # 0 = no exact canonical byte cap
 """
 
 CONFIG_OPTIONS = """Shrawler configuration options
@@ -83,9 +86,12 @@ Top level:
   max_questions_per_request        candidate cap per request (default: 200)
   request_timeout_seconds          per-request timeout (default: 120)
   retries                          retries before a candidate is failed (default: 2)
-  workers                          reserved for future bounded concurrency (default: 4)
+  workers                          concurrent decision requests (default: 8)
   rate_limit_per_minute            request cap per minute; 0 = unset
   time_budget_seconds              run budget; 0 = unlimited (pauses, never samples)
+  packing_scope                    directory (default) | multi-directory
+  token_headroom_percent           estimator safety margin on token budgets (default: 10)
+  max_request_bytes                exact canonical byte cap; 0 = unset
 
 Command-line arguments override values from the configuration file.
 Run `shrawler COMMAND --help` for scan and integration controls.

@@ -19,6 +19,16 @@ produced exactly 203 requests. Because dispatch was serial, that run took
 fixes; both are needed for large inventories where directory count dominates
 request count.
 
+Two further costs dominated the payload itself. Every per-file question repeated
+the entire rubric, and the token estimator charged one token per UTF-8 byte, so
+requests filled early. The rubric is now stated once in the shared objective
+while each question carries compact criterion labels, and a calibrated estimator
+packs roughly three bytes per token. On the same captured shape this cuts
+question bytes by about 61% (607 kB to 235 kB) without dropping a file or
+changing which priority levels the model may choose. `packing_scope = "directory"`
+remains the default; `multi-directory` is an opt-in that now collapses the same
+774 files into 4 requests instead of 14.
+
 ## Request shape
 
 One request carries a shared `state` plus a map of `choice` questions keyed by
@@ -60,11 +70,16 @@ of these limits would be exceeded:
 * `max_request_bytes` exact canonical request bytes, when configured
 * `token_headroom_percent` safety margin applied to both token budgets
 
-When a candidate does not fit a non-empty batch, the batch is flushed and the
-candidate is retried against an empty one. A directory that spans several
-requests repeats its complete context block in each. A single candidate that
-cannot fit an empty request becomes a visible `input-error` file; it is never
-silently dropped.
+The complete rendered payload is validated against the exact byte cap and the
+measured token total before it is persisted, not only against the estimator the
+packer used. When a candidate does not fit a non-empty batch, the batch is
+flushed and the candidate is retried against an empty one. If exact validation
+trims the tail of a flushed batch, those trailing candidates are re-queued at
+the front of the planner and packed into the next request. A directory that
+spans several requests repeats its complete context block in each. A single
+candidate that cannot fit an empty request becomes a visible `input-error` file;
+it is never silently dropped, and planning alone still accounts for every
+pending file.
 
 ### Input-limit adaptation
 
@@ -100,20 +115,32 @@ Design points:
 
 * **Admission.** The coordinator submits at most `workers` requests and never
   builds an unbounded queue.
-* **Canary.** If the run has no completed request under the current
-  credentials, one planned batch is dispatched alone first. An authentication
-  failure stops the run immediately instead of fanning out.
+* **Canary.** If the run has no completed request and the same
+  endpoint/model/objective and input-shaping versions have not already answered
+  a request, one planned batch is dispatched alone first. An authentication
+  failure then stops the run immediately instead of fanning out. Repeat
+  assessments skip the serial round-trip; a deployment change forces a fresh
+  canary.
 * **Rate limiting.** `rate_limit_per_minute` is enforced in the coordinator
   with a monotonic sliding window. `0` is unlimited. A blocked admission never
   occupies a sleeping worker slot.
 * **Deadline and cancellation.** Admission stops when the time budget expires or
   cancellation is requested; requests already in flight are allowed to finish
   so their valid answers survive.
-* **Retries.** Retryable transport/5xx/429 failures use bounded exponential
+* **Retries.** Retryable transport/5xx failures use bounded exponential
   backoff with jitter. Unresolved files return to the global planner rather than
   recreating one batch per old directory, and two batches can never claim the
   same pending file. Authentication and deterministic input errors are not
   retried unchanged.
+* **Throttling.** A `429`/`503`, or any response carrying `Retry-After`, pauses
+  admission across every worker for the server's requested cooldown (clamped to
+  60 s). The batch then returns to the planner like any other retryable failure,
+  so concurrent workers do not amplify a rate limit.
+* **Useful results first.** Pending candidates are packed in
+  `(rule priority, directory, file)` order, so the files the deterministic rules
+  already flagged are assessed and surfaced earliest. The main view can select an
+  in-progress run and shows assessed files as batches land, rather than waiting
+  for the whole inventory.
 
 ## Progress and status
 
@@ -142,7 +169,10 @@ revision, adapter/rubric/planner/context/preprocessing versions, objective, and
 relevant model settings. Reused answers are materialized into the new run's
 ledger with `source='cache'`, counted separately from inferred answers, and are
 subject to the same full-coverage reconciliation. Answers are never reused
-per-file from a differently packed shared state.
+per-file from a differently packed shared state. Cache reuse happens inside the
+admission loop and skips to the next planned batch; it can never end a run while
+later batches remain, and finalization counts anything still planned or
+in-flight as unresolved.
 
 ## Resume and compatibility
 
@@ -163,18 +193,19 @@ Add these to the `[jev]` table:
 ```toml
 [jev]
 enabled = true
-workers = 4
+workers = 8                      # the primary lever after request count is minimal
 rate_limit_per_minute = 0        # 0 disables the limiter
 max_questions_per_request = 200
 max_request_bytes = 0            # 0 disables the exact byte cap
-packing_scope = "multi-directory" # or "directory" to roll back
+packing_scope = "directory"      # default; "multi-directory" to pack more per request
 token_headroom_percent = 10
 ```
 
 ## Rollout
 
 1. Ship the schema migration and status/storage changes first.
-2. Enable bounded concurrency at the existing `workers` value.
+2. Keep `workers = 8` (the default) and confirm it against the live route with
+   `--sweep-workers`; back off if the gateway serializes or throttles.
 3. Keep `packing_scope = "directory"` for established deployments.
 4. Enable `multi-directory` in test environments and collect quality and
    throughput evidence.
@@ -198,6 +229,12 @@ in-process fake gateway. It needs no credentials and incurs no inference cost:
 python scripts/benchmark_jev.py --fixture captured --packing-scope directory
 python scripts/benchmark_jev.py --fixture captured --packing-scope multi-directory
 python scripts/benchmark_jev.py --fixture wide --files 100000 --sql-count
+# Do not assume the largest batch is fastest: sweep concurrency, batch size,
+# and packing scope together. Each combination uses a fresh ledger so the
+# exact-request cache cannot mask a real dispatch.
+python scripts/benchmark_jev.py --fixture captured \
+  --sweep-workers 1,2,4,8,16 --sweep-questions 25,50,100,200 \
+  --sweep-scopes directory,multi-directory
 ```
 
 Fixtures: `captured` (774 files / 203 directories), `wide`, `many-tiny`,
