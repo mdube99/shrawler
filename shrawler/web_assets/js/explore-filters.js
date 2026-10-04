@@ -85,11 +85,18 @@ const FILTER_KEYS = [
 
 export function createFilters({ root, state, defaults, runs, facets, commit }) {
   let closePopover = null;
-  // Guards the one-time "the URL named no run, so pick the newest" decision.
-  let resolved = false;
 
   const aiUsable = () => runs.jev.some((run) => JEV_USABLE.includes(run.status));
-  const blending = () => state.blend !== '0' && aiUsable();
+
+  /**
+   * Whether an AI run contributes at all.
+   *
+   * There is no way to show AI scores without blending them: the server joins
+   * the assessment tables only when a run id is passed, and Combined is derived
+   * from that join. So "AI on" and "AI in Combined" are one state, and the run
+   * selector is the whole control surface for it.
+   */
+  const aiEnabled = () => state.jev_run !== NONE && aiUsable();
 
   function facetOptions(key) {
     // Keys without a formatter show the facet value verbatim.
@@ -200,47 +207,64 @@ export function createFilters({ root, state, defaults, runs, facets, commit }) {
   function renderRuns() {
     const completed = runs.ranking.filter((run) => run.status === 'completed');
     fill(root.ranking, option(NONE, 'No ranking selected'), ...completed.map((run) => option(run.id, `${fmt.stamp(run.started_at)} · ${fmt.count(run.file_count)} files`)));
-    if (completed.some((run) => run.id === state.ranking_run)) {
-      root.ranking.value = state.ranking_run;
-    } else if (state.ranking_run === AUTO) {
-      // The URL did not name a run, so pick the newest saved one. This runs once
-      // the catalog is known: before that there is nothing to pick, and
-      // resolving now would record "none" for an inventory that does have runs.
-      if (!resolved) {
-        resolved = true;
-        state.ranking_run = completed.length ? completed[0].id : '';
-        root.ranking.value = completed.length ? completed[0].id : NONE;
-        write();
-        return;
-      }
-      root.ranking.value = NONE;
-    } else {
-      // Either the URL said "none" or it named a run that no longer exists.
-      // Either way, fall back to nothing rather than quietly ranking by a
-      // different run than the link asked for.
+    const namedRule = completed.some((run) => run.id === state.ranking_run);
+    if (!namedRule && state.ranking_run === AUTO) {
+      // The URL did not name a run, so adopt the newest saved one: Combined then
+      // means something on arrival. With no runs yet, stay on "none" without
+      // writing it, so creating a ranking later selects it automatically.
+      state.ranking_run = completed.length ? completed[0].id : '';
+      if (state.ranking_run) write();
+    } else if (!namedRule) {
+      // The URL said "none", or named a run that is gone. Fall back to nothing
+      // rather than quietly ranking by a different run than the link asked for.
       state.ranking_run = '';
-      root.ranking.value = NONE;
     }
+    root.ranking.value = state.ranking_run || NONE;
 
     const usable = runs.jev.filter((run) => JEV_USABLE.includes(run.status));
-    fill(root.jev, option('', 'Latest AI assessment'), ...usable.map((run) => option(run.id, `${fmt.stamp(run.created_at)} · ${fmt.count(run.total_observed)} files · ${run.status}`)));
-    if (usable.some((run) => run.id === state.jev_run)) root.jev.value = state.jev_run;
-    root.jev.disabled = !blending();
-    root.blend.checked = blending();
-    root.blend.disabled = !usable.length;
+    fill(
+      root.jev,
+      option(NONE, 'No AI run'),
+      // "Latest" resolves server-side against the run catalog, so it stays
+      // correct as new runs land without the URL having to name one. Offered
+      // only once there is something to resolve.
+      ...(usable.length ? [option('', 'Latest AI assessment')] : []),
+      ...usable.map((run) => option(run.id, `${fmt.stamp(run.created_at)} · ${fmt.count(run.total_observed)} files · ${run.status}`)),
+    );
+    if (usable.some((run) => run.id === state.jev_run)) {
+      root.jev.value = state.jev_run;
+    } else if (state.jev_run === '') {
+      // Nothing named in the URL and a run exists to fall back to.
+      root.jev.value = usable.length ? '' : NONE;
+    } else {
+      // "none", or a run that is gone. Do not substitute a different run than
+      // the link named.
+      if (state.jev_run !== NONE) {
+        state.jev_run = NONE;
+        write();
+      }
+      root.jev.value = NONE;
+    }
+    root.jev.disabled = !usable.length;
+    root.note.textContent = engineNote();
+  }
 
-    // Unchecking the blend is the same primitive pointed the other way: no AI
-    // run is selected, so Combined is the rule rating on its own.
-    const notes = [];
-    if (!state.ranking_run) notes.push('rule ratings hidden');
-    if (!blending()) notes.push('AI scores not blended');
-    if (!notes.length) notes.push('Combined blends both engines');
-    root.note.textContent = notes.join(' · ');
+  /**
+   * One line explaining how Combined is currently composed, so the table never
+   * leaves the reader guessing why a column is blank.
+   */
+  function engineNote() {
+    const rule = !!state.ranking_run;
+    const ai = aiEnabled();
+    if (rule && ai) return 'Combined blends both engines';
+    if (rule) return 'Combined uses the rule rating · no AI run selected';
+    if (ai) return 'Combined uses the AI score · no rule rating';
+    return aiUsable() ? 'Combined unavailable · no engine selected' : 'Combined unavailable · no runs saved yet';
   }
 
   function columnAvailable(column) {
     const rule = !!state.ranking_run;
-    const ai = blending();
+    const ai = aiEnabled();
     if (column === 'priority') return rule;
     if (column === 'jev') return ai;
     if (column === 'combined') return rule || ai;
@@ -255,12 +279,11 @@ export function createFilters({ root, state, defaults, runs, facets, commit }) {
   on(root.toggle, 'click', toggle);
   on(root.ranking, 'change', () => commit({ ranking_run: root.ranking.value === NONE ? '' : root.ranking.value, ranking_category: '' }));
   on(root.jev, 'change', () => commit({ jev_run: root.jev.value }));
-  on(root.blend, 'change', () => commit({ blend: root.blend.checked ? '1' : '0', jev_run: root.blend.checked ? root.jev.value : '' }));
 
   // Runs are not rendered here: the caller has not loaded the catalog yet, and
   // resolving "the URL named no run" against an empty list would pin the page
   // to "none" before it ever learns there are runs to pick from.
   renderChips();
 
-  return { renderRuns, renderChips, columnAvailable, blending, close: shut, write };
+  return { renderRuns, renderChips, columnAvailable, aiEnabled, close: shut, write };
 }

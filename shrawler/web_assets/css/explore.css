@@ -151,10 +151,6 @@
   max-width: 320px;
 }
 
-.engine-blend {
-  color: var(--text-dim);
-}
-
 .engine-note {
   margin-left: auto;
   color: var(--text-faint);

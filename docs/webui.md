@@ -58,10 +58,11 @@ minimum rule rating are all filterable. Active filters also appear as removable
 chips.
 
 **Engine run selection** is a dedicated control rather than one more filter.
-`Ranking` and `AI` choose which saved runs contribute, and Combined is their
-weighted blend. Deselecting the rule run re-weights Combined to the AI score
-alone instead of filtering rows away; clearing the blend does the reverse. Both
-engines stay visible as their own columns at all times, in their own hues.
+`Ranking` and `AI` each select a saved run or none, and Combined is their
+weighted blend. Deselecting either engine re-weights Combined to the other
+alone instead of filtering rows away, so "focus on AI only" is expressed by
+turning the rule run off. Both engines keep their own column at all times, in
+their own hues, for whichever runs are selected.
 
 Every piece of view state lives in the URL, so any table state can be shared as a
 link. Nothing is kept in `localStorage`.

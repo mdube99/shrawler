@@ -66,7 +66,6 @@ const DEFAULTS = {
   page: '1',
   per_page: '',
   view: 'table',
-  blend: '1',
 };
 
 // "No ranking selected" is spelled `none` in the URL so a pasted link keeps
@@ -104,10 +103,11 @@ let anchorRow = null;
 let busy = false;
 let lastKey = '';
 
-// AUTO is a placeholder the filters resolve on first render; the API never sees
-// it. Anything unresolved falls back to no run rather than an invalid id.
+// AUTO and NONE are URL spellings, never API ones: the server is told an empty
+// run id for "off" and left to resolve "the latest" when nothing is named.
 const selectedRun = () => (state.ranking_run === AUTO || state.ranking_run === NONE ? '' : state.ranking_run);
-const query = () => serverParams({ ...state, ranking_run: selectedRun() }, SERVER_KEYS);
+const selectedAiRun = () => (state.jev_run === NONE ? '' : state.jev_run);
+const query = () => serverParams({ ...state, ranking_run: selectedRun(), jev_run: selectedAiRun() }, SERVER_KEYS);
 
 /** Every interaction writes the URL first, then refetches if the contract moved. */
 function commit(patch, { keepPage = false, push = false } = {}) {
@@ -118,7 +118,7 @@ function commit(patch, { keepPage = false, push = false } = {}) {
 }
 
 const filters = createFilters({
-  root: { toggle: $('filter-toggle'), chips: $('active-filters'), ranking: $('ranking-run'), jev: $('jev-run'), blend: $('blend'), note: $('engine-note') },
+  root: { toggle: $('filter-toggle'), chips: $('active-filters'), ranking: $('ranking-run'), jev: $('jev-run'), note: $('engine-note') },
   state,
   defaults: DEFAULTS,
   runs,
@@ -302,9 +302,8 @@ async function loadTable() {
   params.set('page', state.page || '1');
   if (state.per_page) params.set('per_page', state.per_page);
   params.set('include_total', '1');
-  // The blend checkbox is run selection pointed the other way: unblending means
-  // no AI run is selected, which is what makes Combined the rule rating alone.
-  if (!filters.blending()) params.delete('jev_run');
+  // query() already omits jev_run when the AI run is off, which is what makes
+  // Combined the rule rating alone.
   const key = params.toString();
   if (key !== lastKey) renderSkeleton();
   lastKey = key;
