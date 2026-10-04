@@ -22,9 +22,12 @@ CONTEXT_VERSION = "2"
 # which files share a request, so the exact-request cache identity changes.
 PLANNER_VERSION = "3"
 PAYLOAD_VERSION = "2"
-# Rubric version 3 sends compact criterion labels per question; the full rubric
-# text is carried once in the shared objective rather than repeated per file.
-RUBRIC_VERSION = "3"
+# Rubric version 4 makes level 4 ("Immediate") reachable from filename and
+# directory context alone: an unambiguous credential/secret/private-key name no
+# longer requires file contents, which the pipeline does not collect. It keeps
+# sending compact criterion labels per question; the full rubric text is carried
+# once in the shared objective rather than repeated per file.
+RUBRIC_VERSION = "4"
 PREPROCESSING_VERSION = "1"
 
 # Planning scopes. ``directory`` keeps one source directory per request (the
@@ -38,35 +41,28 @@ PACKING_SCOPES = ("directory", "multi-directory")
 DEFAULT_ENDPOINT = "https://api.typesafe.ai/v1/systemone"
 
 DEFAULT_OBJECTIVE = (
-    "Evaluate how strongly the available evidence supports prioritizing this "
-    "file for analyst inspection to identify sensitive information exposed "
-    "through a file share.\n\n"
-    "Sensitive information includes credentials, authentication tokens, private "
-    "keys, configurations containing secrets, personal records, financial data, "
-    "and confidential business information.\n\n"
-    "Use the supplied filename, full path, metadata, and file contents when "
-    "available. Prioritize evidence of actual sensitive information over generic "
-    "security relevance. Treat suggestive filenames and paths as indicators, not "
-    "confirmation. Missing or unreadable contents do not establish that a file "
-    "is safe.\n\n"
+    "Assess how strongly the available evidence supports prioritizing this file for analyst inspection to identify sensitive information exposed through a file share.\n\n"
+    "Sensitive information includes authentication credentials, passwords, private keys, tokens and secrets; personal and medical records; financial records; and confidential business information.\n\n"
+    "Evidence available: the candidate's filename, its full path and directory context (ancestor directory names, sibling filenames, and extension counts), size, and modification time. File contents are not available; do not require them, and never treat missing contents as making a file safe. Judge the candidate's own filename together with its directory context.\n\n"
     "Apply this inspection-priority rubric:\n"
-    "0 — Minimal: Available evidence suggests ordinary, public, or nonsensitive material.\n"
-    "1 — Possible: Weak indicators of sensitive information warrant lower-priority review.\n"
-    "2 — Likely: Specific indicators suggest sensitive information and warrant analyst inspection.\n"
-    "3 — Strong: Available evidence strongly indicates sensitive information and warrants prompt inspection.\n"
-    "4 — Immediate: Available contents reveal apparent authentication secrets or "
-    "highly sensitive records requiring immediate analyst review.\n"
-    "Assess inspection priority, not confirmed vulnerability severity."
+    "0 — Minimal: The filename and directory context indicate ordinary, public, or nonsensitive material.\n"
+    "1 — Possible: Weak or generic indicators of sensitive information warrant lower-priority review.\n"
+    "2 — Likely: A specific sensitive indicator, such as a suggestive filename or a sensitive directory (for example HR, Finance, Medical, or Passwords), without strong sensitive-record or credential evidence, warrants analyst inspection.\n"
+    "3 — Strong: Strong indicators of sensitive personal, medical, financial, or confidential records (for example SSN, patient, medical, payroll, invoice, tax, or credit-card names), or a credential-adjacent filename that is only suggestive (for example 'compass' or 'mapping'), warrant prompt inspection.\n"
+    "4 — Immediate: The filename alone, or the filename together with its directory context, unambiguously denotes authentication credentials, secrets, or private keys. Treat a candidate as level 4 whenever its own name contains or matches any of: password, passwd, passphrase, login, logon, credential(s), secret(s), token, api-key, apikey, private-key, private key, ssh key; the SSH key names id_rsa, id_dsa, id_ecdsa, id_ed25519; authorized_keys; credential or private-key extensions such as .pem, .key, .ppk, .p12, .pfx, .jks, and .keystore; password-database names such as .kdbx; environment and cloud credential files such as .env, .netrc, .npmrc, aws_credentials, azure_credentials, service-account.json, and kubeconfig; and secret-store names such as secrets.yml or vault-token. Rate level 4 even when the extension is a common data format such as .json, .yml, .txt, .xlsx, or .csv, because these names are unambiguous credential indicators on their own. Do not reserve level 4 for confirmed contents.\n\n"
+    "Combination rule: if a filename contains a credential word together with another sensitive word, the credential word controls. For example, 'payroll login.txt' and 'admin password.xlsx' are level 4, not level 3, because they denote credentials.\n\n"
+    "Level-4 guidance: Reserve level 4 for candidates whose own filename indicates credentials, secrets, or private keys. A sensitive directory name such as 'Passwords' or 'HR', or a credential-like sibling file, on its own raises priority but does not make a benign filename level 4. Never downgrade an unambiguous credential filename to level 3 because its contents are unavailable.\n\n"
+    "Assess inspection priority, not confirmed vulnerability severity. Score every candidate on the same 0-4 scale."
 )
 
 # One ordered ``choice`` question per file on a 0-4 inspection-priority scale.
 # Keys are the numeric levels so the model's answer is directly rankable.
 RUBRIC = {
-    "0": "Minimal: Available evidence suggests ordinary, public, or nonsensitive material.",
-    "1": "Possible: Weak indicators of sensitive information warrant lower-priority review.",
-    "2": "Likely: Specific indicators suggest sensitive information and warrant analyst inspection.",
-    "3": "Strong: Available evidence strongly indicates sensitive information and warrants prompt inspection.",
-    "4": "Immediate: Available contents reveal apparent authentication secrets or highly sensitive records requiring immediate analyst review.",
+    "0": "Minimal: The filename and directory context indicate ordinary, public, or nonsensitive material.",
+    "1": "Possible: Weak or generic indicators of sensitive information warrant lower-priority review.",
+    "2": "Likely: A specific sensitive indicator, such as a suggestive filename or a sensitive directory, suggests sensitive information and warrants analyst inspection.",
+    "3": "Strong: Strong indicators of sensitive personal, medical, financial, or confidential records, or an ambiguous credential-related filename, warrant prompt inspection.",
+    "4": "Immediate: The filename, alone or with its directory context, unambiguously denotes authentication credentials, secrets, or private keys; warrants immediate review even without file contents.",
 }
 # Ordered numeric levels; dict insertion order above is the source of truth.
 PRIORITY_LEVELS = tuple(RUBRIC)

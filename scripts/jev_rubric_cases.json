@@ -1,0 +1,229 @@
+{
+  "version": 1,
+  "description": "Labeled filename + directory-context cases for the built-in Jev inspection-priority rubric. No file contents are supplied or expected. 'credential' cases are unambiguous credential/secret/private-key indicators and must reach level 4; 'benign' cases are ordinary material and must stay below level 4; 'pii', 'phi', and 'financial' cases are secondary high-priority cases whose achieved labels are reported but not asserted.",
+  "host": "server",
+  "share": "DATA",
+  "cases": [
+    {
+      "id": "cred_logins_finance_ap",
+      "class": "credential",
+      "file_name": "logins.txt",
+      "remote_path": "/Finance/Accounts Payable/logins.txt",
+      "note": "Pinned target: credential filename inside a financial directory."
+    },
+    {
+      "id": "cred_payroll_login_passwords",
+      "class": "credential",
+      "file_name": "payroll login.txt",
+      "remote_path": "/IT/Passwords/payroll login.txt",
+      "note": "Pinned target: credential filename inside a Passwords directory."
+    },
+    {
+      "id": "cred_password_it",
+      "class": "credential",
+      "file_name": "password.txt",
+      "remote_path": "/IT/password.txt"
+    },
+    {
+      "id": "cred_credentials_root",
+      "class": "credential",
+      "file_name": "credentials",
+      "remote_path": "/IT/credentials"
+    },
+    {
+      "id": "cred_credentials_json",
+      "class": "credential",
+      "file_name": "credentials.json",
+      "remote_path": "/apps/portal/credentials.json"
+    },
+    {
+      "id": "cred_id_rsa_ssh",
+      "class": "credential",
+      "file_name": "id_rsa",
+      "remote_path": "/IT/SSH/id_rsa"
+    },
+    {
+      "id": "cred_id_ed25519_ssh",
+      "class": "credential",
+      "file_name": "id_ed25519",
+      "remote_path": "/home/deploy/.ssh/id_ed25519"
+    },
+    {
+      "id": "cred_private_ppk",
+      "class": "credential",
+      "file_name": "vpn_private_key.ppk",
+      "remote_path": "/IT/VPN/vpn_private_key.ppk"
+    },
+    {
+      "id": "cred_server_pem",
+      "class": "credential",
+      "file_name": "server.pem",
+      "remote_path": "/IT/Certs/server.pem"
+    },
+    {
+      "id": "cred_aws_credentials",
+      "class": "credential",
+      "file_name": "aws_credentials",
+      "remote_path": "/IT/Cloud/aws_credentials"
+    },
+    {
+      "id": "cred_service_account_json",
+      "class": "credential",
+      "file_name": "service-account.json",
+      "remote_path": "/IT/Cloud/service-account.json"
+    },
+    {
+      "id": "cred_dotenv",
+      "class": "credential",
+      "file_name": ".env",
+      "remote_path": "/apps/portal/.env"
+    },
+    {
+      "id": "cred_secrets_yml",
+      "class": "credential",
+      "file_name": "secrets.yml",
+      "remote_path": "/deploy/secrets.yml"
+    },
+    {
+      "id": "cred_keepass_kdbx",
+      "class": "credential",
+      "file_name": "KeePass.kdbx",
+      "remote_path": "/IT/KeePass.kdbx"
+    },
+    {
+      "id": "cred_passwords_hr",
+      "class": "credential",
+      "file_name": "passwords.txt",
+      "remote_path": "/HR/passwords.txt"
+    },
+    {
+      "id": "cred_api_token",
+      "class": "credential",
+      "file_name": "api_token.txt",
+      "remote_path": "/IT/api_token.txt"
+    },
+    {
+      "id": "cred_admin_password_xlsx",
+      "class": "credential",
+      "file_name": "admin password.xlsx",
+      "remote_path": "/IT/admin password.xlsx"
+    },
+    {
+      "id": "benign_readme_passwords",
+      "class": "benign",
+      "file_name": "readme.txt",
+      "remote_path": "/IT/Passwords/readme.txt",
+      "note": "Benign name inside a credential-named directory; must not reach 4."
+    },
+    {
+      "id": "benign_meeting_notes_ap",
+      "class": "benign",
+      "file_name": "Meeting Notes 2024.docx",
+      "remote_path": "/Finance/Accounts Payable/Meeting Notes 2024.docx",
+      "note": "Benign name inside the pinned financial directory."
+    },
+    {
+      "id": "benign_server_inventory_passwords",
+      "class": "benign",
+      "file_name": "Server Inventory 2024.txt",
+      "remote_path": "/IT/Passwords/Server Inventory 2024.txt"
+    },
+    {
+      "id": "benign_readme_ssh",
+      "class": "benign",
+      "file_name": "README.txt",
+      "remote_path": "/IT/SSH/README.txt"
+    },
+    {
+      "id": "benign_readme_certs",
+      "class": "benign",
+      "file_name": "readme.md",
+      "remote_path": "/IT/Certs/readme.md"
+    },
+    {
+      "id": "benign_logo_marketing",
+      "class": "benign",
+      "file_name": "logo.png",
+      "remote_path": "/Marketing/logo.png"
+    },
+    {
+      "id": "benign_photo_hr",
+      "class": "benign",
+      "file_name": "vacation photo.jpg",
+      "remote_path": "/HR/vacation photo.jpg"
+    },
+    {
+      "id": "benign_company_overview",
+      "class": "benign",
+      "file_name": "Company Overview.pdf",
+      "remote_path": "/Marketing/Company Overview.pdf"
+    },
+    {
+      "id": "benign_staff_handbook",
+      "class": "benign",
+      "file_name": "staff_handbook.txt",
+      "remote_path": "/HR/staff_handbook.txt"
+    },
+    {
+      "id": "benign_changelog",
+      "class": "benign",
+      "file_name": "changelog.md",
+      "remote_path": "/apps/portal/changelog.md"
+    },
+    {
+      "id": "benign_package_json",
+      "class": "benign",
+      "file_name": "package.json",
+      "remote_path": "/apps/portal/package.json"
+    },
+    {
+      "id": "benign_architecture",
+      "class": "benign",
+      "file_name": "architecture.png",
+      "remote_path": "/IT/architecture.png"
+    },
+    {
+      "id": "pii_employee_ssn",
+      "class": "pii",
+      "file_name": "employee_ssn.xlsx",
+      "remote_path": "/HR/employee_ssn.xlsx"
+    },
+    {
+      "id": "pii_social_security",
+      "class": "pii",
+      "file_name": "social_security.csv",
+      "remote_path": "/HR/social_security.csv"
+    },
+    {
+      "id": "phi_patient_records",
+      "class": "phi",
+      "file_name": "patient_records.csv",
+      "remote_path": "/Medical/patient_records.csv"
+    },
+    {
+      "id": "financial_credit_card_export",
+      "class": "financial",
+      "file_name": "credit-card-export.csv",
+      "remote_path": "/Finance/credit-card-export.csv"
+    },
+    {
+      "id": "financial_payroll_2024",
+      "class": "financial",
+      "file_name": "payroll_2024.xlsx",
+      "remote_path": "/HR/Payroll/payroll_2024.xlsx"
+    },
+    {
+      "id": "financial_q2_2024",
+      "class": "financial",
+      "file_name": "Q2 2024 Financials.xlsx",
+      "remote_path": "/Finance/Q2 2024 Financials.xlsx"
+    },
+    {
+      "id": "financial_budget_plan_ap",
+      "class": "financial",
+      "file_name": "Budget Plan 2024.xlsx",
+      "remote_path": "/Finance/Accounts Payable/Budget Plan 2024.xlsx",
+      "note": "Financial sibling that supplies directory context for the pinned logins.txt case."
+    }
+  ]
+}

@@ -368,6 +368,15 @@ shrawler triage jev run ./results/shrawler.db
 shrawler triage jev status ./results/shrawler.db
 ```
 
+The 0-4 inspection-priority rubric is metadata-only: file contents are never
+sent, so an unambiguous credential filename (for example `logins.txt`,
+`payroll login.txt`, `password.txt`, `id_rsa`, `.env`, or
+`service-account.json`) reaches level 4 from its filename and directory context
+alone. A sensitive folder such as `Passwords` or `HR`, or a credential-like
+sibling file, raises priority but does not by itself make a benign file level 4.
+Evaluate the built-in rubric against the labeled fixture through the configured
+endpoint with `python scripts/evaluate_jev_rubric.py`.
+
 See [Model-assisted assessment scaling](docs/jev-assessment-scaling.md) for
 packing rules, concurrency, rate limiting, cache reuse, resume, and rollout.
 

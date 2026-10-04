@@ -58,6 +58,38 @@ name the candidate's directory block so an answer is attributed to the correct
 context, and every answer is stored against the exact file ID and that file's
 own `context_hash`.
 
+## Rubric and content-free level 4
+
+The assessment is full-coverage and metadata-only: the pipeline never sends file
+contents, and this will not change for the foreseeable future. The rubric is
+therefore written so that a filename plus its directory context can reach every
+level, including the top one.
+
+* Level 4 (Immediate) is for a filename that unambiguously denotes
+  authentication credentials, secrets, or private keys — for example
+  `logins.txt`, `payroll login.txt`, `password.txt`, `credentials`, `id_rsa`,
+  `*.pem`, `*.ppk`, `.env`, `service-account.json`, or `secrets.yml`. It does
+  not depend on file contents.
+* Level 3 (Strong) is for strong sensitive-record evidence (personal, medical,
+  financial, or confidential business) or an ambiguous credential-adjacent name.
+* Level 2 (Likely) is for a specific but non-credential sensitive indicator,
+  such as a sensitive directory or a suggestive filename.
+* A sensitive directory such as `Passwords` or `HR`, or a credential-like
+  sibling file, raises a candidate's priority but does not by itself make a
+  benign filename level 4. Conversely, an unambiguous credential filename is
+  level 4 even in an ordinary directory.
+
+`RUBRIC_VERSION = "4"` marks this change. The objective text is part of the run
+provenance and the exact-request cache key, so shipping a new objective
+invalidates cached answers rather than silently reusing them.
+
+`scripts/evaluate_jev_rubric.py` dispatches the labeled
+`scripts/jev_rubric_cases.json` fixture through the endpoint configured in
+`config.toml` using the real planner and runner. It reports every case's
+achieved label and the endpoint's per-file distribution, exits non-zero if any
+credential-indicator case is below level 4 or any benign control reaches level
+4, and reports PII/PHI/financial cases without asserting their exact label.
+
 ## Bounded packing rules
 
 The global planner streams pending candidates in stable
