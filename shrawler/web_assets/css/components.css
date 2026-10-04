@@ -534,7 +534,7 @@
 
 .data-grid td {
   height: var(--row-height);
-  padding: 4px var(--space-3);
+  padding: 6px var(--space-3);
   border-bottom: 1px solid var(--line-soft);
   vertical-align: middle;
 }

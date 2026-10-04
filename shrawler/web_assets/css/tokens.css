@@ -112,10 +112,13 @@
   --font-ui: "Space Grotesk", ui-sans-serif, system-ui, "Segoe UI", Roboto, sans-serif;
   --font-data: "JetBrains Mono", ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
 
-  /* One fixed density. The row carries name, path, and evidence at 38px. */
-  --row-height: 38px;
-  --row-line: 15px;
-  --row-sub: 13px;
+  /* One fixed density. The row carries name, path, and evidence in a single
+   * 44px band. The line heights matter as much as the height: with name and
+   * path stacked, leading that is tight makes the row read as cramped even
+   * when there is padding around it. */
+  --row-height: 44px;
+  --row-line: 16px;
+  --row-sub: 14px;
   --control-height: 32px;
   --header-height: 52px;
   --radius-sm: 3px;

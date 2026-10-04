@@ -290,20 +290,29 @@
   transition: box-shadow var(--ease);
 }
 
-.file-row.checked .check-cell {
-  background: var(--accent-wash);
-}
-
-.file-row.selected {
+/* Hover, selection, and expansion are row-level states, so all three are
+ * written at one specificity tier and the last one wins. An earlier revision
+ * painted the checkbox cell on hover and on check, which left a single column
+ * brighter than the row it belonged to. That reads as a rendering fault rather
+ * than a state, and it was the same fault in both states. The severity rail
+ * survives all of this because it is an inset shadow drawn over the background,
+ * not a background of its own. */
+.explore-grid tbody tr.file-row:hover {
   background: var(--surface-2);
 }
 
-.file-row:hover .check-cell {
-  background: hsl(213 14% 22%);
+.explore-grid tbody tr.file-row.selected {
+  background: var(--surface-3);
 }
 
-.file-row.checked:hover .check-cell {
-  background: hsl(36 60% 22%);
+.explore-grid tbody tr.file-row.checked {
+  background: var(--accent-wash);
+}
+
+/* Expanded and selected at once keeps both signals: the translucent wash
+ * layered over the raised surface. */
+.explore-grid tbody tr.file-row.checked.selected {
+  background: linear-gradient(var(--accent-wash), var(--accent-wash)), var(--surface-3);
 }
 
 .file-checkbox {
@@ -334,8 +343,8 @@
   white-space: nowrap;
 }
 
-/* Name, path, and evidence strip all sit inside one 38px row: the density
- * decision is to compress layout, never to hide information. */
+/* Name, path, and evidence strip all sit inside one row: the density decision
+ * is to compress layout, never to hide information. */
 .file-sub {
   display: flex;
   align-items: center;
