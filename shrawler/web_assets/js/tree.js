@@ -193,6 +193,7 @@ export function createTree({ root, loadingNode, params, selection, onSelect, sco
       key = next;
       selectedId = null;
       render();
+      // A cached payload is not evidence about the inventory revision.
       report();
       return;
     }
@@ -205,7 +206,7 @@ export function createTree({ root, loadingNode, params, selection, onSelect, sco
       key = next;
       if (!preserveContext) expanded.clear();
       render();
-      report();
+      report(payload.revision);
     } catch (error) {
       if (error.name !== 'AbortError') toast(error.message, 'error');
     } finally {
@@ -216,10 +217,12 @@ export function createTree({ root, loadingNode, params, selection, onSelect, sco
     }
   }
 
-  function report() {
+  function report(revision) {
     if (!data) return;
     expandLimitExceeded = data.total > EXPAND_LIMIT;
-    onSummary?.(`${fmt.count(data.total)} files across ${fmt.count(data.hosts.length)} hosts`, expandLimitExceeded);
+    // The revision rides along only from a network load; a cache hit says
+    // nothing new, so callers leave their seen revision untouched.
+    onSummary?.(`${fmt.count(data.total)} files across ${fmt.count(data.hosts.length)} hosts`, expandLimitExceeded, revision);
   }
 
   async function expandAll() {

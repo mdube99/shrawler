@@ -102,6 +102,11 @@ let searchTimer = null;
 let anchorRow = null;
 let busy = false;
 let lastKey = '';
+// Inventory revision the view currently reflects. The scanner bumps the
+// database revision on commit, so the "new captures" banner keys off a change
+// past this value, never off a diff between the inventory size and a filtered
+// page total — a search that hides files must not look like new captures.
+let lastRevision = null;
 
 // AUTO and NONE are URL spellings, never API ones: the server is told an empty
 // run id for "off" and left to resolve "the latest" when nothing is named.
@@ -310,6 +315,7 @@ async function loadTable() {
   try {
     const data = await json(`/api/files?${params}`, { signal });
     page = data;
+    lastRevision = data.revision;
     expandedId = null;
     renderTable();
     renderPagination();
@@ -414,10 +420,11 @@ const tree = createTree({
     render();
   },
   detailFor: (item) => detailPanel(item, actionContext()),
-  onSummary: (text, limited) => {
+  onSummary: (text, limited, revision) => {
     $('summary').textContent = text;
     $('expand-tree').disabled = limited;
     $('expand-tree').title = limited ? 'Expand branches individually for inventories over 5,000 files' : 'Expand every branch';
+    if (revision !== undefined) lastRevision = revision;
   },
 });
 
@@ -548,11 +555,14 @@ async function pollStatus() {
         JSON.stringify(runs.ranking.map((run) => [run.id, run.status, run.file_count])) ||
       JSON.stringify((latest.jev_runs || []).map((run) => [run.id, run.status, run.total_observed])) !==
         JSON.stringify(runs.jev.map((run) => [run.id, run.status, run.total_observed]));
-    const added = Math.max(0, (latest.file_count || 0) - (page.total || 0));
+    // Captures are "new" when the scanner committed anything since the view
+    // was last loaded. The inventory-wide size minus a filtered page total is
+    // not a count of new captures — it is a count of hidden files.
+    const fresh = lastRevision !== null && Number(latest.revision) > lastRevision;
     status = latest;
     renderShellStatus(shell, latest);
-    $('pending-updates').hidden = !(changed || added > 0);
-    $('pending-label').textContent = changed ? 'New rankings available' : `${fmt.count(added)} new captures available`;
+    $('pending-updates').hidden = !(changed || fresh);
+    $('pending-label').textContent = changed ? 'New rankings available' : 'New captures available';
   } catch {
     /* Polling failures are surfaced by the actions that need the data. */
   }
@@ -560,6 +570,7 @@ async function pollStatus() {
 
 async function boot() {
   status = await json('/api/status');
+  lastRevision = Number.isInteger(status.revision) ? status.revision : null;
   renderShellStatus(shell, status);
   fill($('search-icon'), icon('search'));
   fill($('clear-query'), icon('close'));

@@ -206,7 +206,11 @@ The optional host in `AUTH` provides authentication and Kerberos context. Each
 inventory record supplies the actual destination.
 
 The browser polls the database revision while a scan is active, so newly
-committed files appear without restarting the server.
+committed files appear without restarting the server. The "new captures"
+banner is keyed to the inventory revision, not to a diff between the
+inventory size and the current result count: a search or filter that hides
+files from the table never reports them as new captures, and the banner does
+not promise a count. Show updates reloads the view, which clears it.
 
 ## Stopping the server
 

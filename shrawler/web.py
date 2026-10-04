@@ -538,6 +538,9 @@ class FileIndex:
             "per_page": per_page,
             "total": len(matches),
             "has_next": start + per_page < len(matches),
+            # JSON indexes are loaded once and never live-append, so there is
+            # no evolution to report and the revision stays fixed.
+            "revision": 0,
         }
 
     def tree(
@@ -645,7 +648,7 @@ class FileIndex:
                     ],
                 }
             )
-        return {"total": len(matches), "hosts": public_hosts}
+        return {"total": len(matches), "hosts": public_hosts, "revision": 0}
 
 
 class DatabaseIndex:
@@ -1569,6 +1572,9 @@ class DatabaseIndex:
             "per_page": per_page,
             "total": total,
             "has_next": has_next,
+            # The metadata revision this page was read at, so the client can
+            # tell a genuinely newer inventory from a narrower search result.
+            "revision": revision,
         }
 
     def tree(
@@ -1621,6 +1627,9 @@ class DatabaseIndex:
         if ranking_run and ranking_min > 0:
             where = where.replace("ranking_score >= ?", f"{ranking_score} >= ?")
         with self._connect() as connection:
+            revision_row = connection.execute(
+                "SELECT value FROM metadata WHERE key='revision'"
+            ).fetchone()
             rows = list(
                 connection.execute(
                     "SELECT files.host AS name, COUNT(*) AS file_count, "
@@ -1641,7 +1650,13 @@ class DatabaseIndex:
             }
             for row in rows
         ]
-        return {"total": sum(row["file_count"] for row in hosts), "hosts": hosts}
+        # Same revision contract as the table response: the tree view tracks
+        # inventory changes with it rather than with a filtered total.
+        return {
+            "total": sum(row["file_count"] for row in hosts),
+            "hosts": hosts,
+            "revision": int(revision_row[0]) if revision_row else 0,
+        }
 
     def tree_branch(
         self,

@@ -244,6 +244,19 @@ class HttpTests(unittest.TestCase):
             "Secret.txt",
         )
 
+    def test_inventory_and_tree_responses_carry_the_metadata_revision(self):
+        # The pending-updates banner keys off this: "new captures" is a change
+        # in the inventory revision, never a diff between the inventory size
+        # and a filtered page total.
+        with self.request("/api/files?include_total=1") as response:
+            payload = json.loads(response.read())
+        self.assertIn("revision", payload)
+        self.assertIsInstance(payload["revision"], int)
+        with self.request("/api/tree") as response:
+            payload = json.loads(response.read())
+        self.assertIn("revision", payload)
+        self.assertIsInstance(payload["revision"], int)
+
 
 if __name__ == "__main__":
     unittest.main()
