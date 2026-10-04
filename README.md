@@ -391,15 +391,15 @@ endpoint with `python scripts/evaluate_jev_rubric.py`.
 See [Model-assisted assessment scaling](docs/jev-assessment-scaling.md) for
 packing rules, concurrency, rate limiting, cache reuse, resume, and rollout.
 
-The WebUI shows three related numbers for each file: the deterministic rule
-**Rating**, the model's 0-4 **Jev** priority, and a **Combined** priority on a
-0-100 scale that blends the two. The blend normalizes the rule rating against 80
-(the strongest built-in signal), normalizes the Jev level against 4, and takes a
-weighted mean. A component counts only when its run is selected, and a file
-missing one component's result contributes zero rather than being renormalized,
-so partial assessment never inflates a score. When both runs are selected,
-agreeing signals rank high and single-source signals land mid scale. Weights and
-the rating anchor are configurable under `[scoring]`. See
+The WebUI shows three related numbers for each file: the deterministic
+**Rule Rating**, the model's **AI Rating** (its 0-4 inspection priority), and a
+**Combined** priority on a 0-100 scale that blends the two. The blend normalizes
+the rule rating against 80 (the strongest built-in signal), normalizes the AI
+level against 4, and takes a weighted mean. A component counts only when its run
+is selected, and a file missing one component's result contributes zero rather
+than being renormalized, so partial assessment never inflates a score. When both
+runs are selected, agreeing signals rank high and single-source signals land mid
+scale. Weights and the rating anchor are configurable under `[scoring]`. See
 [Local WebUI](docs/webui.md) for the formula and coverage markers.
 
 

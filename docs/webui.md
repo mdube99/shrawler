@@ -74,15 +74,15 @@ replace an ACL review on the file itself.
 
 After a ranking run completes, the main inventory automatically selects the
 latest completed run. The Ranking filter chooses another saved run; Rank category
-switches from overall priority to a category score; Minimum rating filters the
-selected score; and Sort can order table rows and expanded tree files by rating.
-The displayed rating is a snapshot from that run. Files discovered after the
-ranking remain unranked until the ranking is run again.
+switches from overall priority to a category score; Minimum rule rating filters
+the selected score; and Sort can order table rows and expanded tree files by
+rule rating. The displayed **Rule Rating** is a snapshot from that run. Files
+discovered after the ranking remain unranked until the ranking is run again.
 
 ## Combined priority
 
-The table and tree also show a **Combined** column that blends the rule rating
-with the model's Jev inspection priority on a common 0-100 scale:
+The table and tree also show a **Combined** column that blends the rule-based
+**Rule Rating** with the model's **AI Rating** on a common 0-100 scale:
 
 ```text
 r = min(rating / 80, 1)          # 80 is the strongest built-in rule signal
@@ -91,16 +91,16 @@ combined = round(100 * (0.5*r + 0.5*j) / (0.5*active_r + 0.5*active_j))
 ```
 
 A component only counts when its run is selected, so the metric works with a
-ranking alone, a Jev run alone, or both. When both are selected but a file has
+ranking alone, an AI run alone, or both. When both are selected but a file has
 no result for one of them, the missing side counts as zero rather than being
 renormalized away, so a partial assessment never inflates a score. With both
 runs selected, an agreeing strong signal lands high (an SSH key rated 45 by the
-rules and level 4 by Jev reads 78), while a signal from only one side lands mid
-scale (a rules-missed credential the model rates 4 reads 50; a rule maximum the
-model rates 0 reads 50). If neither run is selected the column shows `—`.
+rules and level 4 by AI reads 78), while a signal from only one side lands mid
+scale (a rules-missed credential the AI rates 4 reads 50; a rule maximum the AI
+rates 0 reads 50). If neither run is selected the column shows `—`.
 
 The badge carries a coverage marker for which components fed the number: `●`
-both, `◐` rules only, `○` Jev only. Sort by **Combined** orders the page by this
+both, `◐` rules only, `○` AI only. Sort by **Combined** orders the page by this
 score. Weights and the rating anchor are configurable under `[scoring]` in the
 configuration file (`rating_full`, `rating_weight`, `jev_weight`).
 

@@ -288,7 +288,7 @@
   }
 
   function sortName(value) {
-    return {path: 'Path', type: 'Type', file: 'File', location: 'Location', combined: 'Combined', priority: 'Rating', jev: 'Jev priority', size: 'Size', modified: 'Modified'}[value] || 'Path';
+    return {path: 'Path', type: 'Type', file: 'File', location: 'Location', combined: 'Combined', priority: 'Rule Rating', jev: 'AI Rating', size: 'Size', modified: 'Modified'}[value] || 'Path';
   }
 
   function renderSortHeaders() {
@@ -318,11 +318,11 @@
 
   function setSort(column) {
     if (column === 'priority' && !$('ranking').value) {
-      showToast('Select a completed ranking before sorting by rating', true);
+      showToast('Select a completed ranking before sorting by rule rating', true);
       return;
     }
     if (column === 'combined' && !combinedAvailable()) {
-      showToast('Run a ranking or Jev assessment before sorting by combined priority', true);
+      showToast('Run a ranking or AI assessment before sorting by combined priority', true);
       return;
     }
     if ($('sort').value === column) state.sortDirection = state.sortDirection === 'asc' ? 'desc' : 'asc';
@@ -350,8 +350,8 @@
       ['rule', 'Rule', values.rule], ['triage', 'Triage', values.triage],
       ['permission', 'Share-root permission', permissionName(values.permission)], ['activity', 'Activity', values.activity ? activityLabel(values.activity) : ''],
       ['ranking', 'Ranking', values.ranking_run ? 'Selected' : ''], ['ranking-category', 'Rank category', values.ranking_category],
-      ['ranking-min', 'Minimum rating', values.ranking_min ? `${values.ranking_min}+` : ''],
-      ['jev-run', 'Jev run', values.jev_run ? 'Selected' : ''],
+      ['ranking-min', 'Minimum rule rating', values.ranking_min ? `${values.ranking_min}+` : ''],
+      ['jev-run', 'AI run', values.jev_run ? 'Selected' : ''],
       ['sort', 'Sort', values.sort !== 'path' || state.sortDirection !== 'asc' ? `${sortName(values.sort)} ${state.sortDirection === 'desc' ? '↓' : '↑'}` : '']
     ].filter(entry => entry[2]);
     $('clear').hidden = entries.length === 0;
@@ -402,7 +402,7 @@
 
   function ratingBadge(item) {
     const value = element('span', `rating-badge ${item.ranking_run_id ? 'ranked' : 'unranked'}`, ratingText(item));
-    value.title = item.ranking_run_id ? `Ranking score: ${ratingText(item)}` : 'No selected ranking';
+    value.title = item.ranking_run_id ? `Rule rating: ${ratingText(item)}` : 'No selected ranking';
     return value;
   }
 
@@ -414,11 +414,11 @@
   function jevBadge(item) {
     const assessed = !!item.jev_run_id && item.jev_score !== null && item.jev_score !== undefined;
     const value = element('span', `rating-badge ${assessed ? 'ranked' : 'unranked'}`, jevText(item));
-    value.title = assessed ? `Jev inspection priority: ${jevText(item)}` : 'Not assessed by Jev';
+    value.title = assessed ? `AI priority: ${jevText(item)}` : 'Not assessed by AI';
     return value;
   }
 
-  const COVERAGE_LABELS = {both: 'rules + Jev', rules: 'rules only', jev: 'Jev only'};
+  const COVERAGE_LABELS = {both: 'rules + AI', rules: 'rules only', jev: 'AI only'};
 
   function combinedText(item) {
     if (item.combined_score === null || item.combined_score === undefined) return '—';
@@ -437,15 +437,15 @@
       value.append(dot);
     }
     value.title = shown
-      ? `Combined priority ${item.combined_score}/100 (${COVERAGE_LABELS[coverage] || coverage}) — rating ${ratingText(item)}, Jev ${jevText(item)}`
-      : 'No ranking or Jev assessment for this file';
+      ? `Combined priority ${item.combined_score}/100 (${COVERAGE_LABELS[coverage] || coverage}) — rule rating ${ratingText(item)}, AI ${jevText(item)}`
+      : 'No rule rating or AI assessment for this file';
     return value;
   }
 
   function combinedDetail(item) {
     const coverage = item.combined_coverage || 'none';
     if (coverage === 'none' || item.combined_score === null || item.combined_score === undefined) {
-      return 'Unavailable — run a ranking or Jev assessment';
+      return 'Unavailable — run a ranking or AI assessment';
     }
     return `${item.combined_score}/100 · ${COVERAGE_LABELS[coverage] || coverage}`;
   }
@@ -534,8 +534,8 @@
     const evidence = element('div', 'detail-evidence');
     const matchNames = (item.rule_matches || []).map(match => `${match.rule_name || 'unnamed'}${match.triage ? ` · ${match.triage}` : ''}`);
     evidence.append(metadataField('Combined priority', combinedDetail(item)));
-    evidence.append(metadataField('Ranking', item.ranking_run_id ? ratingText(item) : 'No ranking selected'));
-    evidence.append(metadataField('Jev priority', item.jev_run_id ? jevText(item) : 'Not assessed by Jev'));
+    evidence.append(metadataField('Rule Rating', item.ranking_run_id ? ratingText(item) : 'No ranking selected'));
+    evidence.append(metadataField('AI Rating', item.jev_run_id ? jevText(item) : 'Not assessed by AI'));
     evidence.append(metadataField('Downloaded', item.collection_status === 'collected' ? `Yes${(Number(item.download_count) || 0) > 1 ? ` · ${item.download_count}×` : ''}${item.downloaded_at_utc ? ` · ${formatDate(item.downloaded_at_utc)}` : ''}` : 'No'));
     evidence.append(metadataField('Nemesis', nemesisText(item)));
     const rules = element('section', 'detail-rules');
