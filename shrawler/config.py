@@ -38,7 +38,7 @@ deployment_revision = ""         # operator-pinned immutable revision; defaults 
 objective = ""                   # blank uses the built-in objective text
 max_input_tokens = 60000         # state + all questions, under the 64k ceiling
 max_state_longest_question_tokens = 30000  # state + longest question, under 32k
-max_questions_per_request = 200  # cap per request; status shows files/request
+max_questions_per_request = 500  # cap per request; status shows files/request
 request_timeout_seconds = 120
 retries = 2
 workers = 8                      # concurrent decision requests; sweep vs the route
@@ -83,7 +83,7 @@ Top level:
   objective                        assessment objective text (blank = built-in)
   max_input_tokens                 state + all questions budget (default: 60000)
   max_state_longest_question_tokens  state + longest question budget (default: 30000)
-  max_questions_per_request        candidate cap per request (default: 200)
+  max_questions_per_request        candidate cap per request (default: 500)
   request_timeout_seconds          per-request timeout (default: 120)
   retries                          retries before a candidate is failed (default: 2)
   workers                          concurrent decision requests (default: 8)

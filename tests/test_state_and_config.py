@@ -3,12 +3,15 @@ import tempfile
 import unittest
 from pathlib import Path
 
+import tomllib
+
 from shrawler.config import (
     CONFIG_OPTIONS,
     DEFAULT_CONFIG,
     load_config,
 )
 from shrawler.state import ScanStateStore
+from shrawler.triage.jev.config import JevConfig
 
 
 class ConfigTests(unittest.TestCase):
@@ -22,6 +25,25 @@ class ConfigTests(unittest.TestCase):
         self.assertIn("username:password", DEFAULT_CONFIG)
         self.assertIn('"off", "matches", "downloads"', DEFAULT_CONFIG)
         self.assertIn("off | matches | downloads", CONFIG_OPTIONS)
+
+    def test_initializer_jev_values_match_the_shipped_defaults(self) -> None:
+        # The template is a written-out copy of JevConfig's defaults, so the two
+        # can drift. When they do, `shrawler config init` quietly pins a stale
+        # value that overrides the shipped default (this bit when the candidate
+        # cap per request rose from 200 to 500). The template is what new
+        # operators actually run, so its values must agree with the source.
+        written = tomllib.loads(DEFAULT_CONFIG)["jev"]
+        defaults = JevConfig().to_table()
+        for field, value in written.items():
+            self.assertIn(field, defaults, f"unknown [jev] field in template: {field}")
+            expected = defaults[field]
+            # `objective` is deliberately blank in the template so it resolves to
+            # the built-in text at load time.
+            if field == "objective":
+                value = expected if value == "" else value
+            self.assertEqual(value, expected, f"[jev] {field} drifted in the template")
+        # The template must also stay valid input to the parser it feeds.
+        JevConfig.from_mapping(written)
 
     def test_loads_structured_toml(self):
         with tempfile.TemporaryDirectory() as tmp:
