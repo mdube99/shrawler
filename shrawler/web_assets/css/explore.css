@@ -256,8 +256,7 @@
 }
 
 .explore-grid .col-score {
-  /* Wide enough for the two-line header ("rules + AI · 0–100"). */
-  width: 114px;
+  width: 104px;
 }
 
 .explore-grid .col-score-narrow {

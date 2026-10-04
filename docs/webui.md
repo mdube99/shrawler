@@ -65,11 +65,12 @@ turning the rule run off. Both engines keep their own column at all times, in
 their own hues, for whichever runs are selected.
 
 The three score headers say what the number is, in a second smaller line
-beneath the name: `static rules and AI analysis · 0–100` under Combined, `static rules` under
-Rule, and `model · 0–4` under AI, in each engine's hue. The Combined sub-label
-follows the engine selection exactly like the note beside the selectors, so a
-column never claims a blend that is not active. Chip tooltips carry the same
-statements as sentences, with the severity band for Combined.
+beneath the name: `rules and AI` under Combined (the full story lives in the
+header's own tooltip), `static rules` under Rule, and `model · 0–4` under AI,
+in each engine's hue. The Combined sub-label follows the engine selection
+exactly like the note beside the selectors, so a column never claims a blend
+that is not active. Chip tooltips carry the same statements as sentences, with
+the severity band for Combined.
 
 Every piece of view state lives in the URL, so any table state can be shared as a
 link. Nothing is kept in `localStorage`.

@@ -249,7 +249,7 @@ export function createFilters({ root, state, defaults, runs, facets, commit }) {
     const mix = composition();
     root.note.textContent = mix.note;
     // The Combined column header must never claim a blend that is not active.
-    if (root.combinedSub) root.combinedSub.textContent = mix.header === '—' ? '—' : `${mix.header} · 0–100`;
+    if (root.combinedSub) root.combinedSub.textContent = mix.header;
   }
 
   /**
@@ -261,7 +261,7 @@ export function createFilters({ root, state, defaults, runs, facets, commit }) {
   function composition() {
     const rule = !!state.ranking_run;
     const ai = aiEnabled();
-    if (rule && ai) return { note: 'Combined blends both engines', header: 'static rules and AI analysis' };
+    if (rule && ai) return { note: 'Combined blends both engines', header: 'rules and AI' };
     if (rule) return { note: 'Combined uses the rule rating · no AI run selected', header: 'rules only' };
     if (ai) return { note: 'Combined uses the AI score · no rule rating', header: 'AI only' };
     return {
