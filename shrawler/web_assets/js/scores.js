@@ -11,8 +11,9 @@
 import { el, severity } from './core.js';
 
 // The coverage marker says which engines contributed to Combined, so one number
-// can always be traced back to its sources.
-export const COVERAGE = { both: 'rules + AI', rules: 'rules only', jev: 'AI only' };
+// can always be traced back to its sources. The words name the engines the way
+// the column sub-labels do (see components.css .sort-sub).
+export const COVERAGE = { both: 'static rules + AI', rules: 'static rules', jev: 'AI model' };
 const COVERAGE_MARK = { both: '●', rules: '◐', jev: '○' };
 
 export const ruleScore = (item) => (item.ranking_run_id ? (item.ranking_score ?? item.ranking_priority ?? 0) : null);
@@ -39,20 +40,28 @@ export function combinedChip(item) {
   }
   chip.title =
     score === null
-      ? 'No rule rating or AI assessment for this file'
-      : `Combined ${score}/100 (${COVERAGE[item.combined_coverage] || item.combined_coverage})`;
+      ? 'No rating — select a ranking or AI run above'
+      : `Combined priority ${score}/100 · ${severity(score).label} · rated by ${COVERAGE[item.combined_coverage] || item.combined_coverage}`;
   return chip;
 }
 
 /**
  * Rule and AI chips. `strong` bumps the weight past 76 so a high single-engine
- * score is noticeable without borrowing the severity ramp.
+ * score is noticeable without borrowing the severity ramp. The tooltip spells
+ * out the scale and the source, per the rule/AI treatments in docs/webui.md.
  */
 export function engineChip(kind, score, label) {
   const chip = el('span', `score score--${kind}`);
   chip.dataset.strong = String((score ?? 0) >= 76);
   chip.textContent = score === null ? '—' : String(score);
-  chip.title = score === null ? `No ${label.toLowerCase()} for this file` : `${label} ${score}`;
+  chip.title =
+    score === null
+      ? kind === 'rule'
+        ? 'Not rated by rules · run a ranking on the Score screen'
+        : 'Not assessed by AI · run an AI assessment on the Score screen'
+      : kind === 'rule'
+        ? `${label} ${score} · matched static filename, path, and metadata rules · 80+ fully alarmed`
+        : `${label} ${score}/4 · Jev-style decision model`;
   return chip;
 }
 
@@ -61,10 +70,12 @@ export const describe = {
   combined: (item) => {
     const score = combinedScore(item);
     return score === null
-      ? 'Unavailable — run a ranking or AI assessment'
-      : `${score}/100 · ${COVERAGE[item.combined_coverage] || item.combined_coverage}`;
+      ? 'No rating — select a ranking or AI run'
+      : `${score}/100 · ${severity(score).label} · ${COVERAGE[item.combined_coverage] || item.combined_coverage}`;
   },
   rule: (item) => (item.ranking_run_id ? String(ruleScore(item)) : 'No ranking selected'),
   ai: (item) =>
-    aiScore(item) === null ? 'Not assessed by AI' : `${aiScore(item)}${item.jev_priority_name ? ` ${item.jev_priority_name}` : ''}`,
+    aiScore(item) === null
+      ? 'Not assessed by AI'
+      : `${aiScore(item)} of 4${item.jev_priority_name ? ` · ${item.jev_priority_name}` : ''}`,
 };

@@ -256,11 +256,13 @@
 }
 
 .explore-grid .col-score {
-  width: 104px;
+  /* Wide enough for the two-line header ("rules + AI · 0–100"). */
+  width: 114px;
 }
 
 .explore-grid .col-score-narrow {
-  width: 62px;
+  /* Wide enough for the two-line header ("static rules"). */
+  width: 78px;
 }
 
 .explore-grid .col-size {

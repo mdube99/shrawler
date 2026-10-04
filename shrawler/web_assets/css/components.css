@@ -572,6 +572,43 @@
   color: var(--text);
 }
 
+/* Score headers carry a second, smaller line that says what the number is.
+ * The sub-line takes the engine hue so the header teaches the same
+ * "hue = which engine spoke" contract the chips do. */
+.sort-stack {
+  display: inline-flex;
+  flex-direction: column;
+  align-items: inherit;
+  gap: 2px;
+}
+
+.numeric .sort-stack {
+  align-items: flex-end;
+}
+
+.sort-sub {
+  font-size: 9px;
+  font-weight: 500;
+  letter-spacing: 0.02em;
+  text-transform: none;
+  color: var(--text-faint);
+  white-space: nowrap;
+}
+
+.sort-sub--rule {
+  color: var(--rule-dim);
+}
+
+.sort-sub--ai {
+  color: var(--ai-dim);
+}
+
+/* Only the headers that carry a sub-line need the extra height; single-line
+ * grids elsewhere keep their fixed 32px band. */
+.data-grid th:has(.sort-sub) {
+  height: 42px;
+}
+
 .sort-caret {
   width: 0;
   height: 0;

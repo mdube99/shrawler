@@ -246,20 +246,28 @@ export function createFilters({ root, state, defaults, runs, facets, commit }) {
       root.jev.value = NONE;
     }
     root.jev.disabled = !usable.length;
-    root.note.textContent = engineNote();
+    const mix = composition();
+    root.note.textContent = mix.note;
+    // The Combined column header must never claim a blend that is not active.
+    if (root.combinedSub) root.combinedSub.textContent = mix.header === '—' ? '—' : `${mix.header} · 0–100`;
   }
 
   /**
    * One line explaining how Combined is currently composed, so the table never
-   * leaves the reader guessing why a column is blank.
+   * leaves the reader guessing why a column is blank. The same truth also
+   * drives the Combined header sub-label, which is a fragment rather than a
+   * sentence and is appended with the scale.
    */
-  function engineNote() {
+  function composition() {
     const rule = !!state.ranking_run;
     const ai = aiEnabled();
-    if (rule && ai) return 'Combined blends both engines';
-    if (rule) return 'Combined uses the rule rating · no AI run selected';
-    if (ai) return 'Combined uses the AI score · no rule rating';
-    return aiUsable() ? 'Combined unavailable · no engine selected' : 'Combined unavailable · no runs saved yet';
+    if (rule && ai) return { note: 'Combined blends both engines', header: 'static rules and AI analysis' };
+    if (rule) return { note: 'Combined uses the rule rating · no AI run selected', header: 'rules only' };
+    if (ai) return { note: 'Combined uses the AI score · no rule rating', header: 'AI only' };
+    return {
+      note: aiUsable() ? 'Combined unavailable · no engine selected' : 'Combined unavailable · no runs saved yet',
+      header: '—',
+    };
   }
 
   function columnAvailable(column) {

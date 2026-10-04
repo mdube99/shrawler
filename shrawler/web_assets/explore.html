@@ -96,9 +96,9 @@
                 <th scope="col"><button class="sort-btn" type="button" data-sort="type">Type<span class="sort-caret" aria-hidden="true"></span></button></th>
                 <th scope="col"><button class="sort-btn" type="button" data-sort="file">File / path / evidence<span class="sort-caret" aria-hidden="true"></span></button></th>
                 <th scope="col"><button class="sort-btn" type="button" data-sort="location">Location<span class="sort-caret" aria-hidden="true"></span></button></th>
-                <th class="numeric" scope="col"><button class="sort-btn" type="button" data-sort="combined">Combined<span class="sort-caret" aria-hidden="true"></span></button></th>
-                <th class="numeric" scope="col"><button class="sort-btn" type="button" data-sort="priority">Rule<span class="sort-caret" aria-hidden="true"></span></button></th>
-                <th class="numeric" scope="col"><button class="sort-btn" type="button" data-sort="jev">AI<span class="sort-caret" aria-hidden="true"></span></button></th>
+                <th class="numeric" scope="col"><button class="sort-btn" type="button" data-sort="combined" title="Combined priority 0–100 · blended from the engines selected above"><span class="sort-stack"><span>Combined</span><span class="sort-sub" id="combined-sub">static rules and AI analysis · 0–100</span></span><span class="sort-caret" aria-hidden="true"></span></button></th>
+                <th class="numeric" scope="col"><button class="sort-btn" type="button" data-sort="priority" title="Rule rating · matched static filename, path, and metadata rules, 80+ fully alarmed"><span class="sort-stack"><span>Rule</span><span class="sort-sub sort-sub--rule">static rules</span></span><span class="sort-caret" aria-hidden="true"></span></button></th>
+                <th class="numeric" scope="col"><button class="sort-btn" type="button" data-sort="jev" title="AI rating 0–4 · Jev-style decision model"><span class="sort-stack"><span>AI</span><span class="sort-sub sort-sub--ai">model · 0–4</span></span><span class="sort-caret" aria-hidden="true"></span></button></th>
                 <th class="numeric" scope="col"><button class="sort-btn" type="button" data-sort="size">Size<span class="sort-caret" aria-hidden="true"></span></button></th>
                 <th class="numeric" scope="col"><button class="sort-btn" type="button" data-sort="modified">Modified<span class="sort-caret" aria-hidden="true"></span></button></th>
                 <th scope="col"><span class="sr-only">Details</span></th>

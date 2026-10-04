@@ -64,6 +64,13 @@ alone instead of filtering rows away, so "focus on AI only" is expressed by
 turning the rule run off. Both engines keep their own column at all times, in
 their own hues, for whichever runs are selected.
 
+The three score headers say what the number is, in a second smaller line
+beneath the name: `static rules and AI analysis · 0–100` under Combined, `static rules` under
+Rule, and `model · 0–4` under AI, in each engine's hue. The Combined sub-label
+follows the engine selection exactly like the note beside the selectors, so a
+column never claims a blend that is not active. Chip tooltips carry the same
+statements as sentences, with the severity band for Combined.
+
 Every piece of view state lives in the URL, so any table state can be shared as a
 link. Nothing is kept in `localStorage`.
 
@@ -122,9 +129,13 @@ scale (a rules-missed credential the AI rates 4 reads 50; a rule maximum the AI
 rates 0 reads 50). If neither run is selected the column shows `—`.
 
 The chip carries a coverage marker for which components fed the number: `●`
-both, `◐` rules only, `○` AI only. Sort by **Combined** orders the page by this
-score. Weights and the rating anchor are configurable under `[scoring]` in the
-configuration file (`rating_full`, `rating_weight`, `jev_weight`).
+both, `◐` rules only, `○` AI only — spelled out in the tooltip, e.g.
+`Combined priority 78/100 · Strong · rated by static rules + AI`. Rule and AI
+chips explain their own scale and source on hover (rule weights, where 80+
+fully alarms; the 0–4 Jev model rating). Sort by **Combined** orders the page
+by this score. Weights and the rating anchor are configurable under
+`[scoring]` in the configuration file (`rating_full`, `rating_weight`,
+`jev_weight`).
 
 Combined is mapped onto four severity bands, applied as a left rail on the row
 and a chip in the score cell: 0-25 Minimal, 26-50 Likely, 51-75 Strong, 76-100

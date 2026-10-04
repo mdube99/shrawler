@@ -118,7 +118,7 @@ function commit(patch, { keepPage = false, push = false } = {}) {
 }
 
 const filters = createFilters({
-  root: { toggle: $('filter-toggle'), chips: $('active-filters'), ranking: $('ranking-run'), jev: $('jev-run'), note: $('engine-note') },
+  root: { toggle: $('filter-toggle'), chips: $('active-filters'), ranking: $('ranking-run'), jev: $('jev-run'), note: $('engine-note'), combinedSub: $('combined-sub') },
   state,
   defaults: DEFAULTS,
   runs,
