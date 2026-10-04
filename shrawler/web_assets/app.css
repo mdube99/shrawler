@@ -312,3 +312,6 @@ dialog::backdrop { background: hsla(200, 30%, 4%, .72); backdrop-filter: blur(3p
 }
 .rating-badge.ranked { color: var(--accent-bright, #f5c66a); background: color-mix(in srgb, #f5c66a 15%, transparent); }
 .rating-badge.unranked { color: var(--muted, #8b93a7); }
+.combined-badge { gap: 0.3rem; font-weight: 600; }
+.combined-badge.ranked { color: var(--accent, #7cc4ff); background: color-mix(in srgb, #7cc4ff 15%, transparent); }
+.coverage-dot { font-size: 0.7em; line-height: 1; opacity: 0.85; }

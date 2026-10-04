@@ -253,6 +253,7 @@
       $('sort').value = 'file';
       state.sortDirection = 'asc';
     }
+    updateCombinedControls();
   }
 
   // In-progress runs are selectable too: assessed files appear as batches land,
@@ -283,10 +284,11 @@
       $('sort').value = 'path';
       state.sortDirection = 'asc';
     }
+    updateCombinedControls();
   }
 
   function sortName(value) {
-    return {path: 'Path', type: 'Type', file: 'File', location: 'Location', priority: 'Rating', jev: 'Jev priority', size: 'Size', modified: 'Modified'}[value] || 'Path';
+    return {path: 'Path', type: 'Type', file: 'File', location: 'Location', combined: 'Combined', priority: 'Rating', jev: 'Jev priority', size: 'Size', modified: 'Modified'}[value] || 'Path';
   }
 
   function renderSortHeaders() {
@@ -298,15 +300,35 @@
     });
   }
 
+  function combinedAvailable() {
+    return !!$('ranking').value || state.jevRuns.some(run => JEV_USABLE_STATUSES.includes(run.status));
+  }
+
+  function updateCombinedControls() {
+    const available = combinedAvailable();
+    const sortOption = $('sort').querySelector('option[value="combined"]');
+    if (sortOption) sortOption.disabled = !available;
+    const header = document.querySelector('.sort-header[data-sort="combined"]');
+    if (header) header.disabled = !available;
+    if (!available && $('sort').value === 'combined') {
+      $('sort').value = 'path';
+      state.sortDirection = 'asc';
+    }
+  }
+
   function setSort(column) {
     if (column === 'priority' && !$('ranking').value) {
       showToast('Select a completed ranking before sorting by rating', true);
       return;
     }
+    if (column === 'combined' && !combinedAvailable()) {
+      showToast('Run a ranking or Jev assessment before sorting by combined priority', true);
+      return;
+    }
     if ($('sort').value === column) state.sortDirection = state.sortDirection === 'asc' ? 'desc' : 'asc';
     else {
       $('sort').value = column;
-      state.sortDirection = ['priority', 'jev', 'size', 'modified'].includes(column) ? 'desc' : 'asc';
+      state.sortDirection = ['combined', 'priority', 'jev', 'size', 'modified'].includes(column) ? 'desc' : 'asc';
     }
     state.page = 1;
     renderSortHeaders();
@@ -396,6 +418,38 @@
     return value;
   }
 
+  const COVERAGE_LABELS = {both: 'rules + Jev', rules: 'rules only', jev: 'Jev only'};
+
+  function combinedText(item) {
+    if (item.combined_score === null || item.combined_score === undefined) return '—';
+    if (item.combined_coverage === 'none') return '—';
+    return String(item.combined_score);
+  }
+
+  function combinedBadge(item) {
+    const coverage = item.combined_coverage || 'none';
+    const shown = coverage !== 'none' && item.combined_score !== null && item.combined_score !== undefined;
+    const marker = {both: '●', rules: '◐', jev: '○'}[coverage] || '';
+    const value = element('span', `rating-badge combined-badge ${shown ? 'ranked' : 'unranked'}`, combinedText(item));
+    if (marker) {
+      const dot = element('span', 'coverage-dot', marker);
+      dot.setAttribute('aria-hidden', 'true');
+      value.append(dot);
+    }
+    value.title = shown
+      ? `Combined priority ${item.combined_score}/100 (${COVERAGE_LABELS[coverage] || coverage}) — rating ${ratingText(item)}, Jev ${jevText(item)}`
+      : 'No ranking or Jev assessment for this file';
+    return value;
+  }
+
+  function combinedDetail(item) {
+    const coverage = item.combined_coverage || 'none';
+    if (coverage === 'none' || item.combined_score === null || item.combined_score === undefined) {
+      return 'Unavailable — run a ranking or Jev assessment';
+    }
+    return `${item.combined_score}/100 · ${COVERAGE_LABELS[coverage] || coverage}`;
+  }
+
   async function copyPath(item, button, pathNode) {
     try {
       await navigator.clipboard.writeText(item.unc_path);
@@ -479,6 +533,7 @@
 
     const evidence = element('div', 'detail-evidence');
     const matchNames = (item.rule_matches || []).map(match => `${match.rule_name || 'unnamed'}${match.triage ? ` · ${match.triage}` : ''}`);
+    evidence.append(metadataField('Combined priority', combinedDetail(item)));
     evidence.append(metadataField('Ranking', item.ranking_run_id ? ratingText(item) : 'No ranking selected'));
     evidence.append(metadataField('Jev priority', item.jev_run_id ? jevText(item) : 'Not assessed by Jev'));
     evidence.append(metadataField('Downloaded', item.collection_status === 'collected' ? `Yes${(Number(item.download_count) || 0) > 1 ? ` · ${item.download_count}×` : ''}${item.downloaded_at_utc ? ` · ${formatDate(item.downloaded_at_utc)}` : ''}` : 'No'));
@@ -544,7 +599,7 @@
     if (!state.items.length) {
       const row = document.createElement('tr');
       const cell = element('td', 'empty-message');
-      cell.colSpan = 9;
+      cell.colSpan = 10;
       cell.append(element('strong', '', 'No files match these filters.'), element('span', '', 'Try a broader search or clear an active filter.'));
       row.append(cell);
       body.append(row);
@@ -580,6 +635,8 @@
       const location = element('span', 'location-strip', locationText(item));
       location.title = locationText(item);
       locationCell.append(location);
+      const combinedCell = element('td', 'numeric');
+      combinedCell.append(combinedBadge(item));
       const ratingCell = element('td', 'numeric');
       ratingCell.append(ratingBadge(item));
       const jevCell = element('td', 'numeric');
@@ -592,7 +649,7 @@
       dateCell.append(time);
       const chevronCell = element('td', 'row-chevron');
       chevronCell.append(icon('chevron'));
-      row.append(selectCell, tagCell, fileCell, locationCell, ratingCell, jevCell, sizeCell, dateCell, chevronCell);
+      row.append(selectCell, tagCell, fileCell, locationCell, combinedCell, ratingCell, jevCell, sizeCell, dateCell, chevronCell);
       row.addEventListener('click', event => { if (!event.target.closest('button')) toggleTableDetails(item); });
       body.append(row);
 
@@ -600,7 +657,7 @@
         const detailRow = element('tr', 'detail-row');
         detailRow.id = `details-${item.id}`;
         const detailCell = document.createElement('td');
-        detailCell.colSpan = 9;
+        detailCell.colSpan = 10;
         detailCell.append(detailPanel(item, () => toggleTableDetails(item)));
         detailRow.append(detailCell);
         body.append(detailRow);
@@ -622,7 +679,7 @@
     body.replaceChildren();
     for (let rowIndex = 0; rowIndex < 7; rowIndex += 1) {
       const row = element('tr', 'skeleton-row');
-      for (let column = 0; column < 9; column += 1) {
+      for (let column = 0; column < 10; column += 1) {
         const cell = document.createElement('td');
         cell.append(element('div', 'skeleton'));
         row.append(cell);
@@ -658,7 +715,7 @@
       const label = element('span', 'tree-label file-label');
       label.append(specimenTag(node.extension), element('span', '', node.file_name));
       const meta = element('span', 'tree-file-meta');
-      meta.append(ratingBadge(node), element('span', '', node.readable_size || formatBytes(node.size_bytes)), element('span', '', formatDate(node.mtime_utc)), transferChips(node), element('span', 'finding-indicator', findingText(node)));
+      meta.append(combinedBadge(node), ratingBadge(node), jevBadge(node), element('span', '', node.readable_size || formatBytes(node.size_bytes)), element('span', '', formatDate(node.mtime_utc)), transferChips(node), element('span', 'finding-indicator', findingText(node)));
       line.append(label, meta);
       line.setAttribute('aria-expanded', String(state.selectedId === node.id));
       line.addEventListener('click', () => toggleTreeFile(node, key));

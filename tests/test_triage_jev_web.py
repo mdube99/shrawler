@@ -224,5 +224,106 @@ class AssessmentHttpTests(unittest.TestCase):
                 self.assertIn(marker, response.read())
 
 
+class CombinedPriorityHttpTests(AssessmentHttpTests):
+    """The combined metric blends a saved ranking with an assessment run."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        from shrawler.triage.service import TriageService
+
+        # The inherited state only carries the Jev service; add a triage
+        # service so a ranking run can be created over HTTP too.
+        self.triage = TriageService(self.database, self.root)
+        self.state.triage = self.triage
+
+    def tearDown(self) -> None:
+        self.triage.close()
+        super().tearDown()
+
+    def _run_ranking(self) -> str:
+        self.request("/api/triage/jobs", {"preview": False})
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            job = self.request("/api/triage/job")["job"]
+            if job["status"] != "running":
+                self.assertEqual(job["status"], "completed", job)
+                return job["result"]["run_id"]
+            time.sleep(0.01)
+        self.fail("ranking job did not finish")
+
+    def _run_assessment(self) -> str:
+        with patch(
+            "shrawler.triage.jev.client.JevClient.decide", side_effect=fake_decide
+        ), patch(
+            "shrawler.triage.jev.client.JevClient.count_tokens", return_value=8
+        ):
+            self.request("/api/assessment/jobs", {"scan_id": None, "prepare": True})
+            finished = self.finished_job()
+        return finished["assessment_run_id"]
+
+    def test_combined_score_requires_a_component(self) -> None:
+        inventory = self.request("/api/files?limit=10")
+        self.assertTrue(inventory["items"])
+        for item in inventory["items"]:
+            self.assertIsNone(item["combined_score"])
+            self.assertEqual(item["combined_coverage"], "none")
+
+    def test_combined_blends_ranking_and_jev(self) -> None:
+        run_id = self._run_ranking()
+        jev_run = self._run_assessment()
+        inventory = self.request(
+            f"/api/files?ranking_run={run_id}&jev_run={jev_run}&limit=10"
+        )
+        self.assertTrue(inventory["items"])
+        for item in inventory["items"]:
+            self.assertEqual(item["combined_coverage"], "both", item)
+            self.assertIsNotNone(item["combined_score"])
+            expected = round(
+                100
+                * (
+                    0.5 * min(item["ranking_score"] / 80, 1.0)
+                    + 0.5 * min(max(item["jev_score"], 0), 4) / 4.0
+                )
+            )
+            self.assertEqual(item["combined_score"], expected, item)
+            # Sorting and the shown number are produced by the same arithmetic.
+            self.assertLessEqual(0, item["combined_score"])
+            self.assertLessEqual(item["combined_score"], 100)
+
+    def test_combined_sort_is_descending_by_default(self) -> None:
+        run_id = self._run_ranking()
+        jev_run = self._run_assessment()
+        items = self.request(
+            f"/api/files?ranking_run={run_id}&jev_run={jev_run}&sort=combined&limit=10"
+        )["items"]
+        scores = [item["combined_score"] for item in items]
+        self.assertEqual(scores, sorted(scores, reverse=True))
+
+    def test_ranking_only_fills_the_full_scale(self) -> None:
+        run_id = self._run_ranking()
+        items = self.request(
+            f"/api/files?ranking_run={run_id}&limit=10"
+        )["items"]
+        for item in items:
+            self.assertEqual(item["combined_coverage"], "rules", item)
+            self.assertEqual(
+                item["combined_score"],
+                round(100 * min(item["ranking_score"] / 80, 1.0)),
+                item,
+            )
+
+    def test_tree_branch_carries_combined_score(self) -> None:
+        run_id = self._run_ranking()
+        jev_run = self._run_assessment()
+        branch = self.request(
+            f"/api/tree/branch?host=server&share=DATA&parent=/Finance/Payroll"
+            f"&ranking_run={run_id}&jev_run={jev_run}"
+        )
+        self.assertTrue(branch["files"])
+        for item in branch["files"]:
+            self.assertEqual(item["combined_coverage"], "both", item)
+            self.assertIsNotNone(item["combined_score"])
+
+
 if __name__ == "__main__":
     unittest.main()

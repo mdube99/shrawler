@@ -47,6 +47,13 @@ time_budget_seconds = 0          # 0 = unlimited; a budget pauses, never samples
 packing_scope = "multi-directory"  # multi-directory (default) or directory
 token_headroom_percent = 10      # estimator safety margin on both token budgets
 max_request_bytes = 0            # 0 = no exact canonical byte cap
+
+[scoring]
+# Combined inspection priority shown in the WebUI as a 0-100 score blending
+# the deterministic rule rating with the model's 0-4 Jev priority.
+rating_full = 80                 # rule rating treated as fully alarmed
+rating_weight = 0.5              # rule share of the blend
+jev_weight = 0.5                 # Jev share of the blend
 """
 
 CONFIG_OPTIONS = """Shrawler configuration options
@@ -92,6 +99,11 @@ Top level:
   packing_scope                    multi-directory (default) | directory
   token_headroom_percent           estimator safety margin on token budgets (default: 10)
   max_request_bytes                exact canonical byte cap; 0 = unset
+
+[scoring]:
+  rating_full                      rule rating treated as fully alarmed (default: 80)
+  rating_weight                    rule share of the combined blend (default: 0.5)
+  jev_weight                       Jev share of the combined blend (default: 0.5)
 
 Command-line arguments override values from the configuration file.
 Run `shrawler COMMAND --help` for scan and integration controls.

@@ -34,6 +34,12 @@ from .triage.jev.config import PRIORITY_NAMES, JevConfig, priority_score
 from .triage.jev.service import JevBusyError, JevService
 from .triage.jev.storage import assessment_path
 from .triage.review import ReviewStore
+from .triage.scoring import (
+    DEFAULT_SCORING,
+    ScoringConfig,
+    combine_priority,
+    combined_sql,
+)
 from .triage.service import TriageBusyError, TriageService
 from .triage.storage import (
     WEB_SORT_INDEXES,
@@ -138,6 +144,8 @@ class FileRecord:
     jev_choice: str = ""
     jev_score: Optional[int] = None
     jev_priority_name: str = ""
+    combined_score: Optional[int] = None
+    combined_coverage: str = "none"
 
     def public(self) -> Dict[str, Any]:
         value = asdict(self)
@@ -481,9 +489,9 @@ class FileIndex:
             "size": lambda row: row.size_bytes,
             "modified": lambda row: row.mtime_utc,
         }
-        # JSON result sets carry no assessment database, so Jev sorting falls
-        # back to path order rather than failing.
-        if sort == "jev":
+        # JSON result sets carry no assessment database, so Jev and combined
+        # sorting fall back to path order rather than failing.
+        if sort in {"jev", "combined"}:
             sort = "path"
         if sort not in sort_keys or direction not in {"asc", "desc"}:
             raise ValueError("Invalid inventory sort")
@@ -604,11 +612,17 @@ class FileIndex:
 class DatabaseIndex:
     """Query a cumulative Shrawler SQLite inventory."""
 
-    def __init__(self, path: Path, page_size: int = 100) -> None:
+    def __init__(
+        self,
+        path: Path,
+        page_size: int = 100,
+        scoring: Optional[ScoringConfig] = None,
+    ) -> None:
         self.path = path.expanduser().resolve()
         if not self.path.is_file():
             raise ValueError(f"DATABASE does not exist: {self.path}")
         self.page_size = min(max(page_size, 1), 500)
+        self.scoring = scoring or ScoringConfig()
         self.skipped = 0
         self._facets_cache: Tuple[float, Dict[str, List[str]]] | None = None
         self._status_cache: Tuple[float, int, int] | None = None
@@ -1236,6 +1250,24 @@ class DatabaseIndex:
             record.jev_score = priority_score(choice) if choice is not None else None
             record.jev_priority_name = PRIORITY_NAMES.get(record.jev_choice, "")
 
+    def _apply_combined(
+        self,
+        records: List[FileRecord],
+        *,
+        rating_available: bool,
+        jev_available: bool,
+    ) -> None:
+        for record in records:
+            rating = record.ranking_score if record.ranking_run_id else None
+            jev = record.jev_score if record.jev_run_id else None
+            record.combined_score, record.combined_coverage = combine_priority(
+                rating,
+                jev,
+                rating_available=rating_available,
+                jev_available=jev_available,
+                config=self.scoring,
+            )
+
     def get(self, public_id: str) -> Optional[FileRecord]:
         with self._connect() as connection:
             row = connection.execute(
@@ -1303,12 +1335,24 @@ class DatabaseIndex:
                 "jev_result.choice AS jev_choice, jev_file.run_id AS jev_run_id"
             )
             jev_order = "CAST(jev_result.choice AS INTEGER)"
+        combined_expr = combined_sql(
+            ranking_score,
+            "jev_result.choice",
+            rating_available=bool(ranking_run),
+            jev_available=bool(jev_run_id),
+            config=self.scoring,
+        )
+        combined_projection = (
+            f"{combined_expr} AS combined_score"
+            if combined_expr
+            else "NULL AS combined_score"
+        )
         ranking_projection = (
             "ranking.run_id AS ranking_run_id, ranking.priority AS ranking_priority, "
             f"{ranking_score} AS ranking_score"
             if ranking_run
             else "'' AS ranking_run_id, NULL AS ranking_priority, NULL AS ranking_score"
-        ) + ", " + jev_projection
+        ) + ", " + jev_projection + ", " + combined_projection
         values = join_values + jev_join_values + where_values
         if ranking_run and ranking_min > 0:
             where = where.replace("ranking_score >= ?", f"{ranking_score} >= ?")
@@ -1371,11 +1415,15 @@ class DatabaseIndex:
         }
         if jev_order:
             sort_columns["jev"] = [jev_order]
+        if combined_expr:
+            sort_columns["combined"] = [combined_expr]
         if sort not in sort_columns or direction not in {"asc", "desc"}:
             raise ValueError("Invalid inventory sort")
         if sort == "priority" and not ranking_run:
             sort = "path"
         if sort == "jev" and not jev_order:
+            sort = "path"
+        if sort == "combined" and not combined_expr:
             sort = "path"
         if sort == "jev":
             # Assessed files first, highest priority first; unassessed rows last
@@ -1458,6 +1506,11 @@ class DatabaseIndex:
             records = [self._record(row) for row in rows]
             self._apply_ranking(records, rows, ranking_category)
             self._apply_jev(records, rows)
+            self._apply_combined(
+                records,
+                rating_available=bool(ranking_run),
+                jev_available=bool(jev_run_id),
+            )
             items = [record.public() for record in self._enrich(records)]
         return {
             "items": items,
@@ -1548,6 +1601,7 @@ class DatabaseIndex:
         sort: str = "path",
         direction: str = "asc",
         activity: str = "",
+        jev_run: str = "",
     ) -> Dict[str, Any]:
         """Return immediate children for one host, share, or folder."""
         if not host:
@@ -1569,18 +1623,48 @@ class DatabaseIndex:
         joins, join_values, ranking_score = self._ranking_join(
             ranking_run, ranking_category
         )
+        jev_run_id = self._resolve_jev_run(jev_run)
+        jev_join = ""
+        jev_join_values: List[Any] = []
+        jev_projection = "NULL AS jev_choice, '' AS jev_run_id"
+        if jev_run_id:
+            # Constrain the assessment join to the chosen run so files are not
+            # multiplied across every run that has touched them.
+            jev_join = (
+                " LEFT JOIN jev.assessment_files jev_file"
+                " ON jev_file.file_id=files.public_id AND jev_file.run_id=?"
+                " LEFT JOIN jev.decision_results jev_result"
+                " ON jev_result.id=jev_file.result_id"
+                " AND jev_result.run_id=jev_file.run_id"
+            )
+            jev_join_values = [jev_run_id]
+            jev_projection = (
+                "jev_result.choice AS jev_choice, jev_file.run_id AS jev_run_id"
+            )
+        combined_expr = combined_sql(
+            ranking_score,
+            "jev_result.choice",
+            rating_available=bool(ranking_run),
+            jev_available=bool(jev_run_id),
+            config=self.scoring,
+        )
+        combined_projection = (
+            f"{combined_expr} AS combined_score"
+            if combined_expr
+            else "NULL AS combined_score"
+        )
         ranking_projection = (
             "ranking.run_id AS ranking_run_id, ranking.priority AS ranking_priority, "
             f"{ranking_score} AS ranking_score"
             if ranking_run
             else "'' AS ranking_run_id, NULL AS ranking_priority, NULL AS ranking_score"
-        )
-        values = join_values + where_values
+        ) + ", " + jev_projection + ", " + combined_projection
+        base_values = join_values + where_values
         if ranking_run and ranking_min > 0:
             where = where.replace("ranking_score >= ?", f"{ranking_score} >= ?")
         if not share:
             aggregate_joins = joins
-            aggregate_values = values
+            aggregate_values = base_values
             if ranking_run and ranking_min == 0 and not ranking_category:
                 aggregate_joins = ""
                 aggregate_values = where_values
@@ -1621,7 +1705,25 @@ class DatabaseIndex:
             .replace("_", "\\_")
         )
         where += (" AND " if where else " WHERE ") + subtree_clause
+        values = join_values + jev_join_values + where_values
         values.extend((normalized_parent, escaped_parent.rstrip("/") + "/%"))
+        order = " ORDER BY files.remote_path COLLATE NOCASE"
+        if sort == "priority" and ranking_run and direction in {"asc", "desc"}:
+            order = (
+                " ORDER BY "
+                + ranking_score
+                + " "
+                + direction.upper()
+                + ", files.remote_path COLLATE NOCASE"
+            )
+        elif sort == "combined" and combined_expr and direction in {"asc", "desc"}:
+            order = (
+                " ORDER BY "
+                + combined_expr
+                + " "
+                + direction.upper()
+                + ", files.remote_path COLLATE NOCASE"
+            )
         folders: Dict[str, Dict[str, Any]] = {}
         files: List[FileRecord] = []
         with self._connect() as connection:
@@ -1630,23 +1732,20 @@ class DatabaseIndex:
                 + ranking_projection
                 + " FROM files"
                 + joins
+                + jev_join
                 + where
-                + (
-                    " ORDER BY "
-                    + ranking_score
-                    + " "
-                    + direction.upper()
-                    + ", files.remote_path COLLATE NOCASE"
-                    if sort == "priority"
-                    and ranking_run
-                    and direction in {"asc", "desc"}
-                    else " ORDER BY files.remote_path COLLATE NOCASE"
-                ),
+                + order,
                 values,
             ):
                 record = self._record(row)
                 record_rows = [row]
                 self._apply_ranking([record], record_rows, ranking_category)
+                self._apply_jev([record], record_rows)
+                self._apply_combined(
+                    [record],
+                    rating_available=bool(ranking_run),
+                    jev_available=bool(jev_run_id),
+                )
                 path = "/" + record.remote_path.replace("\\", "/").lstrip("/")
                 if not path.startswith(prefix):
                     continue
@@ -1802,6 +1901,7 @@ class WebConfig:
     nemesis: Optional[NemesisConfig] = None
     nemesis_max_bytes: int = 50 * 1024**2
     jev: Optional[JevConfig] = None
+    scoring: ScoringConfig = DEFAULT_SCORING
 
 
 class WebServer(ThreadingHTTPServer):
@@ -2048,6 +2148,7 @@ class WebHandler(BaseHTTPRequestHandler):
                 "size",
                 "modified",
                 "jev",
+                "combined",
             }:
                 self._error(400, "Invalid inventory sort", "invalid_query")
                 return
@@ -2079,7 +2180,8 @@ class WebHandler(BaseHTTPRequestHandler):
                 filters[9],
                 ranking_min,
                 filters[11] or "path",
-                filters[12] or ("desc" if filters[11] == "priority" else "asc"),
+                filters[12]
+                or ("desc" if filters[11] in {"priority", "combined", "jev"} else "asc"),
             )
             if parsed.path == "/api/tree/branch":
                 try:
@@ -2090,6 +2192,7 @@ class WebHandler(BaseHTTPRequestHandler):
                             *filters[4:8],
                             *ranking_args,
                             activity=filters[13],
+                            jev_run=query.get("jev_run", [""])[0],
                         )
                     )
                 except (AttributeError, ValueError) as exc:
@@ -2438,7 +2541,7 @@ class WebHandler(BaseHTTPRequestHandler):
 
 def run(config: WebConfig, auth: Optional[SMBAuth]) -> int:
     """Run the local WebUI with validated configuration and authentication."""
-    index = DatabaseIndex(config.database_path, config.page_size)
+    index = DatabaseIndex(config.database_path, config.page_size, scoring=config.scoring)
     runtime = Path(tempfile.mkdtemp(prefix="shrawler-web-"))
     os.chmod(runtime, 0o700)
     token = secrets.token_hex(32) if config.token_auth else ""

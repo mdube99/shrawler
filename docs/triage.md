@@ -87,6 +87,15 @@ its historical sizes and names, rather than the mutable latest-file metadata.
   A category-filtered list orders by that category's score.
 - Ties in list output are ordered by stable file ID.
 
+The WebUI's **Combined** column blends this rule rating with the 0-4 Jev
+inspection priority on a shared 0-100 scale. The rule rating is normalized
+against 80 (the strongest built-in signal), the Jev level against 4, and the two
+are averaged with equal default weights. A component participates only when its
+run is selected; a file missing one component's result counts that side as zero
+rather than being renormalized, so partial coverage does not raise a score. See
+[Local WebUI](webui.md) for the formula. Rule scores themselves are unchanged;
+the combined metric is a presentation-layer blend.
+
 `explain` includes matched signals, their weights and credited contributions,
 context source paths and distances, and failed condition names for unmatched
 rules. It preserves stored explanations even if the engine changes; diagnostics

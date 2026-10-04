@@ -680,16 +680,22 @@ def main(argv: Optional[List[str]] = None) -> None:
                 parser.error(str(exc))
         from .nemesis import configuration
         from .triage.jev.config import JevConfig
+        from .triage.scoring import ScoringConfig
 
         try:
             nemesis = configuration(options)
         except ValueError as exc:
             parser.error(str(exc))
         try:
-            jev_section = load_config().get("jev", {})
+            config_table = load_config()
+            jev_section = config_table.get("jev", {})
             if jev_section and not isinstance(jev_section, dict):
                 raise ValueError("configuration field [jev] must be a table")
             jev = JevConfig.from_mapping(jev_section)
+            scoring_section = config_table.get("scoring", {})
+            if scoring_section and not isinstance(scoring_section, dict):
+                raise ValueError("configuration field [scoring] must be a table")
+            scoring = ScoringConfig.from_mapping(scoring_section)
         except ValueError as exc:
             parser.error(str(exc))
         config = WebConfig(
@@ -703,6 +709,7 @@ def main(argv: Optional[List[str]] = None) -> None:
             page_size=options.page_size,
             bind=options.bind,
             jev=jev,
+            scoring=scoring,
         )
         raise SystemExit(run(config, auth))
     if command in SCAN_MODES:
