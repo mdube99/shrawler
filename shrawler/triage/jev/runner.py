@@ -16,7 +16,7 @@ import threading
 import time
 from collections import deque
 from contextlib import closing
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
@@ -58,6 +58,9 @@ class WorkItem:
     request_id: str
     payload: Dict[str, Any]
     members: Tuple[str, ...]
+    # Precomputed at claim time so persistence never requeries the database:
+    # each member's directory context hash, keyed by file ID.
+    context_hashes: Dict[str, str] = field(default_factory=dict)
 
 
 @dataclass
@@ -266,6 +269,7 @@ class JevRunner:
                 request_id=str(row["request_id"]),
                 payload=load_payload(row),
                 members=members,
+                context_hashes=self.store.member_context_hashes(batch_id),
             )
 
         def handle_success(result: WorkResult) -> None:
@@ -337,6 +341,7 @@ class JevRunner:
                 canary = claim_next()
                 if canary is not None:
                     process(self._execute(canary))
+                    self.store.commit()
                     emit_progress(force=True)
                     if stop_reason == "auth":
                         raise AuthError(outcome["error"] or "authentication failed")
@@ -382,6 +387,11 @@ class JevRunner:
                         except BaseException as exc:  # pragma: no cover - defensive
                             result = WorkResult(work=work, error=exc)
                         process(result)
+                    if done:
+                        # Group-commit the whole completion wave: one fsync for
+                        # every batch that finished together, while each batch's
+                        # transition is still durable before the next wave.
+                        self.store.commit()
                     emit_progress()
                     if now >= next_heartbeat:
                         if not self.store.heartbeat(run_id, owner):
@@ -478,12 +488,13 @@ class JevRunner:
 
     def _persist_success(self, work: WorkItem, response: DecisionResponse) -> None:
         hashes = self.store.batch_directory_hashes(work.batch_id)
-        members_with_directory = self.store.batch_members_with_directory(work.batch_id)
         answers: List[Dict[str, Any]] = []
         answered: set = set()
         provenance = self.config.provenance()
-        for row in members_with_directory:
-            file_id = str(row["file_id"])
+        revision = self.config.deployment_revision or self.config.model
+        adapter_version = self.client.adapter_version
+        rubric_version = provenance["rubric_version"]
+        for file_id in work.members:
             answer = response.answers.get(file_id)
             if answer is None:
                 continue
@@ -492,12 +503,11 @@ class JevRunner:
                     "file_id": file_id,
                     "choice": answer.choice,
                     "distribution": answer.distribution,
-                    "deployment_revision": self.config.deployment_revision
-                    or self.config.model,
+                    "deployment_revision": revision,
                     "model": response.model,
-                    "adapter_version": self.client.adapter_version,
-                    "rubric_version": provenance["rubric_version"],
-                    "context_hash": hashes.get(int(row["directory_id"]), ""),
+                    "adapter_version": adapter_version,
+                    "rubric_version": rubric_version,
+                    "context_hash": work.context_hashes.get(file_id, ""),
                 }
             )
             answered.add(file_id)
@@ -522,6 +532,7 @@ class JevRunner:
             http_status=response.http_status,
             remote_model=response.model,
             duration_ms=response.latency_ms,
+            commit=False,
         )
 
     def _handle_retryable(self, work: WorkItem, error: str) -> None:

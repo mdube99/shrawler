@@ -109,12 +109,28 @@ def mixed_counts(files: int) -> List[int]:
     return [count for count in counts if count > 0]
 
 
+def density_counts(files: int, per_directory: int) -> List[int]:
+    """Uniform ``files / per_directory`` shape with a deterministic remainder."""
+    per_directory = max(1, per_directory)
+    directories = max(1, files // per_directory)
+    counts = [per_directory] * directories
+    remainder = files - per_directory * directories
+    index = 0
+    while remainder > 0:
+        counts[index] += 1
+        remainder -= 1
+        index = (index + 1) % len(counts)
+    return counts
+
+
 FIXTURES = {
-    "captured": lambda files: captured_directories(),
-    "wide": wide_counts,
-    "many-tiny": many_tiny_counts,
-    "mixed": mixed_counts,
-    "retry": lambda files: captured_directories(),
+    "captured": lambda files, _args: captured_directories(),
+    "wide": lambda files, _args: wide_counts(files),
+    "many-tiny": lambda files, _args: many_tiny_counts(files),
+    "mixed": lambda files, _args: mixed_counts(files),
+    "retry": lambda files, _args: captured_directories(),
+    # The confirmed scale target: ~1M files at ~20 files/directory (50k dirs).
+    "density": lambda files, args: density_counts(files, args.files_per_directory),
 }
 
 
@@ -242,7 +258,7 @@ def percentiles(values: List[int]) -> Dict[str, Optional[int]]:
 def run_benchmark(args: argparse.Namespace) -> Dict[str, Any]:
     root = Path(tempfile.mkdtemp(prefix="jev-bench-"))
     database = root / "shrawler.db"
-    counts = FIXTURES[args.fixture](args.files)
+    counts = FIXTURES[args.fixture](args.files, args)
     start_rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
     scan_started = time.perf_counter()
     scan_id = build_inventory(root, counts)
@@ -415,6 +431,13 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--fixture", choices=sorted(FIXTURES), default="captured")
     parser.add_argument("--files", type=int, default=0, help="override fixture size")
+    parser.add_argument(
+        "--files-per-directory",
+        type=int,
+        default=20,
+        dest="files_per_directory",
+        help="density fixture: files per directory (default 20)",
+    )
     parser.add_argument("--workers", type=int, default=4)
     parser.add_argument("--rate-limit", type=int, default=0, dest="rate_limit")
     parser.add_argument("--latency-ms", type=int, default=150, dest="latency_ms")
@@ -429,6 +452,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         args.files = {
             "wide": 100000,
             "many-tiny": 100000,
+            "density": 1000000,
         }.get(args.fixture, 774)
     started = time.perf_counter()
     report = run_benchmark(args)

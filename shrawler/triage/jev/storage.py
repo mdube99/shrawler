@@ -20,6 +20,7 @@ Version-1 databases migrate in one transaction; the migration leaves
 import hashlib
 import sqlite3
 import uuid
+from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterable, Iterator, List, Optional, Sequence, Tuple
@@ -111,6 +112,10 @@ CREATE INDEX IF NOT EXISTS assessment_files_pending
  ON assessment_files(run_id, status, directory_id, file_id);
 CREATE INDEX IF NOT EXISTS assessment_files_batch
  ON assessment_files(run_id, batch_id, file_id);
+-- Covering index for batch-scoped status counter reads and updates; without it
+-- SQLite picks assessment_files_pending and scans the whole run per batch.
+CREATE INDEX IF NOT EXISTS assessment_files_batch_status
+ ON assessment_files(run_id, batch_id, status);
 """
 
 # ``primary_directory_id`` is nullable and used only for display/back-compat.
@@ -214,39 +219,11 @@ CREATE TABLE IF NOT EXISTS assessment_labels (
 );
 """
 
-# Triggers keep durable counters in lockstep with every file-status transition,
-# inside the same transaction as the transition itself. Each trigger is one
-# statement (its body contains internal semicolons).
-TRIGGER_INSERT = """
-CREATE TRIGGER IF NOT EXISTS assessment_files_count_insert
-AFTER INSERT ON assessment_files
-BEGIN
-  INSERT INTO assessment_status_counts(run_id,status,count) VALUES (NEW.run_id,NEW.status,1)
-  ON CONFLICT(run_id,status) DO UPDATE SET count=count+1;
-END;
-"""
-TRIGGER_DELETE = """
-CREATE TRIGGER IF NOT EXISTS assessment_files_count_delete
-AFTER DELETE ON assessment_files
-BEGIN
-  UPDATE assessment_status_counts SET count=count-1
-  WHERE run_id=OLD.run_id AND status=OLD.status;
-END;
-"""
-TRIGGER_UPDATE = """
-CREATE TRIGGER IF NOT EXISTS assessment_files_count_update
-AFTER UPDATE OF status ON assessment_files
-WHEN OLD.status <> NEW.status
-BEGIN
-  UPDATE assessment_status_counts SET count=count-1
-  WHERE run_id=OLD.run_id AND status=OLD.status;
-  INSERT INTO assessment_status_counts(run_id,status,count) VALUES (NEW.run_id,NEW.status,1)
-  ON CONFLICT(run_id,status) DO UPDATE SET count=count+1;
-END;
-"""
-TRIGGERS = (TRIGGER_INSERT, TRIGGER_DELETE, TRIGGER_UPDATE)
-TRIGGERS_DDL = "\n".join(TRIGGERS)
-
+# Durable counters are maintained set-wise in the same transaction as every
+# status transition (see ``set_file_status``/``complete_batch``/``insert_files``).
+# Triggers were removed at scale: one trigger invocation per row doubled
+# statement counts and dominated planning/dispatch wall time for million-file
+# inventories.
 SCHEMA = (
     RUNS_DDL
     + CONTEXTS_DDL
@@ -257,7 +234,6 @@ SCHEMA = (
     + STATUS_COUNTS_DDL
     + RESULTS_DDL
     + LABELS_DDL
-    + TRIGGERS_DDL
 )
 
 # Explicit per-statement DDL used by the migration (``executescript`` would
@@ -288,6 +264,18 @@ def assessment_path(database: Path) -> Path:
 def _chunked(values: Sequence[Any], size: int = SQLITE_CHUNK) -> Iterator[Sequence[Any]]:
     for start in range(0, len(values), size):
         yield values[start : start + size]
+
+
+@contextmanager
+def _NO_COMMIT() -> Iterator[None]:
+    """No-op transaction scope: statements accumulate until an explicit commit.
+
+    Used by high-volume planners that group many writes into one transaction
+    and commit periodically, so a multi-batch plan does not pay one fsync per
+    batch. An uncommitted tail is safe: those files remain ``pending`` and are
+    re-selected on the next plan.
+    """
+    yield
 
 
 class JevStore:
@@ -370,8 +358,14 @@ class JevStore:
                     "ALTER TABLE decision_results ADD COLUMN source TEXT NOT NULL "
                     "DEFAULT 'model'"
                 )
-            for trigger in TRIGGERS:
-                connection.execute(trigger)
+            # Drop legacy counters triggers if a version-1 database carried them
+            # (version 1 had none; this is defensive for intermediate builds).
+            for name in (
+                "assessment_files_count_insert",
+                "assessment_files_count_delete",
+                "assessment_files_count_update",
+            ):
+                connection.execute(f"DROP TRIGGER IF EXISTS {name}")
             connection.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
             connection.execute("COMMIT")
         except BaseException:
@@ -524,6 +518,9 @@ class JevStore:
     # -- ledger -----------------------------------------------------------
 
     def insert_files(self, rows: List[Tuple[Any, ...]]) -> None:
+        if not rows:
+            return
+        run_id = str(rows[0][0])
         self.connection.executemany(
             "INSERT OR REPLACE INTO assessment_files(run_id,file_id,directory_id,"
             "file_name,remote_path,unc_path,size_bytes,mtime_utc,extension,"
@@ -531,6 +528,19 @@ class JevStore:
             "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             rows,
         )
+        # Staging writes a fresh run, so every row is new; maintain durable
+        # counters by simple delta (no existence probe). A re-staged primary
+        # key would be a new run ID and is therefore not a collision.
+        adjustments: Dict[str, int] = {}
+        for row in rows:
+            status = str(row[12])
+            adjustments[status] = adjustments.get(status, 0) + 1
+        for status, delta in adjustments.items():
+            self.connection.execute(
+                "INSERT INTO assessment_status_counts(run_id,status,count) VALUES (?,?,?) "
+                "ON CONFLICT(run_id,status) DO UPDATE SET count=count+?",
+                (run_id, status, delta, delta),
+            )
 
     def file_row(self, run_id: str, file_id: str) -> Optional[sqlite3.Row]:
         return self.connection.execute(
@@ -578,10 +588,94 @@ class JevStore:
         if "result_id" in extra:
             assignments.append("result_id=?")
             tail.append(extra["result_id"])
-        prefix = f"UPDATE assessment_files SET {', '.join(assignments)} WHERE run_id=? AND file_id IN "
+        # Whole-batch fast path: when the caller confirms the ID list is the
+        # batch's complete membership, scope the UPDATE and counter pre-image
+        # by the indexed batch key, keeping this O(batch) not O(files). Other
+        # callers use the file-ID path so a partial list is always exact.
+        scope_batch = extra.get("batch_id") if extra.get("claim_batch_scope") else None
+        if scope_batch is not None:
+            assignments_text = ", ".join(assignments)
+            parameters = (*tail, run_id, scope_batch)
+            rows = self.connection.execute(
+                "SELECT status, COUNT(*) AS n FROM assessment_files WHERE run_id=? "
+                "AND batch_id=? AND status<>? GROUP BY status",
+                (run_id, scope_batch, status),
+            )
+            before = {str(row["status"]): int(row["n"]) for row in rows}
+            self.connection.execute(
+                f"UPDATE assessment_files SET {assignments_text} "
+                "WHERE run_id=? AND batch_id=?",
+                parameters,
+            )
+            adjustments = {status: len(ids)}
+            for old_status, count in before.items():
+                if old_status == status or count <= 0:
+                    continue
+                adjustments[old_status] = adjustments.get(old_status, 0) - count
+            self._adjust_counts(run_id, adjustments)
+            return
+        # Known-source fast path: callers that select candidates by status can
+        # assert the pre-image, avoiding a scan of the run ledger.
+        assumed_from = extra.get("assume_from_status")
+        prefix = (
+            f"UPDATE assessment_files SET {', '.join(assignments)} "
+            "WHERE run_id=? AND file_id IN "
+        )
+        if assumed_from is not None:
+            for chunk in _chunked(ids):
+                placeholders = ",".join("?" for _ in chunk)
+                self.connection.execute(
+                    prefix + f"({placeholders})", (*tail, run_id, *chunk)
+                )
+            self._adjust_counts(
+                run_id, {assumed_from: -len(ids), status: len(ids)}
+            )
+            return
         for chunk in _chunked(ids):
             placeholders = ",".join("?" for _ in chunk)
-            self.connection.execute(prefix + f"({placeholders})", (*tail, run_id, *chunk))
+            # Apply the status change and reconcile durable counters in the
+            # same transaction, set-wise (no per-row trigger overhead).
+            self._apply_status(
+                run_id,
+                chunk,
+                status,
+                prefix + f"({placeholders})",
+                (*tail, run_id, *chunk),
+            )
+
+    def _apply_status(
+        self,
+        run_id: str,
+        file_ids: Sequence[str],
+        new_status: str,
+        statement: str,
+        parameters: Tuple[Any, ...],
+    ) -> None:
+        """Run one file-ID scoped status UPDATE and adjust counters by delta."""
+        placeholders = ",".join("?" for _ in file_ids)
+        rows = self.connection.execute(
+            f"SELECT status, COUNT(*) AS n FROM assessment_files WHERE run_id=? "
+            f"AND file_id IN ({placeholders}) GROUP BY status",
+            (run_id, *file_ids),
+        )
+        before = {str(row["status"]): int(row["n"]) for row in rows}
+        self.connection.execute(statement, parameters)
+        adjustments = {new_status: len(file_ids)}
+        for old_status, count in before.items():
+            if old_status == new_status or count <= 0:
+                continue
+            adjustments[old_status] = adjustments.get(old_status, 0) - count
+        self._adjust_counts(run_id, adjustments)
+
+    def _adjust_counts(self, run_id: str, adjustments: Dict[str, int]) -> None:
+        for status, delta in adjustments.items():
+            if not delta:
+                continue
+            self.connection.execute(
+                "INSERT INTO assessment_status_counts(run_id,status,count) VALUES (?,?,?) "
+                "ON CONFLICT(run_id,status) DO UPDATE SET count=MAX(0,count+?)",
+                (run_id, status, max(0, delta), delta),
+            )
 
     # -- batches ----------------------------------------------------------
 
@@ -599,15 +693,21 @@ class JevStore:
         members: List[str],
         directories: List[Tuple[int, str]],
         cache_key: str,
+        commit: bool = True,
     ) -> None:
         """Persist one complete batch and claim all of its members atomically.
 
         ``directories`` is an ordered list of ``(directory_id, context_hash)``
         pairs; every directory context referenced by the batch is recorded in
         ``batch_directories`` so membership survives resume and repacking.
+
+        ``commit=False`` lets a planner batch many inserts into one transaction
+        and commit periodically; uncommitted batches simply remain pending and
+        are replanned after a crash.
         """
         payload_hash = hashlib.sha256(canonical(payload).encode()).hexdigest()
-        with self.connection:
+        transaction = self.connection if commit else _NO_COMMIT()
+        with transaction:
             self.connection.execute(
                 "INSERT INTO request_batches(id,run_id,primary_directory_id,request_id,"
                 "ordinal,payload_json,payload_sha256,input_tokens,state_json,"
@@ -642,7 +742,8 @@ class JevStore:
                 [(run_id, batch_id, file_id, index) for index, file_id in enumerate(members)],
             )
             self.set_file_status(
-                run_id, members, "planned", batch_id=batch_id, error=None
+                run_id, members, "planned", batch_id=batch_id,
+                assume_from_status="pending", error=None,
             )
 
     def mark_batch_dispatched(self, batch_id: str) -> None:
@@ -664,7 +765,7 @@ class JevStore:
             )
             self.set_file_status(
                 run_id, members, "in-flight", batch_id=batch_id,
-                increment_attempt=True, error=None,
+                increment_attempt=True, claim_batch_scope=True, error=None,
             )
 
     def finish_batch(
@@ -717,14 +818,18 @@ class JevStore:
         duration_ms: Optional[int] = None,
         error: Optional[str] = None,
         source: str = "model",
+        commit: bool = True,
     ) -> int:
         """Persist answers and every member transition in one transaction.
 
         Each answer dict carries ``file_id``, ``choice``, ``distribution`` and
         result provenance. Returns the number of answers persisted.
+
+        ``commit=False`` keeps the coordinator's per-wave group-commit pattern;
+        the caller commits once after persisting a whole completion wave.
         """
         now = utc_now()
-        with self.connection:
+        with (self.connection if commit else _NO_COMMIT()):
             if answers:
                 self.connection.executemany(
                     "INSERT INTO decision_results(run_id,batch_id,request_id,file_id,"
@@ -752,22 +857,34 @@ class JevStore:
                         for answer in answers
                     ],
                 )
-                answered_ids = [str(answer["file_id"]) for answer in answers]
-                result_ids: Dict[str, int] = {}
-                for chunk in _chunked(answered_ids):
-                    placeholders = ",".join("?" for _ in chunk)
+                # One bulk update for every answered file. Both the counter
+                # pre-image and the result_id mapping use the indexed batch
+                # key rather than file-ID lists, keeping this O(batch).
+                before = {
+                    str(row["status"]): int(row["n"])
                     for row in self.connection.execute(
-                        f"SELECT file_id, id FROM decision_results WHERE run_id=? "
-                        f"AND batch_id=? AND file_id IN ({placeholders})",
-                        (run_id, batch_id, *chunk),
-                    ):
-                        result_ids[str(row["file_id"])] = int(row["id"])
-                for file_id in answered_ids:
-                    self.connection.execute(
-                        "UPDATE assessment_files SET status='assessed', updated_at=?, "
-                        "error=NULL, result_id=? WHERE run_id=? AND file_id=?",
-                        (now, result_ids.get(file_id), run_id, file_id),
+                        "SELECT status, COUNT(*) AS n FROM assessment_files "
+                        "WHERE run_id=? AND batch_id=? AND status<>'assessed' "
+                        "GROUP BY status",
+                        (run_id, batch_id),
                     )
+                }
+                self.connection.execute(
+                    "UPDATE assessment_files SET status='assessed', updated_at=?, "
+                    "error=NULL, result_id=(SELECT d.id FROM decision_results d "
+                    "WHERE d.run_id=assessment_files.run_id "
+                    "AND d.batch_id=? AND d.file_id=assessment_files.file_id) "
+                    "WHERE run_id=? AND batch_id=? AND status<>'assessed'",
+                    (now, batch_id, run_id, batch_id),
+                )
+                adjustments: Dict[str, int] = {}
+                transitioned = 0
+                for old_status, count in before.items():
+                    adjustments[old_status] = -count
+                    transitioned += count
+                if transitioned:
+                    adjustments["assessed"] = transitioned
+                self._adjust_counts(run_id, adjustments)
             if retrying:
                 self.set_file_status(run_id, retrying, "pending", error=None)
             if exhausted:
@@ -888,6 +1005,21 @@ class JevStore:
             for row in self.connection.execute(
                 "SELECT directory_id, context_hash FROM batch_directories "
                 "WHERE batch_id=? ORDER BY ordinal",
+                (batch_id,),
+            )
+        }
+
+    def member_context_hashes(self, batch_id: str) -> Dict[str, str]:
+        """One query: every member's file ID mapped to its directory hash."""
+        return {
+            str(row["file_id"]): str(row["context_hash"])
+            for row in self.connection.execute(
+                "SELECT m.file_id AS file_id, d.context_hash AS context_hash "
+                "FROM batch_members m "
+                "JOIN assessment_files f ON f.run_id=m.run_id AND f.file_id=m.file_id "
+                "JOIN batch_directories d ON d.batch_id=m.batch_id "
+                "AND d.directory_id=f.directory_id "
+                "WHERE m.batch_id=? ORDER BY m.ordinal",
                 (batch_id,),
             )
         }

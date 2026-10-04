@@ -39,6 +39,10 @@ BATCH_CHUNK = 500
 STREAM_CHUNK = 1000
 # Bounded per-run directory-context cache while packing.
 CONTEXT_CACHE_SIZE = 256
+# Group planning writes into one transaction and commit every N batches. A
+# single fsync per batch dominated planning at scale; a lost uncommitted tail
+# is safe because those files remain pending and are replanned.
+COMMIT_EVERY_BATCHES = 64
 
 
 class CandidateTooLargeError(ValueError):
@@ -395,6 +399,7 @@ def _persist_batch(
     config: JevConfig,
     objective: str,
     ordinal: int,
+    commit: bool = True,
 ) -> str:
     batch_id = uuid.uuid4().hex
     batch.cache_key = _cache_key(batch, config, objective)
@@ -414,6 +419,7 @@ def _persist_batch(
             for directory_id, _context, context_hash in batch.directories
         ],
         cache_key=batch.cache_key,
+        commit=commit,
     )
     return batch_id
 
@@ -546,16 +552,24 @@ def plan_run(
             store.commit()
 
     candidates = _pending_candidates(store, run_id, cancelled)
+    pending_since_commit = 0
     for batch in _iter_batches(
         candidates, config, counter, context_loader, objective, max_directories, oversized
     ):
         if persist:
-            batch_id = _persist_batch(store, run_id, batch, config, objective, ordinal)
+            batch_id = _persist_batch(
+                store, run_id, batch, config, objective, ordinal, commit=False
+            )
             result.batch_ids.append(batch_id)
             ordinal += 1
+            pending_since_commit += 1
+            if pending_since_commit >= COMMIT_EVERY_BATCHES:
+                store.commit()
+                pending_since_commit = 0
         else:
             result.batch_specs.append(batch)
     if persist:
+        store.commit()
         # Record specs for preview-style summaries without loading them back.
         result.batch_specs = []
     return result
