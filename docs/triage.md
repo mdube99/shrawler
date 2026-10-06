@@ -86,7 +86,7 @@ its historical sizes and names, rather than the mutable latest-file metadata.
   A category-filtered list orders by that category's score.
 - Ties in list output are ordered by stable file ID.
 
-The WebUI's **Combined** column blends this rule rating with the 0-4 Jev
+The WebUI's **Overall** column blends this rule rating with the 0-4 Jev
 inspection priority on a shared 0-100 scale. The rule rating is normalized
 against 80 (the strongest built-in signal), the Jev level against 4, and the two
 are averaged with equal default weights. A component participates only when its

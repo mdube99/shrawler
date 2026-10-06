@@ -63,17 +63,29 @@ export function createCollection(root) {
       field('Total limit (bytes)', nodes.totalLimit),
     );
     const actions = el('div', 'btn-row');
+    const saveSelected = button('Save selected candidates', { onClick: () => create([...selected]) });
+    const addAll = button('Add all matching', { onClick: () => create() });
+    const addEvidence = button('Add all with supporting evidence', {
+      title: 'Candidates with a positive ranking score; excludes zero-score extension-only matches',
+      onClick: () => create(undefined, true),
+    });
+    const collect = button('Collect / retry failed files', { variant: 'primary', onClick: () => run() });
+    // Creating and running a manifest both need the environment, so neither is
+    // offered offline; reviewing and exporting saved manifests still works.
+    if (ctx.status.retrieval_enabled === false) {
+      for (const control of [saveSelected, addAll, addEvidence, collect]) {
+        control.disabled = true;
+        control.title = 'Remote retrieval is disabled in offline mode';
+      }
+    }
     fill(
       actions,
-      button('Save selected candidates', { onClick: () => create([...selected]) }),
-      button('Add all matching', { onClick: () => create() }),
-      button('Add all with supporting evidence', {
-        title: 'Candidates with a positive ranking score; excludes zero-score extension-only matches',
-        onClick: () => create(undefined, true),
-      }),
+      saveSelected,
+      addAll,
+      addEvidence,
       button('Refresh', { size: 'sm', onClick: () => refresh() }),
       button('Export manifest', { size: 'sm', onClick: () => exportManifest() }),
-      button('Collect / retry failed files', { variant: 'primary', onClick: () => run() }),
+      collect,
     );
 
     const table = el('table', 'data-grid score-grid');
@@ -95,7 +107,7 @@ export function createCollection(root) {
       nodes.items,
     );
     const { node } = panel(
-      'Collection queue',
+      'Nemesis queue',
       'One story: byte caps, a saved manifest, retry, and a per-file outcome.',
       [controls, actions, nodes.status, el('div', 'grid-shell score-grid-shell', table)],
     );
@@ -165,7 +177,7 @@ export function createCollection(root) {
       });
       ctx.clearError();
       await refresh(manifest.id);
-      toast(`Saved ${manifest.name} · ${fmt.count(manifest.expected_files)} files to collect`);
+      toast(`Saved ${manifest.name} · ${fmt.count(manifest.expected_files)} files to send to Nemesis`);
       return manifest;
     } catch (error) {
       ctx.fail(error.message);

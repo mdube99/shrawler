@@ -14,7 +14,7 @@ import { el, severity } from './core.js';
 // can always be traced back to its sources. The words name the engines the way
 // the column sub-labels do (see components.css .sort-sub).
 export const COVERAGE = { both: 'static rules + AI', rules: 'static rules', jev: 'AI model' };
-const COVERAGE_MARK = { both: '●', rules: '◐', jev: '○' };
+export const COVERAGE_MARK = { both: '●', rules: '◐', jev: '○' };
 
 export const ruleScore = (item) => (item.ranking_run_id ? (item.ranking_score ?? item.ranking_priority ?? 0) : null);
 
@@ -26,39 +26,34 @@ export const combinedScore = (item) =>
     ? item.combined_score
     : null;
 
-/** Combined owns the severity ramp; the coverage dot says which engines spoke. */
+/** Combined owns the severity ramp; the row shows the number alone. */
 export function combinedChip(item) {
   const score = combinedScore(item);
-  const chip = el('span', score === null ? 'score score--empty' : 'score score--combined');
-  chip.dataset.severity = severity(score).band;
+  const band = severity(score);
+  const chip = el('span', score === null ? 'score score--combined score--empty' : 'score score--combined');
+  chip.dataset.severity = band.band;
   chip.textContent = score === null ? '—' : String(score);
-  const mark = COVERAGE_MARK[item.combined_coverage];
-  if (mark) {
-    const dot = el('span', 'coverage-dot', mark);
-    dot.setAttribute('aria-hidden', 'true');
-    chip.append(dot);
-  }
   chip.title =
     score === null
       ? 'No rating — select a ranking or AI run above'
-      : `Combined priority ${score}/100 · ${severity(score).label} · rated by ${COVERAGE[item.combined_coverage] || item.combined_coverage}`;
+      : `Overall priority ${score}/100 · ${band.label} · rated by ${COVERAGE[item.combined_coverage] || item.combined_coverage}`;
   return chip;
 }
 
 /**
- * Rule and AI chips. `strong` bumps the weight past 76 so a high single-engine
- * score is noticeable without borrowing the severity ramp. The tooltip spells
- * out the scale and the source, per the rule/AI treatments in docs/webui.md.
+ * Rule and AI chips. `strong` bumps the weight so a high single-engine score is
+ * noticeable without borrowing the severity ramp. A missing value renders as the
+ * same-size dashed pill so the column never jumps, with a tooltip that says why.
  */
 export function engineChip(kind, score, label) {
-  const chip = el('span', `score score--${kind}`);
+  const chip = el('span', score === null ? `score score--${kind} score--empty` : `score score--${kind}`);
   chip.dataset.strong = String((score ?? 0) >= 76);
-  chip.textContent = score === null ? '—' : String(score);
+  chip.textContent = score === null ? '-' : String(score);
   chip.title =
     score === null
       ? kind === 'rule'
-        ? 'Not rated by rules · run a ranking on the Score screen'
-        : 'Not assessed by AI · run an AI assessment on the Score screen'
+        ? 'Not rated · run a ranking on the Score screen'
+        : 'Not assessed'
       : kind === 'rule'
         ? `${label} ${score} · matched static filename, path, and metadata rules · 80+ fully alarmed`
         : `${label} ${score}/4 · Jev-style decision model`;

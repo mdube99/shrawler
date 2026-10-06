@@ -11,7 +11,7 @@ WebUI with SMB credentials, select a file, and choose one of three actions:
 
 - **View file** opens a supported preview inside Shrawler.
 - **Download** saves the file through your browser.
-- **Queue for collection** saves a collection manifest that retrieves and
+- **Send to Nemesis** saves a collection manifest that retrieves and
   submits the file without a browser download.
 
 The expanded row and the candidate tables both link to the same file actions.

@@ -70,6 +70,7 @@ const PATHS = {
   'chevron-down': ['m6 9 6 6 6-6'],
   file: ['M6 3h8l4 4v14H6z', 'M14 3v5h5'],
   folder: ['M3 6h7l2 2h9v11H3z'],
+  more: ['M5 12h.01', 'M12 12h.01', 'M19 12h.01'],
   server: ['M3 4h18v6H3z', 'M3 14h18v6H3z', 'M7 7h.01M7 17h.01'],
   share: ['M18 5a2.5 2.5 0 1 0 0-5 2.5 2.5 0 0 0 0 5z', 'M6 12a2.5 2.5 0 1 0 0-5 2.5 2.5 0 0 0 0 5z', 'M18 19a2.5 2.5 0 1 0 0-5 2.5 2.5 0 0 0 0 5z', 'm8.3 10.8 7.4-4.4m-7.4 6.8 7.4 4.4'],
   eye: ['M2.5 12S6 6 12 6s9.5 6 9.5 6-3.5 6-9.5 6-9.5-6-9.5-6z', 'M12 9.5a2.5 2.5 0 1 0 0 5 2.5 2.5 0 0 0 0-5z'],
@@ -209,6 +210,23 @@ export const fmt = {
     if (!value) return 'Unknown';
     const date = new Date(value);
     return Number.isNaN(date.getTime()) ? String(value) : DATE.format(date);
+  },
+  /** Coarse "how long ago", for dense rows where the exact minute is noise. */
+  relative(value) {
+    if (!value) return 'Unknown';
+    const date = new Date(value);
+    if (Number.isNaN(date.getTime())) return String(value);
+    const seconds = Math.max(0, (Date.now() - date.getTime()) / 1000);
+    if (seconds < 45) return 'just now';
+    const minutes = Math.round(seconds / 60);
+    if (minutes < 60) return `${minutes}m ago`;
+    const hours = Math.round(minutes / 60);
+    if (hours < 24) return `${hours}h ago`;
+    const days = Math.round(hours / 24);
+    if (days < 30) return `${days}d ago`;
+    const months = Math.round(days / 30);
+    if (months < 12) return `${months}mo ago`;
+    return `${Math.round(months / 12)}y ago`;
   },
   /** Run timestamps arrive as full ISO strings; selectors only need the part
    * that tells one run from another. */

@@ -18,10 +18,11 @@ import {
   on,
   post,
   serverParams,
+  severity,
 } from './core.js';
 import { confirm, dialogShell, openOverlay, toast } from './overlay.js';
 import { canPreview, openPreview } from './preview.js';
-import { describe } from './scores.js';
+import { aiScore, combinedScore, COVERAGE, COVERAGE_MARK, ruleScore } from './scores.js';
 
 const SENSITIVE = new Set('.env .pem .key .kdbx .pst .ost .sql .bak .config .conf .ini .yaml .yml .pfx .p12 .kirbi .ccache'.split(' '));
 const EXECUTABLE = new Set('.zip .7z .rar .tar .gz .exe .dll .msi .ps1 .bat .cmd .vbs .sh .jar'.split(' '));
@@ -78,34 +79,60 @@ const NEMESIS = {
   failed: 'Failed',
 };
 
-export function nemesisText(item) {
-  if (!item.nemesis_status) return 'Not sent';
-  const label = NEMESIS[item.nemesis_status] || item.nemesis_status;
-  const when = item.nemesis_updated_at_utc ? ` · ${fmt.date(item.nemesis_updated_at_utc)}` : '';
-  const detail = item.nemesis_error
-    ? ` — ${item.nemesis_error}`
-    : item.nemesis_response_id
-      ? ` · ${item.nemesis_response_id}`
-      : '';
-  return `${label}${when}${detail}`;
+/** A collected file, as a chip. Used by the detail panel. */
+function downloadChip(item) {
+  if (item.collection_status !== 'collected') return null;
+  const count = Number(item.download_count) || 0;
+  const chip = el('span', 'chip chip--download', count > 1 ? `Downloaded ${count}×` : 'Downloaded');
+  chip.title = item.downloaded_at_utc ? `Downloaded ${fmt.date(item.downloaded_at_utc)}` : 'Downloaded';
+  return chip;
 }
 
-/** Collection state chips: downloaded count and Nemesis delivery state. */
-export function transferChips(item) {
-  const wrap = el('span', 'chip-list');
-  if (item.collection_status === 'collected') {
-    const count = Number(item.download_count) || 0;
-    const chip = el('span', 'chip chip--download', count > 1 ? `Downloaded ${count}×` : 'Downloaded');
-    chip.title = item.downloaded_at_utc ? `Downloaded ${fmt.date(item.downloaded_at_utc)}` : 'Downloaded';
-    wrap.append(chip);
-  }
-  if (item.nemesis_status) {
-    const tone = item.nemesis_status === 'uploaded' ? 'sent' : ['failed', 'upload_failed', 'retrieval_failed'].includes(item.nemesis_status) ? 'failed' : 'pending';
-    const chip = el('span', `chip chip--${tone}`, `Nemesis ${NEMESIS[item.nemesis_status] || item.nemesis_status}`);
-    chip.title = item.nemesis_error || chip.textContent;
-    wrap.append(chip);
-  }
-  return wrap;
+/** Nemesis delivery state, as a chip. Used by the detail panel. */
+function nemesisChip(item) {
+  if (!item.nemesis_status) return null;
+  const tone = item.nemesis_status === 'uploaded' ? 'sent' : ['failed', 'upload_failed', 'retrieval_failed'].includes(item.nemesis_status) ? 'failed' : 'pending';
+  const chip = el('span', `chip chip--${tone}`, `Nemesis ${NEMESIS[item.nemesis_status] || item.nemesis_status}`);
+  chip.title = item.nemesis_error || chip.textContent;
+  return chip;
+}
+
+/* -- Row vocabulary -------------------------------------------------------- */
+
+const QUEUED_STATES = new Set(['pending', 'staged', 'retrieving', 'uploading', 'uploaded']);
+
+/** Downloaded/sent state for the row's status chip. Null when neither. */
+function collectionState(item) {
+  if (item.collection_status === 'collected') return { key: 'downloaded', label: 'Downloaded' };
+  if (item.nemesis_status && QUEUED_STATES.has(item.nemesis_status)) return { key: 'queued', label: 'Sent', title: 'Sent to Nemesis' };
+  return null;
+}
+
+/**
+ * Truncate a path from the middle so its root and its file name both survive,
+ * e.g. /Reports/Finance/Payroll/passwords.kdbx → /Reports/…/passwords.kdbx. The
+ * full path stays available in the element's tooltip.
+ */
+export function pathLabel(path) {
+  if (!path) return 'Path unavailable';
+  const sep = path.includes('\\') ? '\\' : '/';
+  const lead = path.startsWith(sep) ? sep : '';
+  const parts = path.split(sep).filter(Boolean);
+  if (parts.length <= 3) return path;
+  return `${lead}${parts[0]}${sep}…${sep}${parts[parts.length - 1]}`;
+}
+
+/**
+ * A shorter form for narrow rows: drop everything but the last two segments, so
+ * the parent directory and the file name survive rather than the root.
+ * /Reports/Finance/Payroll/passwords.kdbx → …/Payroll/passwords.kdbx
+ */
+export function pathTail(path) {
+  if (!path) return 'Path unavailable';
+  const sep = path.includes('\\') ? '\\' : '/';
+  const parts = path.split(sep).filter(Boolean);
+  if (parts.length <= 2) return path;
+  return `…${sep}${parts.slice(-2).join(sep)}`;
 }
 
 export function findingText(item) {
@@ -118,8 +145,100 @@ export function findingText(item) {
 
 /* -- Per-file detail ------------------------------------------------------- */
 
-function meta(label, value) {
-  return el('dl', 'meta', el('dt', undefined, label), el('dd', undefined, value || '—'));
+/** A labelled key/value row: `value` nodes lay out inline in the value cell. */
+function kv(label, ...value) {
+  return el('div', 'kv', el('dt', 'kv__key', label), el('dd', 'kv__val', ...value));
+}
+
+/** A key/value block. One row per div keeps the dl valid and the gap even. */
+function kvList(rows) {
+  return el('dl', 'kv-table', ...rows);
+}
+
+/** A titled section. Headers are what let the eye land on one group at a time. */
+function section(modifier, title, ...children) {
+  return el('section', `detail-section detail-${modifier}`, el('h3', 'detail-section__title', title), ...children);
+}
+
+/** A code path with an optional copy affordance, laid out on one line. */
+function pathLine(value, copyLabel) {
+  const line = el('div', 'path-line', el('code', undefined, value || 'Path unavailable'));
+  if (value) line.append(copyButton(value, copyLabel));
+  return line;
+}
+
+function copyButton(value, label = 'Copy path') {
+  const btn = el('button', 'copy-btn', icon('copy'));
+  btn.type = 'button';
+  btn.setAttribute('aria-label', label);
+  on(btn, 'click', () => copyText(value, btn));
+  return btn;
+}
+
+function scoreValue(score, scale) {
+  // Text must be appended before the scale node: el() defers text children to
+  // the end, which would otherwise render "/100" ahead of the number.
+  const value = el('div', 'score-card__value', score === null ? '—' : String(score));
+  if (score !== null && scale) value.append(el('span', 'score-card__scale', scale));
+  return value;
+}
+
+/**
+ * One score, as a card: the value, its band, and which engine spoke. Colour
+ * follows the app contract — Combined owns the severity ramp, Rule and AI each
+ * keep their own hue — so the panel teaches the same vocabulary as the grid.
+ */
+function scoreCard(kind, item, describe) {
+  const card = el('div', `score-card score-card--${kind}`);
+  card.title = describe[kind](item);
+  const label = { combined: 'Overall priority', rule: 'Rule rating', ai: 'AI rating' }[kind];
+  const parts = [el('div', 'score-card__label', label)];
+
+  if (kind === 'combined') {
+    const score = combinedScore(item);
+    const band = severity(score);
+    card.dataset.severity = band.band;
+    const mark = COVERAGE_MARK[item.combined_coverage];
+    parts.push(
+      scoreValue(score, '/100'),
+      el('div', 'score-card__band', score === null ? 'No rating' : band.label),
+      el(
+        'div',
+        'score-card__source',
+        score === null ? 'Select a ranking or AI run' : [COVERAGE[item.combined_coverage] || item.combined_coverage, mark].filter(Boolean).join(' '),
+      ),
+    );
+  } else if (kind === 'rule') {
+    const score = ruleScore(item);
+    card.dataset.strong = String((score ?? 0) >= 76);
+    parts.push(scoreValue(score), el('div', 'score-card__band', item.ranking_run_id ? 'Static rules' : 'No ranking selected'));
+  } else {
+    const score = aiScore(item);
+    card.dataset.strong = String((score ?? 0) >= 3);
+    parts.push(
+      scoreValue(score, '/4'),
+      el('div', 'score-card__band', score === null ? 'Not assessed' : item.jev_priority_name || 'Assessed'),
+    );
+  }
+
+  fill(card, ...parts);
+  return card;
+}
+
+function downloadValue(item) {
+  const chip = downloadChip(item);
+  if (!chip) return [el('span', 'kv__muted', 'No')];
+  const note = item.downloaded_at_utc ? el('span', 'kv__note', fmt.date(item.downloaded_at_utc)) : null;
+  return [chip, note];
+}
+
+function nemesisValue(item) {
+  const chip = nemesisChip(item);
+  if (!chip) return [el('span', 'kv__muted', 'Not sent')];
+  const note = [item.nemesis_updated_at_utc ? fmt.date(item.nemesis_updated_at_utc) : null, item.nemesis_error || item.nemesis_response_id || null]
+    .filter(Boolean)
+    .join(' · ');
+  return [chip, note ? el('span', 'kv__note', note) : null];
 }
 
 /**
@@ -127,10 +246,11 @@ function meta(label, value) {
  * describe a file identically.
  */
 export function detailPanel(item, ctx) {
-  const { status, onDownload, onQueue, onClose } = ctx;
+  const { status, describe, onDownload, onQueue, onClose } = ctx;
   const panel = el('div', 'detail-panel');
   panel.setAttribute('role', 'region');
   panel.setAttribute('aria-label', `Details for ${item.file_name}`);
+  panel.dataset.severity = severity(combinedScore(item)).band;
 
   const head = el(
     'header',
@@ -155,32 +275,16 @@ export function detailPanel(item, ctx) {
     })(),
   );
 
-  const copy = el('button', 'copy-btn', icon('copy'));
-  copy.type = 'button';
-  copy.setAttribute('aria-label', 'Copy UNC path');
-  on(copy, 'click', () => copyText(item.unc_path, copy));
-  const unc = meta('UNC path');
-  unc.append(el('div', 'path-line', el('code', undefined, item.unc_path || 'Path unavailable'), copy));
-  const paths = el('div', 'detail-paths', unc, meta('Remote path', item.remote_path));
-
-  const evidence = el('div', 'detail-evidence');
-  fill(
-    evidence,
-    meta('Combined priority', ctx.describe.combined(item)),
-    meta('Rule Rating', ctx.describe.rule(item)),
-    meta('AI Rating', ctx.describe.ai(item)),
-    meta('Downloaded', item.collection_status === 'collected' ? `Yes${Number(item.download_count) > 1 ? ` · ${item.download_count}×` : ''}` : 'No'),
-    meta('Nemesis', nemesisText(item)),
-  );
-
-  // Preview and single-file download need live retrieval. Queueing is always
-  // available because it writes a manifest, not the file.
+  // The paths and the action buttons are why anyone expands a row: they are what
+  // you do once a file matters. They lead the panel in their own band, ahead of
+  // the scores.
   const actions = el('div', 'detail-actions');
+  // Every control here reaches the environment, so offline the band carries
+  // only the explanation. There is no stage-only path in the panel.
   if (status.retrieval_enabled) {
     const previewable = canPreview(item, true);
     const previewButton = button('View file', {
       name: 'eye',
-      size: 'sm',
       onClick: () => {
         if (previewable) openPreview(item, (target) => onDownload(target));
         else toast('Preview is not available for this file type', 'error');
@@ -191,31 +295,46 @@ export function detailPanel(item, ctx) {
       previewButton,
       button('Download', {
         name: 'download',
-        size: 'sm',
         variant: 'primary',
         onClick: (event) => onDownload(item, event.currentTarget),
       }),
+      button('Send to Nemesis', { name: 'upload', onClick: () => onQueue([item]) }),
     );
-  }
-  actions.append(button('Queue for collection', { name: 'upload', size: 'sm', onClick: () => onQueue([item]) }));
-  if (!status.retrieval_enabled) {
+  } else {
     actions.append(el('span', 'field__hint', 'Offline session: remote retrieval is disabled.'));
   }
+
+  const primary = el(
+    'div',
+    'detail-primary',
+    actions,
+    kvList([kv('UNC path', pathLine(item.unc_path, 'Copy UNC path')), kv('Remote path', pathLine(item.remote_path, 'Copy remote path'))]),
+  );
+
+  const assessment = section(
+    'assessment',
+    'Assessment',
+    el('div', 'score-cards', scoreCard('combined', item, describe), scoreCard('rule', item, describe), scoreCard('ai', item, describe)),
+  );
+
+  const collection = section(
+    'collection',
+    'Collection',
+    kvList([kv('Downloaded', ...downloadValue(item)), kv('Nemesis', ...nemesisValue(item))]),
+  );
 
   const technical = el(
     'details',
     'disclosure detail-technical',
     el('summary', undefined, 'Permissions and scan metadata'),
-    el(
-      'div',
-      'detail-meta-grid',
-      meta('Indexed', fmt.date(item.scan_timestamp_utc)),
-      meta('Evidence observed', fmt.date(item.metadata_scan_timestamp_utc || item.scan_timestamp_utc)),
-      ...PERMISSIONS.map((key) => meta(permissionName(key), permissionLabel(item.permissions, key))),
-    ),
+    kvList([
+      kv('Indexed', fmt.date(item.scan_timestamp_utc)),
+      kv('Evidence observed', fmt.date(item.metadata_scan_timestamp_utc || item.scan_timestamp_utc)),
+      ...PERMISSIONS.map((key) => kv(permissionName(key), permissionLabel(item.permissions, key))),
+    ]),
   );
 
-  fill(panel, head, paths, actions, evidence, technical);
+  fill(panel, head, primary, assessment, collection, technical);
   return panel;
 }
 
@@ -223,18 +342,86 @@ async function copyText(value, button) {
   try {
     await navigator.clipboard.writeText(value || '');
     fill(button, icon('check'));
-    toast('UNC path copied');
+    toast(`${(button.getAttribute('aria-label') || 'Copy path').replace(/^Copy /i, '')} copied`);
     setTimeout(() => fill(button, icon('copy')), 1600);
   } catch {
     // No clipboard permission: select the path so the browser's own copy
     // shortcut still works, rather than failing silently.
+    const code = button.parentElement && button.parentElement.querySelector('code');
+    if (!code) {
+      toast('Clipboard unavailable', 'error');
+      return;
+    }
     const range = document.createRange();
-    range.selectNodeContents(button.parentElement.querySelector('code'));
+    range.selectNodeContents(code);
     const selection = getSelection();
     selection.removeAllRanges();
     selection.addRange(range);
     toast('Clipboard unavailable. Path selected — press Ctrl+C.', 'error');
   }
+}
+
+/* -- Row actions ----------------------------------------------------------- */
+
+/** An icon-only button, named for the file so it reads out of context. */
+function iconButton(name, label, onClick) {
+  const btn = el('button', 'row-action', icon(name));
+  btn.type = 'button';
+  btn.setAttribute('aria-label', label);
+  btn.title = label;
+  on(btn, 'click', onClick);
+  return btn;
+}
+
+/**
+ * The row's two actions: Nemesis (primary) and Download. Both reach the
+ * environment, so both are disabled offline. A file already downloaded or sent
+ * shows a status chip and has its Nemesis button disabled.
+ */
+export function rowActions(item, ctx) {
+  const { status, onDownload, onQueue } = ctx;
+  const offline = !status.retrieval_enabled;
+  const state = collectionState(item);
+  const cluster = [];
+
+  const queue = button('Nemesis', {
+    name: 'upload',
+    variant: 'primary',
+    size: 'sm',
+    onClick: () => {
+      if (!queue.disabled) onQueue([item]);
+    },
+  });
+  queue.setAttribute('aria-label', `Send ${item.file_name} to Nemesis`);
+  if (offline) {
+    queue.disabled = true;
+    queue.title = 'Remote retrieval is disabled in offline mode';
+  } else if (state) {
+    queue.disabled = true;
+    queue.title = state.key === 'downloaded' ? 'Already downloaded' : 'Already sent to Nemesis';
+  } else {
+    queue.title = 'Send to Nemesis';
+  }
+
+  const download = iconButton('download', `Download ${item.file_name}`, async () => {
+    if (download.disabled) return;
+    // onDownload() is called without a trigger: its own re-render resets the
+    // row, so the button only has to show that work is underway.
+    fill(download, el('span', 'spinner spinner--inline'));
+    await onDownload(item);
+  });
+  if (offline) {
+    download.disabled = true;
+    download.title = 'Remote retrieval is disabled in offline mode';
+  }
+
+  if (state) {
+    const chip = el('span', `row-status row-status--${state.key}`, state.label);
+    chip.title = state.title || state.label;
+    cluster.push(chip);
+  }
+  cluster.push(queue, download);
+  return cluster;
 }
 
 /* -- Percentage targets ---------------------------------------------------- */
@@ -385,13 +572,13 @@ export async function downloadRows(rows, onProgress) {
  */
 export async function queueRows(rows, { rankingRun, rankingCategory, name, status }) {
   if (!rankingRun) {
-    throw new Error('Queueing needs a saved rule ranking. Run one on the Score screen first.');
+    throw new Error('Sending to Nemesis needs a saved rule ranking. Run one on the Score screen first.');
   }
   if (!rows.length) throw new Error('No files selected.');
   const fileIds = rows.slice(0, QUEUE_CEILING).map((row) => row.id);
   const cap = Number(status.nemesis_max_bytes) || 50 * 1024 ** 2;
   const accepted = await confirm({
-    title: `Queue ${fmt.count(fileIds.length)} files?`,
+    title: `Send ${fmt.count(fileIds.length)} files to Nemesis?`,
     message: 'The manifest is saved before retrieval starts, so it can be re-run and retried from the Score screen.',
     detail: `Per-file cap ${fmt.bytes(cap)} · total cap ${fmt.bytes(cap * 20)} · source ranking ${rankingRun.slice(0, 8)}`,
     confirmLabel: 'Save manifest',
@@ -407,7 +594,7 @@ export async function queueRows(rows, { rankingRun, rankingCategory, name, statu
     max_file_size: cap,
     max_total_bytes: cap * 20,
   });
-  toast(`Saved manifest ${manifest.name} · ${fmt.count(manifest.expected_files)} files to collect`);
+  toast(`Saved manifest ${manifest.name} · ${fmt.count(manifest.expected_files)} files to send to Nemesis`);
   return manifest;
 }
 
@@ -456,7 +643,7 @@ export function percentageControl({ onApply }) {
     node.firstChild.value = index === 0 ? 'filtered' : 'scan';
   }
   radios.append(filtered, whole);
-  node.append(field('Act on', radios, 'ranked by Combined'));
+  node.append(field('Act on', radios, 'ranked by Overall'));
 
   const presets = el('div', 'btn-row');
   const custom = el('input', 'input');
@@ -530,44 +717,47 @@ export function percentageDialog({ params, sortKey, sortName, status, rankingRun
         report.append(el('p', 'field__hint', 'Narrow the filters or take a smaller percentage to act on this set.'));
         return;
       }
+      const offline = status.retrieval_enabled === false;
       const progress = el('p', 'field__hint');
-      report.append(
-        el(
-          'div',
-          'btn-row',
-          button('Download', {
-            size: 'sm',
-            onClick: async () => {
-              const stats = await downloadRows(target.rows, (message) => {
-                progress.textContent = message;
-              });
-              toast(
-                `${fmt.count(stats.total - stats.failed)} downloads started${stats.failed ? ` · ${stats.failed} failed` : ''}`,
-                stats.failed ? 'error' : 'ok',
-              );
-              handle.close();
-              onDone?.();
-            },
-          }),
-          button('Queue for collection', {
-            size: 'sm',
-            variant: 'primary',
-            onClick: async () => {
-              const manifest = await queueRows(target.rows, {
-                rankingRun,
-                rankingCategory,
-                name: `Top ${percent}% of the ${where}`,
-                status,
-              });
-              if (manifest) {
-                handle.close();
-                onDone?.();
-              }
-            },
-          }),
-        ),
-        progress,
-      );
+      const downloadButton = button('Download', {
+        size: 'sm',
+        onClick: async () => {
+          const stats = await downloadRows(target.rows, (message) => {
+            progress.textContent = message;
+          });
+          toast(
+            `${fmt.count(stats.total - stats.failed)} downloads started${stats.failed ? ` · ${stats.failed} failed` : ''}`,
+            stats.failed ? 'error' : 'ok',
+          );
+          handle.close();
+          onDone?.();
+        },
+      });
+      const nemesisButton = button('Send to Nemesis', {
+        size: 'sm',
+        variant: 'primary',
+        onClick: async () => {
+          const manifest = await queueRows(target.rows, {
+            rankingRun,
+            rankingCategory,
+            name: `Top ${percent}% of the ${where}`,
+            status,
+          });
+          if (manifest) {
+            handle.close();
+            onDone?.();
+          }
+        },
+      });
+      // Both destinations reach the environment, so offline neither is offered.
+      if (offline) {
+        for (const control of [downloadButton, nemesisButton]) {
+          control.disabled = true;
+          control.title = 'Remote retrieval is disabled in offline mode';
+        }
+      }
+      report.append(el('div', 'btn-row', downloadButton, nemesisButton), progress);
+      if (offline) report.append(el('p', 'field__hint', 'Offline session: remote retrieval is disabled.'));
     } catch (error) {
       clear(report);
       report.append(el('p', 'field__hint', error.message));

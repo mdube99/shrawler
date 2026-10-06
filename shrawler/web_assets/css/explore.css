@@ -202,17 +202,35 @@
   font-size: 11px;
 }
 
+/* Bulk actions ride the bottom of the viewport so a selection is always one
+ * click from acting, however far the table is scrolled. */
 .selection-bar {
+  position: fixed;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 55;
   display: flex;
   flex-wrap: wrap;
   align-items: center;
   justify-content: space-between;
   gap: var(--space-2);
-  min-height: 42px;
-  padding: 6px 10px;
-  border: 1px solid var(--line);
-  border-bottom: 0;
-  background: var(--surface-1);
+  min-height: 52px;
+  padding: 6px var(--space-5);
+  border-top: 1px solid var(--line-strong);
+  background: hsl(215 20% 8% / 0.98);
+  backdrop-filter: blur(8px);
+  box-shadow: 0 -12px 32px hsl(215 40% 2% / 0.55);
+}
+
+/* Reserve room for the fixed bar so it never covers the last row. */
+body:has(.selection-bar:not([hidden])) {
+  padding-bottom: 68px;
+}
+
+/* Keep transient toasts above the bar rather than behind it. */
+body:has(.selection-bar:not([hidden])) .toast-region {
+  bottom: 72px;
 }
 
 .selection-bar__summary {
@@ -239,41 +257,86 @@
   border-radius: 0 0 var(--radius-md) var(--radius-md);
 }
 
-.explore-grid .col-check {
-  width: 34px;
+/* Fixed layout so the file column takes exactly the space the score cluster and
+ * the actions leave over, instead of losing a width fight to every other
+ * column's content. File/path gets whatever remains. */
+/* Proportional columns with a low floor: the whole table always fits the
+ * viewport, and the file/path column takes the largest single share. A long
+ * path truncates inside its cell rather than widening the grid. */
+.explore-grid {
+  table-layout: fixed;
+  min-width: 640px;
 }
 
-.explore-grid .col-type {
-  width: 62px;
+.explore-grid .col-check {
+  width: 3.5%;
+}
+
+.explore-grid .col-combined {
+  width: 7%;
+}
+
+.explore-grid .col-rule {
+  width: 5%;
+}
+
+.explore-grid .col-ai {
+  width: 5%;
 }
 
 .explore-grid .col-file {
-  width: auto;
+  width: 34%;
 }
 
 .explore-grid .col-location {
-  width: 17%;
-}
-
-.explore-grid .col-score {
-  width: 104px;
-}
-
-.explore-grid .col-score-narrow {
-  /* Wide enough for the two-line header ("static rules"). */
-  width: 78px;
+  width: 12%;
 }
 
 .explore-grid .col-size {
-  width: 82px;
+  width: 6.5%;
 }
 
 .explore-grid .col-modified {
-  width: 116px;
+  width: 8%;
+}
+
+.explore-grid .col-actions {
+  width: 16%;
 }
 
 .explore-grid .col-chevron {
-  width: 26px;
+  width: 3%;
+}
+
+/* Two-row header: a "Scores" group sits over the three engine columns. Both
+ * rows stick, so the labels stay put while the body scrolls under them. */
+.explore-grid thead tr:first-child th {
+  height: 24px;
+  top: 0;
+}
+
+.explore-grid thead tr:nth-child(2) th {
+  height: 30px;
+  top: 24px;
+}
+
+.explore-grid thead .scores-group {
+  height: 24px;
+  color: var(--text-faint);
+  font-size: 9px;
+  letter-spacing: 0.14em;
+  text-align: center;
+}
+
+/* A sort header with no run behind it is not actionable; dim it rather than
+ * accepting a click that would silently do nothing. */
+.explore-grid .sort-btn:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+.explore-grid .sort-btn:disabled:hover {
+  color: inherit;
 }
 
 .explore-grid th:first-child,
@@ -331,13 +394,32 @@
 }
 
 .file-head {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-width: 0;
   overflow: hidden;
   color: var(--text);
   font-size: 12.5px;
   font-weight: 500;
   line-height: var(--row-line);
+}
+
+.file-name {
+  min-width: 0;
+  overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+/* The type badge rides inline after the name rather than owning a column. */
+.file-head .type-tag {
+  flex: 0 0 auto;
+  min-width: 0;
+  height: 16px;
+  padding: 0 5px;
+  font-size: 9px;
+  letter-spacing: 0.05em;
 }
 
 /* Name, path, and evidence strip all sit inside one row: the density decision
@@ -360,11 +442,24 @@
   white-space: nowrap;
 }
 
-.file-finding {
-  min-width: 0;
+/* The row carries two forms of the path and CSS picks one by width: the
+ * root-preserving form on wide screens, a shorter last-segments form on narrow
+ * ones. The detail panel always shows the whole path. */
+.file-path--tail {
+  display: none;
+}
+
+/* Evidence only appears when a rule actually matched. */
+.evidence-tag {
+  flex: 0 0 auto;
+  max-width: 45%;
   overflow: hidden;
-  color: var(--text-faint);
-  font: 10px/var(--row-sub) var(--font-data);
+  padding: 0 6px;
+  border: 1px solid hsl(36 45% 38%);
+  border-radius: 999px;
+  background: var(--accent-wash);
+  color: var(--accent-bright);
+  font: 500 9px/1.6 var(--font-data);
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -380,9 +475,92 @@
   white-space: nowrap;
 }
 
+.explore-grid td.score-cell {
+  text-align: center;
+}
+
 .chevron-cell {
   padding-right: 6px !important;
   color: var(--text-faint);
+}
+
+/* Row actions: Nemesis (primary) and Download. Both need the environment, so
+ * both are disabled offline. Muted until hovered so a hundred rows don't read
+ * as a toolbar, but always present. */
+.actions-cell {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: var(--space-2);
+  padding-inline: var(--space-2) !important;
+  white-space: nowrap;
+}
+
+.row-status {
+  display: inline-flex;
+  align-items: center;
+  height: 20px;
+  padding: 0 7px;
+  border: 1px solid var(--line-strong);
+  border-radius: 999px;
+  color: var(--text-mute);
+  font: 600 9px/1 var(--font-data);
+  white-space: nowrap;
+}
+
+.row-status--downloaded {
+  border-color: hsl(212 45% 44%);
+  color: hsl(212 60% 78%);
+  background: hsl(212 45% 50% / 0.14);
+}
+
+.row-status--queued {
+  border-color: var(--accent-line);
+  color: var(--accent-bright);
+  background: var(--accent-wash);
+}
+
+/* A row that already shows its state does not need the disabled action too. */
+.actions-cell:has(.row-status) .btn--primary {
+  display: none;
+}
+
+.row-action {
+  display: inline-grid;
+  place-items: center;
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-mute);
+  vertical-align: middle;
+  transition: background var(--ease), border-color var(--ease), color var(--ease);
+}
+
+.row-action:hover:not(:disabled):not([aria-disabled="true"]) {
+  border-color: var(--line-strong);
+  background: var(--surface-3);
+  color: var(--text);
+}
+
+.row-action:disabled,
+.row-action[aria-disabled="true"] {
+  cursor: not-allowed;
+  opacity: 0.45;
+}
+
+.row-action svg {
+  width: 14px;
+  height: 14px;
+}
+
+/* The action that retrieves bytes is the one worth pointing at. */
+.row-action[aria-label^="Download"]:hover:not(:disabled):not([aria-disabled="true"]) {
+  border-color: var(--accent-line);
+  background: var(--accent-wash);
+  color: var(--accent-bright);
 }
 
 .chevron-cell svg {
@@ -399,10 +577,6 @@
   transform: rotate(90deg);
 }
 
-.explore-grid td.numeric .score {
-  justify-self: end;
-}
-
 /* -- Row detail ------------------------------------------------------------ */
 
 .detail-row > td {
@@ -413,15 +587,38 @@
 
 .detail-panel {
   display: grid;
-  grid-template-columns: minmax(0, 1.6fr) minmax(0, 1fr);
+  grid-template-columns: minmax(0, 1.4fr) minmax(0, 1fr);
+  grid-template-areas:
+    "head       head"
+    "primary    primary"
+    "assess     collection"
+    "technical  technical";
   gap: var(--space-4) var(--space-5);
   padding: var(--space-4);
-  border-top: 2px solid var(--accent);
+  border-top: 2px solid var(--sev-none);
   animation: reveal 160ms ease-out both;
 }
 
+/* The panel repeats the row's severity rail. Expanding a file should not drop
+ * the at-a-glance signal the analyst was reading one row up. */
+.detail-panel[data-severity="minimal"] {
+  border-top-color: var(--sev-minimal);
+}
+
+.detail-panel[data-severity="likely"] {
+  border-top-color: var(--sev-likely);
+}
+
+.detail-panel[data-severity="strong"] {
+  border-top-color: var(--sev-strong);
+}
+
+.detail-panel[data-severity="immediate"] {
+  border-top-color: var(--sev-immediate);
+}
+
 .detail-head {
-  grid-column: 1 / -1;
+  grid-area: head;
   display: flex;
   align-items: flex-start;
   justify-content: space-between;
@@ -451,22 +648,226 @@
   font: 11px var(--font-data);
 }
 
-.detail-paths {
+/* Sections give the panel a header and a hairline between groups, so a value is
+ * never just one more line in a wall of labels. */
+.detail-section {
   display: grid;
   align-content: start;
   gap: var(--space-3);
   min-width: 0;
+  padding-top: var(--space-3);
+  border-top: 1px solid var(--line-soft);
 }
 
-.detail-evidence {
+.detail-section__title {
+  margin: 0;
+  color: var(--text-faint);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+}
+
+/* The action band: where the file is, and what you can do with it. It leads the
+ * panel because it is what you reach for once a file matters. */
+.detail-primary {
+  grid-area: primary;
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--space-3);
+  padding: var(--space-3);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--surface-3);
+}
+
+.detail-primary .path-line code {
+  color: var(--text);
+  font-size: 12px;
+}
+
+.detail-assessment {
+  grid-area: assess;
+}
+
+.detail-collection {
+  grid-area: collection;
+}
+
+/* The assessment, at a glance. Each card carries one score in its engine's
+ * colour; Combined alone takes the four-band severity ramp. */
+.score-cards {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: var(--space-3);
+}
+
+.score-card {
+  display: grid;
   align-content: start;
-  gap: var(--space-3) var(--space-4);
+  gap: 3px;
+  min-width: 0;
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid var(--line);
+  border-left: 3px solid var(--line-strong);
+  border-radius: var(--radius-sm);
+  background: var(--surface-3);
+}
+
+.score-card__label {
+  color: var(--text-mute);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+
+.score-card__value {
+  color: var(--text);
+  font: 600 22px/1.1 var(--font-data);
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -0.02em;
+}
+
+.score-card__scale {
+  margin-left: 1px;
+  color: var(--text-mute);
+  font-size: 12px;
+  font-weight: 500;
+}
+
+.score-card__band {
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.score-card__source {
+  color: var(--text-mute);
+  font-size: 10px;
+  overflow-wrap: anywhere;
+}
+
+.score-card--combined[data-severity="none"] .score-card__value {
+  color: var(--text-faint);
+}
+
+.score-card--combined[data-severity="minimal"] {
+  border-left-color: var(--sev-minimal);
+  background: hsl(212 12% 46% / 0.1);
+}
+
+.score-card--combined[data-severity="minimal"] .score-card__band {
+  color: hsl(212 14% 72%);
+}
+
+.score-card--combined[data-severity="likely"] {
+  border-left-color: var(--sev-likely);
+  background: hsl(172 48% 44% / 0.12);
+}
+
+.score-card--combined[data-severity="likely"] .score-card__band {
+  color: hsl(172 52% 66%);
+}
+
+.score-card--combined[data-severity="strong"] {
+  border-left-color: var(--sev-strong);
+  background: hsl(36 80% 57% / 0.13);
+}
+
+.score-card--combined[data-severity="strong"] .score-card__band {
+  color: hsl(36 84% 68%);
+}
+
+.score-card--combined[data-severity="immediate"] {
+  border-left-color: var(--sev-immediate);
+  background: hsl(2 68% 60% / 0.15);
+}
+
+.score-card--combined[data-severity="immediate"] .score-card__band {
+  color: hsl(2 72% 72%);
+}
+
+.score-card--rule {
+  border-left-color: var(--rule);
+  background: var(--rule-wash);
+}
+
+.score-card--rule .score-card__value {
+  color: var(--rule);
+}
+
+.score-card--rule .score-card__band {
+  color: var(--rule-dim);
+}
+
+.score-card--ai {
+  border-left-color: var(--ai);
+  background: var(--ai-wash);
+}
+
+.score-card--ai .score-card__value {
+  color: var(--ai);
+}
+
+.score-card--ai .score-card__band {
+  color: var(--ai-dim);
+}
+
+/* Aligned key/value rows: a faint label column, a bright value column. */
+.kv-table {
+  display: grid;
+  gap: var(--space-2);
+  min-width: 0;
+  margin: 0;
+}
+
+.kv {
+  display: grid;
+  grid-template-columns: 92px minmax(0, 1fr);
+  gap: var(--space-3);
+  align-items: baseline;
+  min-width: 0;
+}
+
+.kv__key {
+  color: var(--text-faint);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+
+.kv__val {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+  min-width: 0;
+  margin: 0;
+  color: var(--text);
+  font: 11px/1.55 var(--font-data);
+  overflow-wrap: anywhere;
+}
+
+.kv__note {
+  color: var(--text-mute);
+  font-size: 10px;
+}
+
+.kv__muted {
+  color: var(--text-mute);
+}
+
+.kv__val .path-line {
+  flex: 1 1 100%;
+}
+
+/* Pin the copy affordance to the right so it aligns across both path rows even
+ * when a UNC path is long enough to wrap. */
+.path-line .copy-btn {
+  margin-left: auto;
 }
 
 .detail-actions {
-  grid-column: 1 / -1;
   display: flex;
   flex-wrap: wrap;
   align-items: center;
@@ -474,15 +875,12 @@
 }
 
 .detail-technical {
-  grid-column: 1 / -1;
+  grid-area: technical;
   padding-top: var(--space-3);
   border-top: 1px solid var(--line);
 }
 
-.detail-meta-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
-  gap: var(--space-3) var(--space-4);
+.detail-technical .kv-table {
   padding-top: var(--space-2);
 }
 
@@ -846,13 +1244,27 @@
 
   .detail-panel {
     grid-template-columns: 1fr;
+    grid-template-areas:
+      "head"
+      "primary"
+      "assess"
+      "collection"
+      "technical";
   }
 
-  .detail-evidence {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
+  /* Narrow rows trade the root of the path for its last two segments, so the
+   * file name stays fully visible. */
+  .file-path--full {
+    display: none;
   }
 
-  .file-finding {
+  .file-path--tail {
+    display: inline;
+  }
+
+  /* The primary action goes icon-only so the two row buttons keep fitting as
+   * the columns narrow; its aria-label still names the action. */
+  .actions-cell .btn--primary > span {
     display: none;
   }
 }
@@ -886,28 +1298,13 @@
     padding: var(--space-3);
   }
 
-  /* Below 640px the score and size columns collapse into the row-expand detail
-   * instead of forcing a 10-column grid onto a phone. Nothing is lost: the
-   * detail panel already carries Combined, Rule, AI, size, and modified, and it
-   * is one tap away. The file/path column stays because it is what the analyst
-   * is actually reading. */
-  .explore-grid {
-    min-width: 420px;
+  .score-cards {
+    grid-template-columns: 1fr;
   }
 
-  .explore-grid tr > :nth-child(5),
-  .explore-grid tr > :nth-child(6),
-  .explore-grid tr > :nth-child(7),
-  .explore-grid tr > :nth-child(8),
-  .explore-grid tr > :nth-child(9) {
-    display: none;
-  }
-
-  /* The rail stays on screen at every width: it is the at-a-glance severity
-   * signal, and the detail panel is not where you read severity. */
-  .explore-grid tr > :nth-child(2),
-  .explore-grid tr > :nth-child(4) {
-    display: none;
+  .kv {
+    grid-template-columns: 1fr;
+    gap: 2px;
   }
 
   .dialog,

@@ -73,9 +73,9 @@
           <span id="selection-size"></span>
         </div>
         <div class="btn-row">
-          <button id="select-percent" class="btn btn--sm" type="button">Act on a percentage…</button>
+          <button id="queue-selection" class="btn btn--sm btn--primary" type="button">Send to Nemesis</button>
           <button id="download-selection" class="btn btn--sm" type="button">Download</button>
-          <button id="queue-selection" class="btn btn--sm btn--primary" type="button">Queue for collection</button>
+          <button id="select-percent" class="btn btn--sm btn--ghost" type="button">Act on a percentage…</button>
           <button id="clear-selection" class="btn btn--sm btn--ghost" type="button">Clear</button>
         </div>
       </div>
@@ -86,22 +86,24 @@
         <div class="grid-shell explore-grid-shell">
           <table class="data-grid explore-grid">
             <colgroup>
-              <col class="col-check"><col class="col-type"><col class="col-file"><col class="col-location">
-              <col class="col-score"><col class="col-score-narrow"><col class="col-score-narrow">
-              <col class="col-size"><col class="col-modified"><col class="col-chevron">
+              <col class="col-check"><col class="col-file"><col class="col-location"><col class="col-combined"><col class="col-rule"><col class="col-ai">
+              <col class="col-size"><col class="col-modified"><col class="col-actions"><col class="col-chevron">
             </colgroup>
             <thead>
               <tr>
-                <th scope="col"><input id="select-page" class="file-checkbox" type="checkbox" aria-label="Select all files on this page"></th>
-                <th scope="col"><button class="sort-btn" type="button" data-sort="type">Type<span class="sort-caret" aria-hidden="true"></span></button></th>
-                <th scope="col"><button class="sort-btn" type="button" data-sort="file">File / path / evidence<span class="sort-caret" aria-hidden="true"></span></button></th>
-                <th scope="col"><button class="sort-btn" type="button" data-sort="location">Location<span class="sort-caret" aria-hidden="true"></span></button></th>
-                <th class="numeric" scope="col"><button class="sort-btn" type="button" data-sort="combined" title="Combined priority 0–100 · blended from the engines selected above"><span class="sort-stack"><span>Combined</span><span class="sort-sub" id="combined-sub">rules and AI</span></span><span class="sort-caret" aria-hidden="true"></span></button></th>
-                <th class="numeric" scope="col"><button class="sort-btn" type="button" data-sort="priority" title="Rule rating · matched static filename, path, and metadata rules, 80+ fully alarmed"><span class="sort-stack"><span>Rule</span><span class="sort-sub sort-sub--rule">static rules</span></span><span class="sort-caret" aria-hidden="true"></span></button></th>
-                <th class="numeric" scope="col"><button class="sort-btn" type="button" data-sort="jev" title="AI rating 0–4 · Jev-style decision model"><span class="sort-stack"><span>AI</span><span class="sort-sub sort-sub--ai">model · 0–4</span></span><span class="sort-caret" aria-hidden="true"></span></button></th>
-                <th class="numeric" scope="col"><button class="sort-btn" type="button" data-sort="size">Size<span class="sort-caret" aria-hidden="true"></span></button></th>
-                <th class="numeric" scope="col"><button class="sort-btn" type="button" data-sort="modified">Modified<span class="sort-caret" aria-hidden="true"></span></button></th>
-                <th scope="col"><span class="sr-only">Details</span></th>
+                <th scope="col" rowspan="2"><input id="select-page" class="file-checkbox" type="checkbox" aria-label="Select all files on this page"></th>
+                <th scope="col" rowspan="2"><button class="sort-btn" type="button" data-sort="file">File / path<span class="sort-caret" aria-hidden="true"></span></button></th>
+                <th scope="col" rowspan="2"><button class="sort-btn" type="button" data-sort="location">Location<span class="sort-caret" aria-hidden="true"></span></button></th>
+                <th scope="colgroup" colspan="3" class="scores-group">Scores</th>
+                <th class="numeric" scope="col" rowspan="2"><button class="sort-btn" type="button" data-sort="size">Size<span class="sort-caret" aria-hidden="true"></span></button></th>
+                <th class="numeric" scope="col" rowspan="2"><button class="sort-btn" type="button" data-sort="modified">Modified<span class="sort-caret" aria-hidden="true"></span></button></th>
+                <th scope="col" rowspan="2"><span class="sr-only">Actions</span></th>
+                <th scope="col" rowspan="2"><span class="sr-only">Details</span></th>
+              </tr>
+              <tr>
+                <th class="numeric" scope="col"><button class="sort-btn" type="button" data-sort="combined" id="combined-header" title="Overall priority 0–100">Overall<span class="sort-caret" aria-hidden="true"></span></button></th>
+                <th class="numeric" scope="col"><button class="sort-btn" type="button" data-sort="priority" title="Rule rating 0–100 · matched static filename, path, and metadata rules; 80+ is fully alarmed">Rule<span class="sort-caret" aria-hidden="true"></span></button></th>
+                <th class="numeric" scope="col"><button class="sort-btn" type="button" data-sort="jev" title="AI rating 0–4 · Jev-style decision model">AI 0–4<span class="sort-caret" aria-hidden="true"></span></button></th>
               </tr>
             </thead>
             <tbody id="rows"></tbody>

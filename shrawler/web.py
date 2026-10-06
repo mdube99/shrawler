@@ -2683,6 +2683,8 @@ class WebHandler(BaseHTTPRequestHandler):
             elif path == "/api/review/hashes":
                 self._json(ReviewStore(service.database).hashes())
             elif path == "/api/collection/create":
+                if self.server.state.pool is None:
+                    raise ValueError("Remote retrieval is disabled in offline mode")
                 self._json(CollectionQueue(service.database).create(**payload), 201)
             elif path == "/api/collection/run":
                 pool = self.server.state.pool

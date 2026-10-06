@@ -413,7 +413,7 @@ export function createRuleTab(root) {
         ctx.collection?.toggle(item.file_id, box.checked);
         renderCollectBar();
       });
-      collect.append(box, el('span', undefined, 'Queue'));
+      collect.append(box, el('span', undefined, 'Nemesis'));
       actions.append(collect);
     }
     review.append(actions);
@@ -433,7 +433,7 @@ export function createRuleTab(root) {
     fill(
       nodes.collectBar,
       el('span', 'panel__hint', `${fmt.count(count)} candidate${count === 1 ? '' : 's'} selected for collection`),
-      button('Save selected to queue', { size: 'sm', onClick: () => ctx.collection?.createFromSelection() }),
+      button('Save selected to Nemesis', { size: 'sm', onClick: () => ctx.collection?.createFromSelection() }),
     );
     nodes.collectBar.lastChild.disabled = count === 0;
   }

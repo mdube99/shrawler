@@ -58,31 +58,46 @@ minimum rule rating are all filterable. Active filters also appear as removable
 chips.
 
 **Engine run selection** is a dedicated control rather than one more filter.
-`Ranking` and `AI` each select a saved run or none, and Combined is their
-weighted blend. Deselecting either engine re-weights Combined to the other
+`Ranking` and `AI` each select a saved run or none, and Overall is their
+weighted blend. Deselecting either engine re-weights Overall to the other
 alone instead of filtering rows away, so "focus on AI only" is expressed by
 turning the rule run off. Both engines keep their own column at all times, in
 their own hues, for whichever runs are selected.
 
-The three score headers say what the number is, in a second smaller line
-beneath the name: `rules and AI` under Combined (the full story lives in the
-header's own tooltip), `static rules` under Rule, and `model · 0–4` under AI,
-in each engine's hue. The Combined sub-label follows the engine selection
-exactly like the note beside the selectors, so a column never claims a blend
-that is not active. Chip tooltips carry the same statements as sentences, with
-the severity band for Combined.
+The three score columns form one cluster under a shared **Scores** header: a
+larger severity-coloured **Overall** pill, then smaller **Rule** and **AI 0–4**
+pills in each engine's hue. The explanation of what each number is lives in the
+column header's tooltip rather than a second line of text. The Overall header's
+tooltip follows the engine selection exactly like the note beside the selectors,
+so a column never claims a blend that is not active. Chip tooltips carry the same
+statements as sentences, with the severity band for Overall.
 
 Every piece of view state lives in the URL, so any table state can be shared as a
 link. Nothing is kept in `localStorage`.
 
-Table view displays one paginated result set. Select a file to open its UNC
-path, remote path, indexed time, and file actions beneath the row. Severity is
-shown as a left rail on the row plus a chip on the Combined score, rather than a
-tinted row background that would hurt the legibility of the path text.
+Table view displays one paginated result set. Each row leads with the file name
+(with its type badge) over a path that is truncated from the middle on wide rows
+and shortened to its last two segments on narrow ones, so the file name always
+survives; location follows, then the score cluster. Each row carries two actions
+— **Nemesis** and **Download**; a file already downloaded or sent shows a status
+chip with its Nemesis button disabled. The expanded detail panel adds **View
+file** and the paths. A selection raises a sticky bar at the bottom of the
+viewport with the bulk actions. Select a file to open a detail panel beneath the
+row. The panel leads
+with the paths and the file actions — **View file**, **Download**, and **Send to
+Nemesis** — because retrieving a file and copying its UNC path are the
+primary things you do once a file matters. Below that come **Assessment**, which
+restates the three scores as colour-coded cards (Overall on the four-band
+severity ramp, Rule in violet, AI in cyan), a **Collection** section, and a
+disclosure for permissions and scan metadata. The panel carries the same
+severity rail as its row, so expanding a file never drops the at-a-glance
+signal. The row itself keeps severity as a left rail plus a chip on the Overall
+score, rather than a tinted
+background that would hurt the legibility of the path text.
 
-File actions offer **View file**, **Download**, and **Queue for collection**.
-Queueing saves a [collection manifest](collection.md) with byte caps and retry;
-it is the only path for anything acting on more than one file.
+File actions offer **View file**, **Download**, and **Send to Nemesis**.
+Sending to Nemesis saves a [collection manifest](collection.md) with byte caps
+and retry; it is the only path for anything acting on more than one file.
 
 **Percentage actions** act on a share of a ranked set rather than a hand-picked
 selection. Choose the filtered set or the whole scan, a percentage, and a
@@ -109,9 +124,9 @@ the selected score; and Sort can order table rows and expanded tree files by
 rule rating. The displayed **Rule Rating** is a snapshot from that run. Files
 discovered after the ranking remain unranked until the ranking is run again.
 
-## Combined priority
+## Overall priority
 
-The table and tree also show a **Combined** column that blends the rule-based
+The table and tree also show an **Overall** column that blends the rule-based
 **Rule Rating** with the model's **AI Rating** on a common 0-100 scale:
 
 ```text
@@ -129,16 +144,15 @@ rules and level 4 by AI reads 78), while a signal from only one side lands mid
 scale (a rules-missed credential the AI rates 4 reads 50; a rule maximum the AI
 rates 0 reads 50). If neither run is selected the column shows `—`.
 
-The chip carries a coverage marker for which components fed the number: `●`
-both, `◐` rules only, `○` AI only — spelled out in the tooltip, e.g.
-`Combined priority 78/100 · Strong · rated by static rules + AI`. Rule and AI
-chips explain their own scale and source on hover (rule weights, where 80+
-fully alarms; the 0–4 Jev model rating). Sort by **Combined** orders the page
+The tooltip names which components fed the number, e.g. `Overall priority
+78/100 · Strong · rated by static rules + AI`. Rule and AI chips explain their
+own scale and source on hover (rule weights, where 80+ fully alarms; the 0–4
+Jev model rating). Sort by **Overall** orders the page
 by this score. Weights and the rating anchor are configurable under
 `[scoring]` in the configuration file (`rating_full`, `rating_weight`,
 `jev_weight`).
 
-Combined is mapped onto four severity bands, applied as a left rail on the row
+Overall is mapped onto four severity bands, applied as a left rail on the row
 and a chip in the score cell: 0-25 Minimal, 26-50 Likely, 51-75 Strong, 76-100
 Immediate. Rule and AI keep their own hues rather than reusing the bands, so hue
 says which engine produced a number and the rail says how urgent it is.
@@ -219,5 +233,6 @@ assessment jobs are asked to cancel during shutdown; completed runs remain in
 their local databases.
 
 Collection manifests are shared with the CLI: select candidates, save and review
-a manifest, then collect or retry failed files. Offline sessions support creation
-and review only.
+a manifest, then collect or retry failed files. Offline sessions are read-only:
+they can review saved manifests, but creating or running one requires a
+connection.

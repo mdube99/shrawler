@@ -29,9 +29,11 @@ import {
   downloadOne,
   downloadRows,
   findingText,
+  pathLabel,
+  pathTail,
   percentageDialog,
   queueRows,
-  transferChips,
+  rowActions,
   typeTag,
 } from './actions.js';
 import { AUTO, createFilters, NONE } from './explore-filters.js';
@@ -76,7 +78,7 @@ const SORTS = {
   type: 'Type',
   file: 'File',
   location: 'Location',
-  combined: 'Combined',
+  combined: 'Overall',
   priority: 'Rule Rating',
   jev: 'AI Rating',
   size: 'Size',
@@ -123,7 +125,7 @@ function commit(patch, { keepPage = false, push = false } = {}) {
 }
 
 const filters = createFilters({
-  root: { toggle: $('filter-toggle'), chips: $('active-filters'), ranking: $('ranking-run'), jev: $('jev-run'), note: $('engine-note'), combinedSub: $('combined-sub') },
+  root: { toggle: $('filter-toggle'), chips: $('active-filters'), ranking: $('ranking-run'), jev: $('jev-run'), note: $('engine-note'), combinedHeader: $('combined-header') },
   state,
   defaults: DEFAULTS,
   runs,
@@ -179,8 +181,14 @@ function rowFor(item, index) {
   checkCell.dataset.severity = severity(combinedScore(item)).band;
   checkCell.append(selectionBox(item));
 
-  const typeCell = el('td');
-  typeCell.append(typeTag(item.extension));
+  // The score cluster leads the row: three fixed-width columns that rank the
+  // file before its name is even read.
+  const combinedCell = el('td', 'score-cell');
+  combinedCell.append(combinedChip(item));
+  const ruleCell = el('td', 'score-cell');
+  ruleCell.append(engineChip('rule', ruleScore(item), 'Rule rating'));
+  const aiCell = el('td', 'score-cell');
+  aiCell.append(engineChip('ai', aiScore(item), 'AI rating'));
 
   const fileCell = el('td');
   const trigger = el('button', 'file-trigger');
@@ -188,38 +196,50 @@ function rowFor(item, index) {
   trigger.dataset.fileId = item.id;
   trigger.setAttribute('aria-expanded', String(open));
   trigger.setAttribute('aria-controls', `details-${item.id}`);
-  const sub = el('span', 'file-sub');
-  fill(sub, el('span', 'file-path', item.remote_path || 'Path unavailable'), transferChips(item), el('span', 'file-finding', findingText(item)));
-  trigger.append(el('span', 'file-head', item.file_name), sub);
+  const head = el('span', 'file-head', el('span', 'file-name', item.file_name), typeTag(item.extension));
+  const fullPath = el('span', 'file-path file-path--full', pathLabel(item.remote_path));
+  const tailPath = el('span', 'file-path file-path--tail', pathTail(item.remote_path));
+  fullPath.title = item.remote_path || '';
+  tailPath.title = item.remote_path || '';
+  const sub = el('span', 'file-sub', fullPath, tailPath);
+  // Evidence is only worth a badge when there is evidence: a "No findings" tag
+  // on every row is noise that trains the eye to ignore the column.
+  if ((item.rule_matches || []).length) {
+    sub.append(el('span', 'evidence-tag', findingText(item)));
+  }
+  fill(trigger, head, sub);
   trigger.title = item.file_name;
   fileCell.append(trigger);
 
-  const combinedCell = el('td', 'numeric');
-  combinedCell.append(combinedChip(item));
-  const ruleCell = el('td', 'numeric');
-  ruleCell.append(engineChip('rule', ruleScore(item), 'Rule rating'));
-  const aiCell = el('td', 'numeric');
-  aiCell.append(engineChip('ai', aiScore(item), 'AI rating'));
+  const locationCell = el('td');
+  locationCell.append(el('span', 'location', `${item.host || 'Unknown host'} › ${item.share || 'Unknown share'}`));
+
   const sizeCell = el('td', 'numeric');
   sizeCell.append(el('span', 'size-value', item.readable_size || fmt.bytes(item.size_bytes)));
+
   const dateCell = el('td', 'numeric');
-  const time = el('time', 'date-value', fmt.date(item.mtime_utc));
+  const time = el('time', 'date-value', fmt.relative(item.mtime_utc));
   if (item.mtime_utc) time.dateTime = item.mtime_utc;
+  time.title = fmt.date(item.mtime_utc);
   dateCell.append(time);
+
+  const actionsCell = el('td', 'actions-cell');
+  actionsCell.append(...rowActions(item, actionContext()));
+
   const chevronCell = el('td', 'chevron-cell');
   chevronCell.append(icon('chevron'));
 
   fill(
     row,
     checkCell,
-    typeCell,
     fileCell,
-    el('td', undefined, el('span', 'location', `${item.host || 'Unknown host'} › ${item.share || 'Unknown share'}`)),
+    locationCell,
     combinedCell,
     ruleCell,
     aiCell,
     sizeCell,
     dateCell,
+    actionsCell,
     chevronCell,
   );
   return row;
@@ -261,7 +281,9 @@ function renderSelectionBar() {
   const retrievable = status.retrieval_enabled !== false && !busy;
   $('download-selection').disabled = !retrievable;
   $('queue-selection').disabled = !retrievable;
-  $('download-selection').title = status.retrieval_enabled === false ? 'Remote retrieval is disabled in offline mode' : '';
+  const offlineTitle = status.retrieval_enabled === false ? 'Remote retrieval is disabled in offline mode' : '';
+  $('download-selection').title = offlineTitle;
+  $('queue-selection').title = offlineTitle;
   const onPage = page.items.filter((item) => selection.has(item.id)).length;
   $('select-page').checked = !!page.items.length && onPage === page.items.length;
   $('select-page').indeterminate = onPage > 0 && onPage < page.items.length;
@@ -270,6 +292,9 @@ function renderSelectionBar() {
 function renderSortHeaders() {
   for (const header of document.querySelectorAll('.sort-btn')) {
     const cell = header.closest('th');
+    // A column with no run behind it cannot be sorted by; disabling the button
+    // is clearer than accepting a click that does nothing.
+    header.disabled = !filters.columnAvailable(header.dataset.sort);
     if (header.dataset.sort === state.sort) cell.setAttribute('aria-sort', state.direction === 'desc' ? 'descending' : 'ascending');
     else cell.removeAttribute('aria-sort');
   }
