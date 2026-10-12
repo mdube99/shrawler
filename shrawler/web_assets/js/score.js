@@ -46,6 +46,8 @@ const PHASES = {
   'indexing sibling names': { label: 'Indexing sibling names', counted: true, verb: 'indexed' },
   scoring: { label: 'Scoring files', counted: true, verb: 'scored' },
   saving: { label: 'Saving results', counted: true, verb: 'scored', meter: false, quiet: true },
+  // Promoting a retained preview copies its rows; processed/total is real.
+  'saving preview': { label: 'Saving preview', counted: true, verb: 'saved' },
   'staging ledger': { label: 'Staging ledger', counted: false, quiet: true },
   'planning batches': { label: 'Planning batches', counted: false, quiet: true },
   dispatching: { label: 'Assessing files', counted: true, verb: 'assessed' },
@@ -161,6 +163,16 @@ function describe(key) {
       : { ...base, state: 'unknown', label: 'Checking…' };
   } else if (job.status === 'running') {
     view = running(key, job, base);
+  } else if (key === 'rule' && job.status === 'completed' && job.preview && previewEnded(job)) {
+    // The run's preview was since saved, discarded, or replaced: the card
+    // must not keep offering an unsaved result that no longer exists.
+    view = {
+      ...base,
+      state: 'idle',
+      label: 'Preview ended',
+      detail: [job.finished_at ? fmt.relative(job.finished_at) : null, 'saved, discarded, or replaced since'].filter(Boolean).join(' · '),
+      finished: true,
+    };
   } else {
     view = {
       ...base,
@@ -187,6 +199,12 @@ function describe(key) {
   view.headline = view.label;
   view.summary = [view.percent, view.detail].filter(Boolean).join(' · ');
   return view;
+}
+
+/** Has the rule module confirmed that this preview job's result is gone? */
+function previewEnded(job) {
+  const known = engines.rule.module?.previewState?.();
+  return Boolean(known?.known) && known.id !== job.id;
 }
 
 function running(key, job, base) {
@@ -267,7 +285,10 @@ function timing(engine, job, phase, total, processed) {
 }
 
 function outcomeLabel(key, job) {
-  if (key === 'rule' && job.status === 'completed') return job.preview ? 'Unsaved preview' : 'Ranking saved';
+  if (key === 'rule' && job.status === 'completed') {
+    if (job.preview) return 'Unsaved preview';
+    return job.result?.saved_from_preview ? 'Ranking saved · from preview' : 'Ranking saved';
+  }
   return OUTCOMES[job.status] || sentence(job.status);
 }
 
@@ -283,6 +304,7 @@ function outcomeDetail(key, job) {
       `${fmt.count(result.files_scored ?? job.processed)} scored`,
       positive === undefined ? null : `${fmt.count(positive)} positive`,
       job.preview ? 'nothing written' : null,
+      job.result?.saved_from_preview ? 'scores identical to the preview' : null,
       result.scan_status && result.scan_status !== 'completed' ? `source scan ${result.scan_status}` : null,
     ]
       .filter(Boolean)
@@ -326,10 +348,10 @@ function buildCard(key) {
   const warning = el('p', 'engine-card__warning');
   const status = el('div', 'engine-card__status', el('div', 'engine-card__line', spinner, label, percent), track, detail, timingLine, warning);
 
-  const view = button('View candidates', { size: 'sm', onClick: () => showResults(key) });
+  const view = button('View candidates', { size: 'sm', onClick: () => showResults(key, { latest: true }) });
   const explore = el('a', 'btn btn--sm', icon('table'), el('span', undefined, 'Open in Explore'));
   // Only a rule preview can be promoted, so only the Rule card carries Save.
-  const save = key === 'rule' ? button('Save this ranking', { size: 'sm', variant: 'primary', onClick: () => engine.module?.savePreview?.() }) : null;
+  const save = key === 'rule' ? button('Save preview', { size: 'sm', variant: 'primary', onClick: () => engine.module?.savePreview?.() }) : null;
   const outcome = el('div', 'engine-card__outcome btn-row', view, explore, save);
 
   const error = el('div', 'engine-card__error');
@@ -355,6 +377,7 @@ function toggleDrawer(key, open) {
   const next = open ?? card.drawer.hidden;
   card.drawer.hidden = !next;
   card.configure.setAttribute('aria-expanded', String(next));
+  engines[key].module?.onDrawer?.(next);
   if (next) card.drawer.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
 }
 
@@ -430,7 +453,7 @@ function paintOutcome(key, view) {
   let preview = false;
   if (view.finished && job) {
     if (key === 'rule') {
-      preview = Boolean(job.preview) && job.status === 'completed';
+      preview = Boolean(job.preview) && job.status === 'completed' && !previewEnded(job);
       run = !job.preview && job.status === 'completed' ? job.result?.run_id : null;
     } else if (job.status !== 'failed') {
       run = job.assessment_run_id;
@@ -444,6 +467,7 @@ function paintOutcome(key, view) {
   card.explore.hidden = !run;
   if (run) card.explore.href = href(`/?${exploreParam}=${encodeURIComponent(run)}`);
   if (card.save) {
+    card.save.lastChild.textContent = engine.module?.saveLabel?.() || 'Save preview';
     card.save.hidden = !(preview && engine.module?.canSave?.(job.id));
     card.save.disabled = view.jobActive || engine.requesting;
   }
@@ -586,10 +610,10 @@ async function receive(key, job, { quiet = false } = {}) {
   if (!job || job.status === 'running' || engine.settled.has(job.id)) return;
   engine.settled.add(job.id);
   // A job that finished before this page loaded is shown, not re-announced:
-  // its toast and result reload belonged to the page that ran it. A module
-  // may still adopt what it left behind, such as an unsaved preview.
-  if (quiet) engine.module?.adopt?.(job);
-  else await engine.onSettle(job);
+  // its toast and result reload belonged to the page that ran it. A preview it
+  // left behind is read from the server by the rule module's own load.
+  if (quiet) return;
+  await engine.onSettle(job);
   paint(key);
 }
 
@@ -659,14 +683,14 @@ async function poll(options) {
  * acknowledged even while the server is still parsing, and a second click
  * cannot reach the server as a 409. Refusals land in the engine's own card.
  */
-async function startJob(key, path, body, { accepted } = {}) {
+async function startJob(key, path, body, { accepted, send, onError } = {}) {
   const engine = engines[key];
   if (engine.requesting || engine.job?.status === 'running') return null;
   engine.requesting = true;
   engine.error = '';
   paint(key);
   try {
-    const job = await post(path, body);
+    const job = await (send ? send() : post(path, body));
     engine.requesting = false;
     accepted?.(job);
     engine.awaiting = job.id;
@@ -676,7 +700,10 @@ async function startJob(key, path, body, { accepted } = {}) {
     return job;
   } catch (error) {
     engine.requesting = false;
-    setError(key, error.message);
+    // A module may own a refusal it can explain better, such as a preview
+    // that is gone; anything it does not claim lands in the card.
+    if (onError?.(error)) paint(key);
+    else setError(key, error.message);
     // Re-sync after a refused start, for example a run begun in another window.
     poll();
     return null;
@@ -724,9 +751,13 @@ on(document.querySelector('.results .tabs'), 'keydown', (event) => {
   setTab(TABS[(TABS.indexOf(state.tab) + step + TABS.length) % TABS.length], { focus: true });
 });
 
-/** Completion is actionable: jump straight to what the run produced. */
-function showResults(key) {
-  if (key === 'rule') rule.revealLatest?.();
+/**
+ * Completion is actionable: jump straight to the results. The card's View
+ * action also selects what the last run produced; a module that has already
+ * chosen its view (the preview, a just-saved run) only asks for the scroll.
+ */
+function showResults(key, { latest = false } = {}) {
+  if (latest && key === 'rule') rule.revealLatest?.();
   setTab(key === 'rule' ? 'rule' : 'ai');
   document.querySelector('.results').scrollIntoView({ behavior: 'smooth', block: 'start' });
 }
@@ -758,8 +789,13 @@ engines.rule.module = rule;
 engines.ai.module = ai;
 
 engines.rule.onSettle = async (job) => {
-  if (job.status === 'completed') await rule.onComplete(job);
-  else if (job.status === 'failed') toast(`Rule ranking failed · ${job.error || 'see the Rule card'}`, 'error', { sticky: true });
+  if (job.status === 'completed') {
+    await rule.onComplete(job);
+    return;
+  }
+  // A failed or cancelled run leaves any earlier preview in place.
+  await rule.onSettle(job);
+  if (job.status === 'failed') toast(`Rule ranking failed · ${job.error || 'see the Rule card'}`, 'error', { sticky: true });
   else if (job.status === 'cancelled') toast('Rule ranking cancelled · nothing saved');
 };
 
@@ -786,6 +822,8 @@ function context(key) {
     repaint: () => paint(key),
     refresh: () => poll(),
     showResults: () => showResults(key),
+    /** Switch to this engine's results tab without scrolling. */
+    selectTab: () => setTab(key),
     /** Read the shared job model, for module surfaces that mirror it. */
     view: () => describe(key),
     get job() {

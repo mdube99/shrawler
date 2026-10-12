@@ -2,11 +2,13 @@
 // Configure drawer (TOML editor, rule builder, and the preview workbench),
 // and the Rule candidates results with saved and unsaved-preview views.
 //
-// A preview is a first-class, deliberately transient result. It scores every
-// observed file with the editor's rules but keeps only the top 100 in memory;
-// nothing is written. It is labelled as unsaved everywhere it appears, it
-// survives rule edits so iteration stays fast, and "Save this ranking" turns
-// it into a saved run by re-running exactly the request that produced it.
+// A preview is a first-class, deliberately transient result kept by the
+// server: it scores every observed file with the editor's rules into its own
+// database and writes nothing to the saved rankings. It survives reloads
+// (until it is saved, discarded, replaced by a newer preview, or the server
+// stops), reads through the same paging, filters, and explanations as a saved
+// run, compares against a saved run, and saves by promotion: the saved run
+// carries exactly the previewed scores, nothing is re-run.
 
 import {
   button,
@@ -18,15 +20,15 @@ import {
   fmt,
   href,
   icon,
-  json,
   number,
   on,
   option,
   select,
   setBusy,
   severity,
+  token,
 } from './core.js';
-import { dialogShell, openOverlay, panel, toast } from './overlay.js';
+import { confirm, dialogShell, openOverlay, panel, toast } from './overlay.js';
 import { sendSummary, sendToNemesis } from './actions.js';
 import { engineChip } from './scores.js';
 
@@ -37,12 +39,90 @@ const CONTEXT_MODES = [
   ['subtree', 'Label an exact subtree'],
 ];
 
+const PAGE = 100;
 const TOP_HITS = 8;
+// Editor change detection runs on every keystroke; the status it drives does
+// not need to repaint faster than this.
+const EDIT_DEBOUNCE_MS = 200;
+// A compare filter the server cannot apply (raised, lowered, newly or no
+// longer positive, a minimum score) is applied here, reading forward through
+// changed files until a page is full or this many server pages were read.
+const COMPARE_SCAN_PAGES = 20;
+
+// Compare filters. `server` is what `changed` the request needs; `match` is
+// the client-side test on top of it.
+const COMPARE_FILTERS = [
+  ['all', 'All files', '0', () => true],
+  ['changed', 'changed', '1', (item) => item.delta !== 0],
+  ['raised', 'raised', '1', (item) => item.delta > 0],
+  ['lowered', 'lowered', '1', (item) => item.delta < 0],
+  ['newly_positive', 'newly positive', '1', (item) => (item.preview_priority ?? 0) > 0 && (item.base_priority ?? 0) <= 0],
+  ['no_longer_positive', 'no longer positive', '1', (item) => (item.base_priority ?? 0) > 0 && (item.preview_priority ?? 0) <= 0],
+];
+
+const GONE = 'The preview is no longer available: it was saved, discarded, or replaced elsewhere, or the server restarted.';
+const MAC = /Mac|iPhone|iPad/.test(navigator.platform || navigator.userAgent || '');
+const SHORTCUT = MAC ? '⌘↵' : 'Ctrl+↵';
+
+/**
+ * JSON request that keeps the HTTP status and error code. The preview
+ * endpoints answer 410 `preview_gone`, which has to be told apart from an
+ * ordinary failure, and the shared helper only keeps the message.
+ */
+async function request(path, { method = 'GET', body } = {}) {
+  const headers = {};
+  if (token) headers.Authorization = `Bearer ${token}`;
+  if (body !== undefined) {
+    headers['Content-Type'] = 'application/json';
+    headers['X-Shrawler-Request'] = '1';
+  }
+  const response = await fetch(path, { method, headers, body: body === undefined ? undefined : JSON.stringify(body) });
+  let data = null;
+  try {
+    data = await response.json();
+  } catch {
+    /* Non-JSON body: the status carries the meaning. */
+  }
+  if (!response.ok) {
+    const error = new Error(data?.error || `Request failed (${response.status})`);
+    error.status = response.status;
+    error.code = data?.code || '';
+    throw error;
+  }
+  return data;
+}
+
+const gone = (error) => error?.status === 410 || error?.code === 'preview_gone';
+
+/** Local wall-clock time, for "rules as of 14:05". */
+function clock(value) {
+  const date = new Date(value || '');
+  return Number.isNaN(date.getTime()) ? '' : date.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' });
+}
+
+/** IDs of the custom rules in a TOML rule set, in file order. */
+function customRuleIds(text) {
+  const ids = [];
+  let inRule = false;
+  for (const line of String(text || '').split('\n')) {
+    const trimmed = line.trim();
+    if (trimmed.startsWith('[')) {
+      inRule = trimmed.replace(/\s+/g, '') === '[[rules]]';
+      continue;
+    }
+    const match = inRule && trimmed.match(/^id\s*=\s*(?:"((?:[^"\\]|\\.)*)"|'([^']*)')/);
+    if (match) {
+      ids.push(match[1] ?? match[2]);
+      inRule = false;
+    }
+  }
+  return ids;
+}
 
 export function createRuleEngine(slots) {
   // The shell's context, held by reference: `job` and `status` are live
   // getters, and copying them would freeze the first reading.
-  let ctx = { status: {}, start: async () => null, repaint() {}, showResults() {}, view: () => ({}), job: null, collection: null };
+  let ctx = { status: {}, start: async () => null, repaint() {}, showResults() {}, selectTab() {}, view: () => ({}), job: null, collection: null };
   const nodes = {};
   let catalog = { runs: [], scans: [] };
   let cursors = [null];
@@ -50,16 +130,24 @@ export function createRuleEngine(slots) {
   let loadToken = 0;
   let mounted = false;
 
-  // The unsaved preview, if any: { jobId, data, result, request, finishedAt, previous }.
-  // `request` is the exact body that produced it, known only for previews
-  // started from this page; it is what Save re-submits.
+  // The server's retained preview, as GET /api/triage/preview returns it, or
+  // null. It is the single source of truth; nothing is cached beside it.
   let preview = null;
+  // Positive-file count of the preview this one replaced, for the delta line.
+  let previousPositive;
+  let goneNote = '';
+  // True once the server has answered GET /api/triage/preview at least once,
+  // so "no preview" is a fact and not merely "not asked yet".
+  let previewKnown = false;
+  // Previews that answered 410. One is never adopted again, so a reader that
+  // races a replacement cannot bounce between "gone" and "back" forever.
+  const goneIds = new Set();
   let view = 'saved';
-  const requests = new Map();
-  // The job ID of a save started from the preview, so its completion can
-  // retire the preview it promoted.
-  let promoting = null;
+  // While a save runs, the preview it is promoting.
+  let saving = null;
   let skipReplaceConfirm = false;
+  let editTimer = 0;
+  const compare = { base: '', forPreview: null, order: 'preview', filter: 'all', summary: null, loading: false, scanned: 0 };
 
   function mount(context) {
     ctx = context;
@@ -68,16 +156,7 @@ export function createRuleEngine(slots) {
     buildInputs();
     buildDrawer();
     buildResults();
-    // Leaving the page drops an unsaved preview. Ask first, but only for one
-    // this page produced and could still save.
-    on(window, 'beforeunload', (event) => {
-      if (!unsaved()) return;
-      event.preventDefault();
-      event.returnValue = '';
-    });
   }
-
-  const unsaved = () => Boolean(preview?.request) && !promoting;
 
   /* -- Card inputs ----------------------------------------------------------- */
 
@@ -93,14 +172,14 @@ export function createRuleEngine(slots) {
     );
     on(nodes.builtins.firstChild, 'change', () => {
       describeRules();
-      renderPreviewMeta();
+      edited();
     });
-    on(nodes.scan, 'change', renderPreviewMeta);
+    on(nodes.scan, 'change', edited);
   }
 
   /** Summarise the rule set on the card, so the drawer can stay closed. */
   function describeRules() {
-    const custom = (nodes.editor.value.match(/^\s*\[\[rules\]\]/gm) || []).length;
+    const custom = customRuleIds(nodes.editor.value).length;
     const parts = [nodes.builtins.firstChild.checked ? 'Starter rules' : 'No starter rules'];
     parts.push(custom ? `${custom} custom rule${custom === 1 ? '' : 's'}` : 'no custom rules');
     nodes.rulesHint.textContent = `${parts.join(' + ')} · edit in Configure`;
@@ -122,12 +201,13 @@ export function createRuleEngine(slots) {
 
   async function startPreview() {
     drawerError('');
-    if (preview && unsaved() && !skipReplaceConfirm && !(await confirmReplace())) return;
-    const request = body(true);
-    await ctx.start('/api/triage/jobs', request, { accepted: (job) => requests.set(job.id, request) });
+    const live = ctx.view();
+    if (live.jobActive || live.requesting || live.state === 'unknown' || live.state === 'unavailable') return;
+    if (preview && !skipReplaceConfirm && !(await confirmReplace())) return;
+    await ctx.start('/api/triage/jobs', body(true));
   }
 
-  /** Replacing an unsaved preview loses it; say so once, with an opt-out. */
+  /** Replacing a preview loses it; say so once, with an opt-out. */
   function confirmReplace() {
     return new Promise((resolve) => {
       let settled = false;
@@ -146,8 +226,8 @@ export function createRuleEngine(slots) {
         body: el(
           'div',
           undefined,
-          el('p', undefined, `The current preview (${previewCounts()}) was never saved. A new preview replaces it.`),
-          el('p', 'field__hint', 'Use Save this ranking first to keep it as a saved run.'),
+          el('p', undefined, `The current preview (${previewCounts()}, rules as of ${clock(preview.created_at)}) was never saved. A new preview replaces it when it finishes.`),
+          el('p', 'field__hint', 'Use Save first to keep it as a saved ranking.'),
           remember,
         ),
         footer: el('div', 'btn-row', button('Keep current preview', { size: 'sm', onClick: () => finish(false) }), replace),
@@ -166,10 +246,17 @@ export function createRuleEngine(slots) {
     editor.spellcheck = false;
     editor.value = 'version = 1\n';
     editor.setAttribute('aria-label', 'Custom rules (TOML)');
+    editor.setAttribute('aria-keyshortcuts', MAC ? 'Meta+Enter' : 'Control+Enter');
     nodes.editor = editor;
     on(editor, 'input', () => {
       describeRules();
-      renderPreviewMeta();
+      edited();
+    });
+    on(editor, 'keydown', (event) => {
+      if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) {
+        event.preventDefault();
+        startPreview();
+      }
     });
     describeRules();
 
@@ -181,30 +268,30 @@ export function createRuleEngine(slots) {
       'rule-workbench__editor',
       el('div', 'rule-workbench__bar', el('label', 'field__label', 'Custom rules (TOML)'), tools),
       editor,
-      el('p', 'field__hint', 'The editor is the source of truth. Starter rules apply on top unless switched off on the card.'),
+      el('p', 'field__hint', `The editor is the source of truth. Starter rules apply on top unless switched off on the card. ${SHORTCUT} previews.`),
       ruleBuilder(editor),
     );
 
-    nodes.previewButton = button('Preview ranking (not saved)', { onClick: () => startPreview() });
+    nodes.previewButton = button('Preview ranking (not saved)', { title: `Preview with the editor's rules (${SHORTCUT})`, onClick: () => startPreview() });
     nodes.paneState = el('p', 'preview-pane__state');
     nodes.paneMeter = el('div', 'engine-card__meter');
     nodes.paneMeter.append(el('div', 'meter__fill'));
     nodes.paneMeter.hidden = true;
     nodes.paneCounts = el('p', 'preview-pane__counts');
-    nodes.paneStale = el('p', 'preview-pane__stale');
+    nodes.paneNotes = el('ul', 'preview-pane__notes');
     nodes.paneList = el('ol', 'preview-pane__list');
     nodes.paneShow = button('Show the full preview', { size: 'sm', onClick: () => revealPreview() });
-    nodes.paneSave = button('Save this ranking', { size: 'sm', variant: 'primary', onClick: () => savePreview() });
+    nodes.paneSave = button('Save preview', { size: 'sm', variant: 'primary', onClick: () => savePreview() });
     nodes.pane = el(
       'aside',
       'preview-pane',
-      el('div', 'preview-pane__head', el('span', 'preview-pane__tag', 'Preview'), el('span', 'field__hint', 'Nothing is written')),
-      el('p', 'field__hint', 'Scores every observed file with these rules and keeps the top 100 in memory. Iterate here, then save the version you want.'),
+      el('div', 'preview-pane__head', el('span', 'preview-pane__tag', 'Preview'), el('span', 'field__hint', 'Nothing is written to saved rankings')),
+      el('p', 'field__hint', 'Scores every observed file with these rules and keeps the result on the server until you save or discard it. Iterate here, then save the version you want.'),
       el('div', 'btn-row', nodes.previewButton),
       nodes.paneState,
       nodes.paneMeter,
       nodes.paneCounts,
-      nodes.paneStale,
+      nodes.paneNotes,
       nodes.paneList,
       el('div', 'btn-row', nodes.paneShow, nodes.paneSave),
     );
@@ -215,7 +302,7 @@ export function createRuleEngine(slots) {
         'header',
         'engine-drawer__head',
         el('h3', 'engine-drawer__title', 'Configure rule ranking'),
-        el('span', 'field__hint', 'Edit rules, preview the result, then save it from here or with Run ranking on the card.'),
+        el('span', 'field__hint', 'Edit rules, preview the result, then save the preview, or use Run ranking on the card to rank and save in one step.'),
       ),
       nodes.drawerError,
       el('div', 'rule-workbench', editorColumn, nodes.pane),
@@ -225,6 +312,15 @@ export function createRuleEngine(slots) {
 
   function drawerError(message) {
     fill(nodes.drawerError, message ? el('div', 'banner', icon('alert'), el('span', undefined, message)) : null);
+  }
+
+  /** Debounced repaint of everything that says "rules changed". */
+  function edited() {
+    clearTimeout(editTimer);
+    editTimer = setTimeout(() => {
+      renderPreviewMeta();
+      ctx.repaint();
+    }, EDIT_DEBOUNCE_MS);
   }
 
   function importExport(editor, target) {
@@ -365,36 +461,80 @@ export function createRuleEngine(slots) {
 
   /* -- Preview state --------------------------------------------------------- */
 
-  const positiveOf = (data) => data?.result?.summary?.positive_files ?? data?.data?.summary?.positive_files;
+  const positiveOf = (record) => record?.summary?.positive_files;
 
-  function previewCounts(target = preview) {
-    if (!target) return '';
-    const positive = positiveOf(target);
-    return [
-      `${fmt.count(target.result?.files_scored ?? target.data?.files_scored)} scored`,
-      positive === undefined ? null : `${fmt.count(positive)} positive`,
-    ]
-      .filter(Boolean)
-      .join(' · ');
+  function previewCounts(record = preview) {
+    if (!record) return '';
+    const positive = positiveOf(record);
+    return [`${fmt.count(record.files_scored)} scored`, positive === undefined ? null : `${fmt.count(positive)} positive`].filter(Boolean).join(' · ');
   }
 
-  function setPreview(job, request) {
-    const previous = preview && preview.jobId !== job.id ? positiveOf(preview) : preview?.previous;
-    preview = {
-      jobId: job.id,
-      data: job.candidates,
-      result: job.result || {},
-      request,
-      finishedAt: job.finished_at,
-      previous,
-    };
+  const saveLabel = () => (preview ? `Save preview (rules as of ${clock(preview.created_at)})` : 'Save preview');
+
+  /** The latest completed scan with files, which a blank scan choice means. */
+  function resolvedScan() {
+    return nodes.scan.value || catalog.scans.find((scan) => scan.status === 'completed' && Number(scan.file_count) > 0)?.id || '';
   }
 
-  /** Have the rules, starter toggle, or scan moved on since the preview ran? */
-  function previewStale() {
-    if (!preview?.request) return false;
-    const now = body(true);
-    return now.rules_toml !== preview.request.rules_toml || now.builtins !== preview.request.builtins || now.scan_id !== preview.request.scan_id;
+  /** Has the editor, starter toggle, or scan moved on since the preview ran? */
+  function editorChanged() {
+    if (!preview) return false;
+    const scan = resolvedScan();
+    return (
+      nodes.editor.value !== preview.rules_toml ||
+      nodes.builtins.firstChild.checked !== Boolean(preview.builtins) ||
+      Boolean(scan && preview.scan_id && scan !== preview.scan_id)
+    );
+  }
+
+  /** Read the server's retained preview and reconcile the views with it. */
+  async function loadPreview() {
+    if (!ctx.status.triage_enabled) return null;
+    let record;
+    try {
+      record = (await request('/api/triage/preview')).preview;
+    } catch (error) {
+      drawerError(`Could not read the preview: ${error.message}`);
+      return preview;
+    }
+    previewKnown = true;
+    adoptPreview(record);
+    return preview;
+  }
+
+  function adoptPreview(found) {
+    const record = found && !goneIds.has(found.id) ? found : null;
+    const changed = (record?.id || null) !== (preview?.id || null);
+    if (changed && preview && record) previousPositive = positiveOf(preview);
+    if (changed && !record) previousPositive = undefined;
+    preview = record || null;
+    if (preview) goneNote = '';
+    if (changed) {
+      resetCompare();
+      loadTopHits();
+      if (!preview && view === 'preview') setView('saved');
+      else if (view === 'preview') setView('preview');
+    }
+    renderPreviewMeta();
+    renderSource();
+    ctx.repaint();
+  }
+
+  /** A read or write answered 410: the preview went away under us. */
+  function previewGone() {
+    if (!preview) return;
+    goneIds.add(preview.id);
+    preview = null;
+    previousPositive = undefined;
+    goneNote = GONE;
+    resetCompare();
+    loadTopHits();
+    setView('saved');
+    renderPreviewMeta();
+    toast(GONE, 'warn');
+    ctx.repaint();
+    // A newer preview may have replaced it; pick that up if so.
+    loadPreview();
   }
 
   function renderPreviewMeta() {
@@ -411,37 +551,53 @@ export function createRuleEngine(slots) {
       nodes.paneState.textContent = [live.label, live.percent, live.timing].filter(Boolean).join(' · ');
       nodes.paneMeter.dataset.indeterminate = String(live.fraction === null);
       nodes.paneMeter.firstChild.style.width = live.fraction === null ? '' : `${Math.floor(live.fraction * 100)}%`;
+    } else if (saving) {
+      nodes.paneState.textContent = `Saving this preview as a ranking · ${[live.percent, live.timing].filter(Boolean).join(' · ')}`;
     } else if (live.jobActive) {
-      nodes.paneState.textContent = promoting === job?.id ? 'Saving this preview as a ranking…' : 'A saved ranking is running. Preview again when it finishes.';
+      nodes.paneState.textContent = 'A ranking is running. Preview again when it finishes.';
     } else if (preview) {
-      nodes.paneState.textContent = `Unsaved preview · finished ${fmt.relative(preview.finishedAt)}`;
+      nodes.paneState.textContent = `Unsaved preview · rules as of ${clock(preview.created_at)} · finished ${fmt.relative(preview.finished_at)} · scan ${preview.scan_short_id || String(preview.scan_id || '').slice(0, 8)}`;
     } else {
-      nodes.paneState.textContent = 'No preview yet.';
+      nodes.paneState.textContent = goneNote || 'No preview yet.';
     }
 
     nodes.paneCounts.replaceChildren();
     if (preview) {
       nodes.paneCounts.append(previewCounts());
       const now = positiveOf(preview);
-      if (preview.previous !== undefined && now !== undefined) {
-        const delta = now - preview.previous;
-        const mark = el('span', 'preview-pane__delta', delta === 0 ? ' · same positive count as the previous preview' : ` · ${delta > 0 ? '+' : '−'}${fmt.count(Math.abs(delta))} positive vs previous preview`);
+      if (previousPositive !== undefined && now !== undefined) {
+        const delta = now - previousPositive;
+        const mark = el(
+          'span',
+          'preview-pane__delta',
+          delta === 0 ? ' · same positive count as the previous preview' : ` · ${delta > 0 ? '+' : '−'}${fmt.count(Math.abs(delta))} positive vs previous preview`,
+        );
         mark.dataset.direction = delta > 0 ? 'up' : delta < 0 ? 'down' : 'same';
         nodes.paneCounts.append(mark);
       }
     }
-    const stale = previewStale();
-    nodes.paneStale.hidden = !stale;
-    nodes.paneStale.textContent = stale ? 'Rules changed since this preview. Save keeps the rules that produced it; preview again to see your edits.' : '';
-    if (!preview?.request && preview) {
-      nodes.paneStale.hidden = false;
-      nodes.paneStale.textContent = 'This preview was produced before this page loaded, so its rules are unknown here. Preview again to save a version.';
-    }
 
-    if (nodes.paneList.dataset.job !== String(preview?.jobId || '')) renderTopHits();
+    clear(nodes.paneNotes);
+    if (preview && !saving) {
+      if (editorChanged()) {
+        const again = el('button', 'link-button', `Re-preview (${SHORTCUT})`);
+        again.type = 'button';
+        again.disabled = live.jobActive || live.requesting;
+        on(again, 'click', () => startPreview());
+        // el() appends text after nodes, so the sentence is built in order here.
+        const note = el('li', 'preview-pane__note');
+        note.append('Rules edited since this preview · ', again);
+        nodes.paneNotes.append(note);
+      }
+      if (preview.stale?.newer_scan) nodes.paneNotes.append(el('li', 'preview-pane__note', 'A newer scan has completed since this preview.'));
+      if (preview.stale?.reviews_changed) nodes.paneNotes.append(el('li', 'preview-pane__note', 'Review decisions changed since this preview; they are not in its scores.'));
+    }
+    nodes.paneNotes.hidden = !nodes.paneNotes.childElementCount;
+
     nodes.paneShow.hidden = !preview;
     nodes.paneSave.hidden = !preview;
-    nodes.paneSave.disabled = !canSave(preview?.jobId) || live.jobActive || live.requesting;
+    nodes.paneSave.lastChild.textContent = saveLabel();
+    nodes.paneSave.disabled = !canSave(preview?.id) || live.jobActive || live.requesting;
 
     const blocked = live.jobActive || live.requesting || live.state === 'unknown' || live.state === 'unavailable';
     if (previewing) setBusy(nodes.previewButton, true, 'Previewing…');
@@ -449,39 +605,108 @@ export function createRuleEngine(slots) {
       setBusy(nodes.previewButton, false);
       nodes.previewButton.disabled = blocked;
     }
-    nodes.previewButton.title = live.jobActive ? 'A rule ranking is already running' : '';
+    nodes.previewButton.title = live.jobActive ? 'A rule ranking is already running' : `Preview with the editor's rules (${SHORTCUT})`;
     renderPreviewBanner();
   }
 
-  function renderTopHits() {
-    nodes.paneList.dataset.job = String(preview?.jobId || '');
+  /** The drawer's short list of top previewed files, read from the server. */
+  async function loadTopHits() {
+    if (!nodes.paneList) return;
+    const id = preview?.id || '';
+    nodes.paneList.dataset.preview = id;
     clear(nodes.paneList);
-    for (const item of (preview?.data?.items || []).slice(0, TOP_HITS)) {
-      const entry = el('li', 'preview-pane__item', engineChip('rule', item.review_score ?? item.priority, 'Rule priority'), el('span', 'preview-pane__name', item.file_name));
-      entry.title = item.unc_path;
-      nodes.paneList.append(entry);
+    nodes.paneList.hidden = true;
+    if (!id) return;
+    try {
+      const data = await request(`/api/triage/files?${new URLSearchParams({ preview: id, limit: String(TOP_HITS) })}`);
+      if (nodes.paneList.dataset.preview !== id) return;
+      for (const item of data.items) {
+        const entry = el('li', 'preview-pane__item', engineChip('rule', item.review_score, 'Preview priority'), el('span', 'preview-pane__name', item.file_name));
+        entry.title = item.unc_path;
+        nodes.paneList.append(entry);
+      }
+      nodes.paneList.hidden = !data.items.length;
+    } catch (error) {
+      if (gone(error)) previewGone();
     }
-    nodes.paneList.hidden = !preview?.data?.items?.length;
   }
 
-  function canSave(jobId) {
-    return Boolean(preview?.request) && preview.jobId === jobId && !promoting;
+  function canSave(id) {
+    return Boolean(preview) && preview.id === id && !saving;
   }
 
-  /** Promote the preview by re-running exactly the request that produced it. */
-  function savePreview() {
-    if (!preview?.request) return null;
-    const request = { ...preview.request, scan_id: preview.result?.scan_id || preview.request.scan_id, preview: false };
-    return ctx.start('/api/triage/jobs', request, {
-      accepted: (job) => {
-        promoting = job.id;
+  /**
+   * Promote the preview: the server copies its scores into the saved
+   * rankings. Confirmation is asked only when there is a real reason to
+   * hesitate, and says plainly that nothing is re-run.
+   */
+  async function savePreview() {
+    if (!preview || saving) return null;
+    await loadPreview();
+    if (!preview) return null;
+    const record = preview;
+    const as = clock(record.created_at);
+    const warnings = [];
+    if (editorChanged()) warnings.push(`The editor has changed since this preview. Saving keeps the previewed rules as of ${as}, not the editor's current rules.`);
+    if (record.stale?.newer_scan) warnings.push(`A newer scan has completed. The saved ranking covers the previewed scan ${record.scan_short_id || ''}.`.replace(' .', '.'));
+    if (record.stale?.reviews_changed) warnings.push('Review decisions changed since this preview and are not in its scores. Preview again to include them.');
+    if (
+      warnings.length &&
+      !(await confirm({
+        title: 'Save this preview?',
+        message: `This saves the previewed rules as of ${as}, with exactly the previewed scores (${previewCounts(record)}). Nothing is re-run.`,
+        detail: warnings.join(' '),
+        confirmLabel: 'Save previewed rules',
+      }))
+    ) {
+      return null;
+    }
+    if (preview?.id !== record.id) return null;
+    return ctx.start(
+      '/api/triage/preview/save',
+      { id: record.id },
+      {
+        send: () => request('/api/triage/preview/save', { method: 'POST', body: { id: record.id } }),
+        accepted: () => {
+          saving = record.id;
+        },
+        onError: (error) => {
+          if (!gone(error)) return false;
+          previewGone();
+          return true;
+        },
       },
-    });
+    );
   }
 
-  function discardPreview() {
+  async function discardPreview() {
+    if (!preview) {
+      setView('saved');
+      return;
+    }
+    const record = preview;
+    const ok = await confirm({
+      title: 'Discard this preview?',
+      message: `The preview (${previewCounts(record)}, rules as of ${clock(record.created_at)}) was never saved. Discarding deletes it from the server.`,
+      detail: 'Your rules stay in the editor; preview again at any time.',
+      confirmLabel: 'Discard preview',
+      tone: 'danger',
+    });
+    if (!ok || preview?.id !== record.id) return;
+    try {
+      await request('/api/triage/preview/discard', { method: 'POST', body: { id: record.id } });
+    } catch (error) {
+      resultsError(error.message);
+      return;
+    }
     preview = null;
+    previousPositive = undefined;
+    resetCompare();
+    loadTopHits();
     setView('saved');
+    renderPreviewMeta();
+    ctx.repaint();
+    toast('Preview discarded');
   }
 
   function revealPreview() {
@@ -493,11 +718,99 @@ export function createRuleEngine(slots) {
   /** Called by the card's View action: show whatever the last run produced. */
   function revealLatest() {
     const job = ctx.job;
-    if (job?.preview && preview?.jobId === job.id) setView('preview');
+    if (job?.preview && preview?.id === job.id) setView('preview');
     else if (job && !job.preview && job.result?.run_id && catalog.runs.some((run) => run.id === job.result.run_id)) {
       nodes.run.value = job.result.run_id;
-      setView('saved', { reload: true });
+      setView('saved');
     } else setView('saved');
+  }
+
+  /* -- Compare --------------------------------------------------------------- */
+
+  function resetCompare() {
+    compare.summary = null;
+    compare.filter = 'all';
+    compare.order = 'preview';
+    compare.forPreview = null;
+    defaultBase();
+  }
+
+  /** Default base: the latest saved run on the preview's scan, else none. */
+  function defaultBase() {
+    if (!preview || compare.forPreview === preview.id) return;
+    const completed = catalog.runs.filter((run) => run.status === 'completed');
+    compare.base = completed.find((run) => run.scan_id === preview.scan_id)?.id || '';
+    compare.forPreview = preview.id;
+    fillBases();
+  }
+
+  function fillBases() {
+    if (!nodes.base) return;
+    const completed = catalog.runs.filter((run) => run.status === 'completed');
+    fill(
+      nodes.base,
+      option('', 'None'),
+      ...completed.map((run) =>
+        option(run.id, `${fmt.stamp(run.started_at)} · ${fmt.count(run.file_count)} files · scan ${run.scan_id.slice(0, 8)}${preview && run.scan_id !== preview.scan_id ? ' (other scan)' : ''}`),
+      ),
+    );
+    nodes.base.value = completed.some((run) => run.id === compare.base) ? compare.base : '';
+    compare.base = nodes.base.value;
+  }
+
+  const comparing = () => view === 'preview' && Boolean(preview) && Boolean(compare.base);
+
+  function renderCompareBar() {
+    const show = comparing();
+    nodes.compareBar.hidden = !show;
+    if (!show) return;
+    clear(nodes.compareBar);
+    if (compare.loading && !compare.summary) {
+      nodes.compareBar.append(
+        el(
+          'p',
+          'compare-bar__loading',
+          el('span', 'spinner spinner--inline'),
+          ' Comparing with the saved run… The first comparison reads both rankings in full, which can take a while on a large inventory. Paging after that is quick.',
+        ),
+      );
+      return;
+    }
+    const summary = compare.summary;
+    if (!summary) return;
+    if (!summary.same_scan) {
+      nodes.compareBar.append(
+        el(
+          'div',
+          'banner banner--warn',
+          icon('alert'),
+          el(
+            'span',
+            undefined,
+            `The saved run scored a different scan, so changes include files added or removed between scans (${fmt.count(summary.only_in_preview)} only in the preview, ${fmt.count(summary.only_in_base)} only in the saved run).`,
+          ),
+        ),
+      );
+    }
+    const chips = el('div', 'compare-chips');
+    chips.setAttribute('role', 'group');
+    chips.setAttribute('aria-label', 'Show files that');
+    for (const [name, label] of COMPARE_FILTERS) {
+      const count = name === 'all' ? Number(preview.files_scored) + Number(summary.only_in_base || 0) : summary[name];
+      const chip = el('button', 'compare-chip', el('b', undefined, fmt.count(count)), ` ${label}`);
+      chip.type = 'button';
+      chip.dataset.filter = name;
+      chip.setAttribute('aria-pressed', String(compare.filter === name));
+      on(chip, 'click', () => {
+        compare.filter = name;
+        resetPages();
+        renderSource();
+        loadResults();
+      });
+      chips.append(chip);
+    }
+    nodes.compareBar.append(chips);
+    if (compare.loading) nodes.compareBar.append(el('p', 'field__hint', el('span', 'spinner spinner--inline'), ' Loading…'));
   }
 
   /* -- Results --------------------------------------------------------------- */
@@ -517,18 +830,42 @@ export function createRuleEngine(slots) {
     nodes.source.setAttribute('aria-label', 'Result source');
     nodes.run = select([['', 'Select a saved ranking']]);
     nodes.runField = field('Saved ranking', nodes.run);
+    nodes.base = select([['', 'None']]);
+    nodes.baseField = field('Compare with', nodes.base);
     nodes.category = select([['', 'Highest category score']]);
+    nodes.categoryField = field('Category', nodes.category);
     nodes.minimum = number('0', 0);
     nodes.minimum.classList.add('input--num');
+    nodes.orderPreview = el('button', undefined, 'Preview priority');
+    nodes.orderDelta = el('button', undefined, 'Biggest change');
+    for (const [node, order] of [
+      [nodes.orderPreview, 'preview'],
+      [nodes.orderDelta, 'delta'],
+    ]) {
+      node.type = 'button';
+      on(node, 'click', () => {
+        compare.order = order;
+        resetPages();
+        renderSource();
+        loadResults();
+      });
+    }
+    nodes.order = el('div', 'segmented', nodes.orderPreview, nodes.orderDelta);
+    nodes.order.setAttribute('aria-label', 'Sort');
+    nodes.orderField = el('div', 'field', el('span', 'field__label', 'Sort'), nodes.order);
     nodes.resultSummary = el('p', 'panel__hint');
     nodes.previewBanner = el('div', 'preview-banner');
+    nodes.compareBar = el('div', 'compare-bar');
+    nodes.matches = el('details', 'disclosure rule-matches');
+    nodes.matches.open = true;
+    nodes.head = el('thead');
     nodes.rows = el('tbody');
     nodes.counts = el('details', 'disclosure');
     nodes.collectBar = el('div', 'score-collect-bar');
     nodes.refresh = button('Refresh', { size: 'sm', name: 'refresh', onClick: () => loadResults() });
 
     const controls = el('div', 'field-grid');
-    fill(controls, nodes.runField, field('Category', nodes.category), field('Min score', nodes.minimum), nodes.refresh);
+    fill(controls, nodes.runField, nodes.baseField, nodes.categoryField, field('Min score', nodes.minimum), nodes.orderField, nodes.refresh);
 
     nodes.page = {
       prev: button('Previous', { size: 'sm', onClick: () => step(-1) }),
@@ -539,26 +876,21 @@ export function createRuleEngine(slots) {
     fill(pager, nodes.page.prev, nodes.page.label, nodes.page.next);
 
     const table = el('table', 'data-grid score-grid');
-    fill(
-      table,
-      el(
-        'thead',
-        {},
-        el(
-          'tr',
-          {},
-          el('th', 'numeric', 'Priority'),
-          el('th', undefined, 'File'),
-          el('th', undefined, 'Observed location'),
-          el('th', undefined, 'Reasons'),
-          el('th', undefined, 'Review'),
-        ),
-      ),
-      nodes.rows,
-    );
+    fill(table, nodes.head, nodes.rows);
     nodes.empty = el('div', 'empty');
-    nodes.body = el('div', 'results-body', controls, nodes.resultSummary, nodes.collectBar, el('div', 'grid-shell score-grid-shell', table), pager, nodes.counts);
     nodes.empty.hidden = true;
+    nodes.body = el(
+      'div',
+      'results-body',
+      controls,
+      nodes.compareBar,
+      nodes.matches,
+      nodes.resultSummary,
+      nodes.collectBar,
+      el('div', 'grid-shell score-grid-shell', table),
+      pager,
+      nodes.counts,
+    );
     buildPreviewBanner();
     const { node } = panel('Rule candidates', 'Metadata evidence only. Nothing here is confirmed content.', [
       nodes.resultsError,
@@ -575,12 +907,21 @@ export function createRuleEngine(slots) {
       fillCategories();
       loadResults();
     });
+    on(nodes.base, 'change', () => {
+      compare.base = nodes.base.value;
+      compare.summary = null;
+      compare.filter = 'all';
+      resetPages();
+      renderSource();
+      loadResults();
+    });
     for (const control of [nodes.category, nodes.minimum]) {
       on(control, 'change', () => {
         resetPages();
         loadResults();
       });
     }
+    renderHead();
     renderCollectBar();
     renderSource();
   }
@@ -589,23 +930,35 @@ export function createRuleEngine(slots) {
     fill(nodes.resultsError, message ? el('div', 'banner', icon('alert'), el('span', undefined, message)) : null);
   }
 
-  function setView(next, { reload = true } = {}) {
+  function setView(next) {
     view = next === 'preview' && preview ? 'preview' : 'saved';
+    if (view === 'preview') defaultBase();
     resetPages();
     fillCategories();
     renderSource();
-    if (reload) loadResults();
+    loadResults();
   }
 
   function renderSource() {
+    if (!nodes.panel) return;
     const isPreview = view === 'preview';
+    const comparison = comparing();
     nodes.panel.dataset.view = view;
     nodes.source.hidden = !preview;
     nodes.sourceSaved.setAttribute('aria-pressed', String(!isPreview));
     nodes.sourcePreview.setAttribute('aria-pressed', String(isPreview));
     nodes.runField.hidden = isPreview;
+    nodes.baseField.hidden = !isPreview;
+    nodes.orderField.hidden = !comparison;
+    nodes.orderPreview.setAttribute('aria-pressed', String(compare.order === 'preview'));
+    nodes.orderDelta.setAttribute('aria-pressed', String(compare.order === 'delta'));
+    // Category scores are not part of a comparison; the overall priority is.
+    nodes.category.disabled = comparison;
+    nodes.categoryField.title = comparison ? 'Compare reads overall priority. Set Compare with to None to filter by category.' : '';
     nodes.collectBar.hidden = isPreview;
     nodes.counts.hidden = isPreview || !nodes.counts.childElementCount;
+    renderCompareBar();
+    renderMatches();
     renderPreviewBanner();
   }
 
@@ -613,7 +966,7 @@ export function createRuleEngine(slots) {
   function buildPreviewBanner() {
     nodes.bannerCounts = el('strong');
     nodes.bannerText = el('span');
-    nodes.bannerSave = button('Save this ranking', { size: 'sm', variant: 'primary', onClick: () => savePreview() });
+    nodes.bannerSave = button('Save preview', { size: 'sm', variant: 'primary', onClick: () => savePreview() });
     fill(
       nodes.previewBanner,
       el('span', 'preview-banner__tag', 'Unsaved preview'),
@@ -630,29 +983,80 @@ export function createRuleEngine(slots) {
     nodes.previewBanner.hidden = !show;
     if (!show) return;
     const live = ctx.view();
-    nodes.bannerSave.disabled = !canSave(preview.jobId) || live.jobActive || live.requesting;
-    nodes.bannerSave.title = preview.request ? '' : 'Produced before this page loaded; its rules are unknown here';
-    nodes.bannerCounts.textContent = `${previewCounts()} · top 100 shown`;
-    const stale = previewStale() ? ' Rules have changed since; Save keeps the rules that produced this preview.' : '';
-    nodes.bannerText.textContent = promoting
-      ? 'Saving: re-running these rules as a saved ranking…'
-      : `Nothing was written. Explore, collection, and Nemesis cannot use it until it is saved.${stale}`;
+    nodes.bannerSave.lastChild.textContent = saveLabel();
+    nodes.bannerSave.disabled = !canSave(preview.id) || live.jobActive || live.requesting;
+    nodes.bannerCounts.textContent = `${previewCounts()} · rules as of ${clock(preview.created_at)}`;
+    const notes = [];
+    if (editorChanged()) notes.push(`Rules edited since this preview; Save keeps the previewed rules. Re-preview (${SHORTCUT}) to see your edits.`);
+    if (preview.stale?.newer_scan) notes.push('A newer scan has completed since.');
+    if (preview.stale?.reviews_changed) notes.push('Review decisions changed since.');
+    nodes.bannerText.textContent = saving
+      ? 'Saving: copying these exact scores into the saved rankings…'
+      : `Nothing has been written to the saved rankings. Explore, collection, and Nemesis can use it once it is saved.${notes.length ? ` ${notes.join(' ')}` : ''}`;
+  }
+
+  /**
+   * Custom rules and how often each matched. A custom rule that matched
+   * nothing is the most common rule-writing mistake, so it is called out.
+   */
+  function renderMatches() {
+    const show = view === 'preview' && Boolean(preview);
+    nodes.matches.hidden = !show;
+    if (!show) return;
+    const counts = preview.summary?.rule_matches || {};
+    const pairs = compare.summary && comparing() ? compare.summary.rule_matches || {} : null;
+    const custom = customRuleIds(preview.rules_toml);
+    const starter = Object.keys(counts)
+      .filter((id) => !custom.includes(id))
+      .sort();
+    const row = (id) => {
+      const count = Number(counts[id] || 0);
+      const base = pairs?.[id] ? Number(pairs[id][0]) : pairs ? 0 : null;
+      const delta = base === null ? '' : ` (${count - base >= 0 ? '+' : '−'}${fmt.count(Math.abs(count - base))})`;
+      const entry = el('li', 'rule-match', el('code', undefined, id), el('span', 'rule-match__count', `${fmt.count(count)}${delta}`));
+      if (!count && custom.includes(id)) {
+        entry.dataset.tone = 'warn';
+        entry.append(el('span', 'rule-match__hint', 'No file matched. Open Explain on a file you expected it to match: "Why other rules did not match" lists the failed conditions.'));
+      }
+      return entry;
+    };
+    const list = el('ul', 'rule-match-list');
+    for (const id of custom) list.append(row(id));
+    const children = [el('summary', undefined, custom.length ? `Custom rule matches · ${custom.length} rule${custom.length === 1 ? '' : 's'}` : 'Rule matches')];
+    if (custom.length) children.push(list);
+    else children.push(el('p', 'field__hint', 'This preview has no custom rules; these are the starter rules that matched.'));
+    if (starter.length) {
+      const others = el('ul', 'rule-match-list');
+      for (const id of starter) others.append(row(id));
+      if (custom.length) {
+        const nested = el('details', 'disclosure');
+        nested.append(el('summary', undefined, `Starter rule matches · ${starter.length}`), others);
+        children.push(nested);
+      } else children.push(others);
+    }
+    if (pairs) children.push(el('p', 'field__hint', 'Counts in brackets are the change from the compared saved run.'));
+    fill(nodes.matches, ...children);
   }
 
   function categories() {
-    if (view === 'preview') {
-      const names = new Set();
-      for (const item of preview?.data?.items || []) for (const name of Object.keys(item.category_scores || {})) names.add(name);
-      return [...names].sort();
-    }
+    if (view === 'preview') return [];
     return catalog.runs.find((item) => item.id === nodes.run.value)?.categories || [];
   }
 
   function fillCategories() {
     const chosen = nodes.category.value;
-    const names = categories();
+    const names = view === 'preview' ? previewCategories() : categories();
     fill(nodes.category, option('', 'Highest category score'), ...names.map((category) => option(category, category)));
     if (names.includes(chosen)) nodes.category.value = chosen;
+  }
+
+  /** Categories a preview's rules declare, read from its TOML and the starter set. */
+  function previewCategories() {
+    const names = new Set();
+    for (const match of String(preview?.rules_toml || '').matchAll(/^\s*category\s*=\s*"([^"]+)"/gm)) names.add(match[1]);
+    // Starter-rule categories come from any saved run that used them.
+    if (preview?.builtins) for (const run of catalog.runs) for (const name of run.categories || []) names.add(name);
+    return [...names].sort();
   }
 
   function resetPages() {
@@ -669,7 +1073,7 @@ export function createRuleEngine(slots) {
   }
 
   async function refreshCatalog(preferred) {
-    catalog = await json('/api/triage/catalog');
+    catalog = await request('/api/triage/catalog');
     const scan = nodes.scan.value;
     fill(
       nodes.scan,
@@ -688,6 +1092,8 @@ export function createRuleEngine(slots) {
     );
     if (completed.some((item) => item.id === chosen)) nodes.run.value = chosen;
     else if (completed.length) nodes.run.value = completed[0].id;
+    fillBases();
+    defaultBase();
     fillCategories();
     ctx.repaint();
   }
@@ -695,44 +1101,107 @@ export function createRuleEngine(slots) {
   async function loadResults() {
     const token = ++loadToken;
     resultsError('');
-    if (view === 'preview' && preview) return renderResults(previewPage(), true);
-    const run = nodes.run.value;
-    if (!run) {
+    if (view === 'preview' && preview) {
+      return comparing() ? loadCompare(token) : loadFiles(token, { preview: preview.id });
+    }
+    if (!nodes.run.value) {
       renderEmpty();
       return;
     }
+    return loadFiles(token, { run: nodes.run.value });
+  }
+
+  /** One page of a saved run or the preview, through the same endpoint. */
+  async function loadFiles(token, source) {
     const minimum = Number(nodes.minimum.value);
     if (!Number.isInteger(minimum) || minimum < 0) {
       resultsError('Minimum score must be a nonnegative integer.');
       return;
     }
-    const params = new URLSearchParams({ run, category: nodes.category.value, min_score: String(minimum) });
+    const params = new URLSearchParams({ ...source, category: nodes.category.value, min_score: String(minimum) });
     const cursor = cursors[cursors.length - 1];
     if (cursor) {
       params.set('after_score', String(cursor[0]));
       params.set('after_id', cursor[1]);
     }
     try {
-      const data = await json(`/api/triage/files?${params}`);
+      const data = await request(`/api/triage/files?${params}`);
       if (token !== loadToken) return;
-      renderResults(data, false);
+      renderResults(data.items, { next: data.next_cursor, summary: data.summary, filesScored: data.files_scored });
     } catch (error) {
-      if (token === loadToken) resultsError(error.message);
+      if (token !== loadToken) return;
+      if (source.preview && gone(error)) previewGone();
+      else resultsError(error.message);
     }
   }
 
   /**
-   * The same filters, applied in the browser: a preview has no database
-   * behind it to query, only the top 100 rows it kept.
+   * One page of the comparison. Filters the server cannot apply are applied
+   * here by reading forward through its pages, so a page is still up to 100
+   * matching files and Next resumes exactly where this page stopped.
    */
-  function previewPage() {
-    const category = nodes.category.value;
+  async function loadCompare(token) {
     const minimum = Math.max(0, Number(nodes.minimum.value) || 0);
-    const items = (preview.data?.items || [])
-      .map((item) => ({ ...item, review_score: category ? (item.category_scores?.[category] ?? null) : (item.review_score ?? item.priority) }))
-      .filter((item) => item.review_score !== null && item.review_score >= minimum)
-      .sort((a, b) => b.review_score - a.review_score || String(a.file_id).localeCompare(String(b.file_id)));
-    return { ...preview.data, items, files_scored: preview.result?.files_scored ?? preview.data?.files_scored, next_cursor: null };
+    const [, , changed, match] = COMPARE_FILTERS.find(([name]) => name === compare.filter) || COMPARE_FILTERS[0];
+    const keep = (item) => match(item) && (minimum === 0 || (item.preview_priority ?? 0) >= minimum);
+    const keyOf = (item) => (compare.order === 'delta' ? Math.abs(item.delta ?? 0) : (item.preview_priority ?? 0));
+    const id = preview.id;
+    compare.loading = true;
+    renderCompareBar();
+    if (!compare.summary) clear(nodes.rows);
+    let cursor = cursors[cursors.length - 1];
+    const items = [];
+    let next = null;
+    let scanned = 0;
+    try {
+      for (let page = 0; page < COMPARE_SCAN_PAGES; page += 1) {
+        const params = new URLSearchParams({ preview: id, base: compare.base, order: compare.order, changed, limit: String(PAGE) });
+        if (cursor) {
+          params.set('after_score', String(cursor[0]));
+          params.set('after_id', cursor[1]);
+        }
+        const data = await request(`/api/triage/compare?${params}`);
+        if (token !== loadToken) return;
+        compare.summary = data.summary;
+        let stop = false;
+        next = null;
+        for (const [index, item] of data.items.entries()) {
+          scanned += 1;
+          // Sorted by preview priority, nothing below the minimum can follow.
+          if (compare.order === 'preview' && minimum && (item.preview_priority ?? 0) < minimum) {
+            stop = true;
+            break;
+          }
+          if (keep(item)) items.push(item);
+          if (items.length === PAGE) {
+            // Resume right after this item, mid-page if need be.
+            const last = index === data.items.length - 1;
+            next = last ? data.next_cursor : [keyOf(item), item.file_id];
+            stop = true;
+            break;
+          }
+        }
+        if (stop || !data.next_cursor) break;
+        // Not full yet: keep reading. If the page budget runs out here,
+        // Next resumes from this cursor.
+        cursor = data.next_cursor;
+        next = cursor;
+      }
+    } catch (error) {
+      if (token !== loadToken) return;
+      compare.loading = false;
+      if (gone(error)) previewGone();
+      else {
+        renderCompareBar();
+        resultsError(error.message);
+      }
+      return;
+    }
+    // Ran out of pages to read without filling this one: Next keeps reading.
+    compare.loading = false;
+    compare.scanned = scanned;
+    renderSource();
+    renderResults(items, { next, compared: true, scanned });
   }
 
   function renderEmpty() {
@@ -747,74 +1216,121 @@ export function createRuleEngine(slots) {
     fill(
       nodes.empty,
       el('strong', undefined, 'No saved ranking yet'),
-      el('span', undefined, preview ? 'Switch to the unsaved preview above, or save it to rank every file.' : 'Choose Run ranking on the Rule card to rank every observed file.'),
+      el('span', undefined, preview ? 'Switch to the unsaved preview above, or save it to keep it.' : 'Choose Run ranking on the Rule card to rank every observed file.'),
     );
     renderSource();
   }
 
-  function renderResults(data, isPreview) {
+  function renderHead(compared = false) {
+    fill(
+      nodes.head,
+      el(
+        'tr',
+        {},
+        el('th', 'numeric', 'Priority'),
+        compared ? el('th', 'numeric', 'Was') : null,
+        compared ? el('th', 'numeric', 'Δ') : null,
+        el('th', undefined, 'File'),
+        el('th', undefined, 'Observed location'),
+        el('th', undefined, 'Reasons'),
+        el('th', undefined, 'Review'),
+      ),
+    );
+  }
+
+  function renderResults(items, { next = null, summary, filesScored, compared = false, scanned = 0 } = {}) {
+    const isPreview = view === 'preview';
     nodes.empty.hidden = true;
     nodes.body.hidden = false;
+    renderHead(compared);
     clear(nodes.rows);
-    for (const item of data.items) nodes.rows.append(candidateRow(item, isPreview));
-    if (!data.items.length) {
+    for (const item of items) nodes.rows.append(candidateRow(item, { isPreview, compared }));
+    if (!items.length) {
       const row = el('tr');
-      const cell = el('td', 'empty', isPreview ? 'No previewed file matches this filter.' : 'No files match this ranking filter.');
-      cell.colSpan = 5;
+      const cell = el('td', 'empty', compared ? 'No compared file matches this filter on this page.' : isPreview ? 'No previewed file matches this filter.' : 'No files match this ranking filter.');
+      cell.colSpan = compared ? 7 : 5;
       row.append(cell);
       nodes.rows.append(row);
     }
-    nextCursor = isPreview ? null : data.next_cursor;
-    nodes.page.prev.disabled = isPreview || cursors.length === 1;
+    nextCursor = next;
+    nodes.page.prev.disabled = cursors.length === 1;
     nodes.page.next.disabled = !nextCursor;
-    nodes.page.label.textContent = isPreview ? 'Preview · top 100 only' : `Page ${cursors.length}`;
-    // The collection queue resolves manifests against a saved ranking, so it
-    // only ever hears about one. A preview has nothing to resolve against.
-    ctx.collection?.setSource(
-      isPreview
-        ? { run: '', category: '', minScore: 0 }
-        : { run: nodes.run.value, category: nodes.category.value, minScore: Number(nodes.minimum.value) || 0 },
-    );
-    const positive = data.summary?.positive_files;
-    nodes.resultSummary.textContent = isPreview
-      ? `Showing ${fmt.count(data.items.length)} of the top 100 previewed files${nodes.category.value ? ` with a ${nodes.category.value} score` : ''}.`
-      : `Saved ranking · ${fmt.count(data.files_scored)} observed files scored${positive !== undefined ? ` · ${fmt.count(positive)} with positive priority` : ''}`;
+    nodes.page.label.textContent = `Page ${cursors.length}`;
+    const positive = (isPreview ? preview?.summary : summary)?.positive_files;
+    if (compared) {
+      const filter = COMPARE_FILTERS.find(([name]) => name === compare.filter);
+      const partial = compare.filter !== 'all' && compare.filter !== 'changed' && items.length < PAGE && nextCursor;
+      nodes.resultSummary.textContent = `Unsaved preview compared with a saved run · ${fmt.count(items.length)} ${filter[1] === 'All files' ? 'files' : `${filter[1]} files`} on this page${
+        partial ? ` · read ${fmt.count(scanned)} changed files so far; Next keeps reading` : ''
+      }`;
+    } else if (isPreview) {
+      nodes.resultSummary.textContent = `Unsaved preview · ${fmt.count(preview.files_scored)} observed files scored${positive !== undefined ? ` · ${fmt.count(positive)} with positive priority` : ''}`;
+    } else {
+      nodes.resultSummary.textContent = `Saved ranking · ${fmt.count(filesScored)} observed files scored${positive !== undefined ? ` · ${fmt.count(positive)} with positive priority` : ''}`;
+      // The collection queue resolves manifests against a saved ranking, so it
+      // only ever hears about one; the preview view never sets its source.
+      ctx.collection?.setSource({ run: nodes.run.value, category: nodes.category.value, minScore: Number(nodes.minimum.value) || 0 });
+    }
     if (isPreview) clear(nodes.counts);
-    else renderCounts(data.summary);
+    else renderCounts(summary);
     renderSource();
   }
 
-  function candidateRow(item, isPreview) {
-    const positive = item.signals.filter((signal) => signal.credited_points > 0).map((signal) => signal.description);
-    const fallback = item.signals.filter((signal) => signal.category === 'extension-fallback').map((signal) => signal.description);
+  function deltaCell(item) {
+    const cell = el('td', 'numeric compare-delta');
+    const delta = Number(item.delta || 0);
+    cell.dataset.direction = delta > 0 ? 'up' : delta < 0 ? 'down' : 'same';
+    cell.textContent = delta === 0 ? '0' : `${delta > 0 ? '+' : '−'}${Math.abs(delta)}`;
+    if (item.preview_priority === null || item.preview_priority === undefined) cell.title = 'Only in the saved run';
+    else if (item.base_priority === null || item.base_priority === undefined) cell.title = 'Only in the preview';
+    return cell;
+  }
+
+  function candidateRow(item, { isPreview, compared }) {
+    const signals = item.signals || [];
+    const positive = signals.filter((signal) => signal.credited_points > 0).map((signal) => signal.description);
+    const fallback = signals.filter((signal) => signal.category === 'extension-fallback').map((signal) => signal.description);
+    const score = compared ? (item.preview_priority ?? null) : item.review_score;
     const row = el('tr', 'rail');
-    row.dataset.severity = severity(item.review_score).band;
-    const score = el('td', 'numeric');
-    score.append(engineChip('rule', item.review_score, 'Rule priority'));
-    const link = el('a', 'candidate-link', item.file_name);
-    link.href = href(`/?q=${encodeURIComponent(item.unc_path)}`);
-    const file = el('td', undefined, link);
+    // severity() has no band below zero, and a rule can push a file negative.
+    row.dataset.severity = severity(score === null || score === undefined ? score : Math.max(0, score)).band;
+    const scoreCell = el('td', 'numeric');
+    scoreCell.append(engineChip('rule', score, isPreview ? 'Preview priority' : 'Rule priority'));
+    const link = el('a', 'candidate-link', item.file_name || item.file_id);
+    link.href = href(`/?q=${encodeURIComponent(item.unc_path || '')}`);
     const review = el('td');
     const actions = el('div', 'btn-row');
-    actions.append(button('Explain', { size: 'sm', onClick: () => showExplanation(item, isPreview) }));
-    if (!isPreview) {
-      const collect = el('label', 'checkbox');
-      const box = el('input');
-      box.type = 'checkbox';
+    const explain = button('Explain', { size: 'sm', onClick: () => showExplanation(item, isPreview) });
+    // A file only the saved run has cannot be explained from the preview.
+    if (compared && (item.preview_priority === null || item.preview_priority === undefined)) {
+      explain.disabled = true;
+      explain.title = 'Not in the preview';
+    }
+    actions.append(explain);
+    const collect = el('label', 'checkbox');
+    const box = el('input');
+    box.type = 'checkbox';
+    if (isPreview) {
+      // Collection resolves files against a saved ranking; a preview has none.
+      box.disabled = true;
+      collect.title = 'Save the ranking to queue files from it';
+    } else {
       box.checked = ctx.collection?.has(item.file_id) || false;
       on(box, 'change', () => {
         ctx.collection?.toggle(item.file_id, box.checked, item);
         renderCollectBar();
       });
-      collect.append(box, el('span', undefined, 'Nemesis'));
-      actions.append(collect);
     }
+    collect.append(box, el('span', undefined, 'Nemesis'));
+    actions.append(collect);
     review.append(actions);
     fill(
       row,
-      score,
-      file,
-      el('td', 'score-path', item.unc_path),
+      scoreCell,
+      compared ? el('td', 'numeric', engineChip('rule', item.base_priority ?? null, 'Saved run priority')) : null,
+      compared ? deltaCell(item) : null,
+      el('td', undefined, link),
+      el('td', 'score-path', item.unc_path || ''),
       el('td', 'score-reasons', (positive.length ? positive : fallback).join('; ') || 'No supporting evidence'),
       review,
     );
@@ -872,17 +1388,18 @@ export function createRuleEngine(slots) {
     const content = el('div');
     const handle = openOverlay(
       dialogShell({
-        title: item.file_name,
-        subtitle: isPreview ? `Unsaved preview · ${item.unc_path}` : item.unc_path,
+        title: item.file_name || item.file_id,
+        subtitle: isPreview ? `Unsaved preview · ${item.unc_path || ''}` : item.unc_path,
         body: content,
         onClose: () => handle.close(),
       }).node,
     );
     fill(content, el('span', 'spinner'), el('span', 'field__hint', 'Loading explanation…'));
+    const source = isPreview ? { preview: preview?.id || '' } : { run: nodes.run.value };
     try {
-      const params = new URLSearchParams({ run: nodes.run.value, file_id: item.file_id });
-      const detail = isPreview ? item : await json(`/api/triage/explain?${params}`);
+      const detail = await request(`/api/triage/explain?${new URLSearchParams({ ...source, file_id: item.file_id })}`);
       clear(content);
+      if (isPreview) content.append(el('p', 'explain-source', `Previewed rules · not saved · rules as of ${clock(preview?.created_at)}`));
       content.append(el('p', 'panel__hint', `Overall priority ${detail.priority}. Metadata evidence only.`));
       content.append(el('pre', 'code-block', JSON.stringify(detail.category_scores, null, 2)));
       if (!detail.signals.length) content.append(el('p', 'panel__hint', 'No ranking rule matched this file.'));
@@ -902,13 +1419,16 @@ export function createRuleEngine(slots) {
       if (detail.rule_diagnostics) {
         const missed = detail.rule_diagnostics.filter((rule) => !rule.matched);
         const details = el('details', 'disclosure');
+        // Open in a preview: "why did my new rule not fire" is the question.
+        details.open = isPreview;
         details.append(el('summary', undefined, 'Why other rules did not match'));
         details.append(el('pre', 'code-block', missed.map((rule) => `${rule.rule_id}: ${rule.failed_conditions.join(', ')}`).join('\n') || 'Every rule matched.'));
         content.append(details);
       }
     } catch (error) {
       clear(content);
-      content.append(el('p', 'panel__hint', error.message));
+      content.append(el('p', 'panel__hint', isPreview && gone(error) ? GONE : error.message));
+      if (isPreview && gone(error)) previewGone();
     }
   }
 
@@ -925,22 +1445,27 @@ export function createRuleEngine(slots) {
       resultsError(error.message);
       return;
     }
+    await loadPreview();
     await loadResults();
   }
 
   async function onComplete(job) {
     if (job.preview) {
-      if (!job.candidates) return;
-      setPreview(job, requests.get(job.id) || null);
-      requests.delete(job.id);
+      await loadPreview();
+      if (preview?.id !== job.id) return;
       setView('preview');
       toast(`Preview ready · ${previewCounts()} · not saved`, 'info', { action: { label: 'View', onClick: () => revealPreview() } });
       return;
     }
-    const promoted = promoting === job.id;
+    const promoted = Boolean(job.result?.saved_from_preview);
     if (promoted) {
-      preview = null;
-      promoting = null;
+      saving = null;
+      if (preview?.id === job.result.saved_from_preview) {
+        preview = null;
+        previousPositive = undefined;
+        resetCompare();
+        loadTopHits();
+      }
     }
     resetPages();
     try {
@@ -948,28 +1473,34 @@ export function createRuleEngine(slots) {
     } catch (error) {
       resultsError(error.message);
     }
+    if (job.result?.run_id) nodes.run.value = job.result.run_id;
     setView('saved');
+    if (promoted) ctx.selectTab();
+    await loadPreview();
     const positive = job.result?.summary?.positive_files;
     toast(
-      `${promoted ? 'Preview saved as a ranking' : 'Ranking saved'} · ${fmt.count(job.result?.files_scored)} scored${positive === undefined ? '' : ` · ${fmt.count(positive)} positive`}`,
+      `${promoted ? 'Ranking saved · from preview · scores identical to the preview' : 'Ranking saved'} · ${fmt.count(job.result?.files_scored)} scored${positive === undefined ? '' : ` · ${fmt.count(positive)} positive`}`,
       'ok',
       { action: { label: 'View candidates', onClick: () => ctx.showResults() } },
     );
   }
 
-  /** A preview left by an earlier page is still useful: show it, unsaveable. */
-  function adopt(job) {
-    if (job.preview && job.status === 'completed' && job.candidates && !preview) {
-      setPreview(job, null);
-      renderSource();
-      renderPreviewMeta();
-    }
+  /** Any other rule outcome (failed, cancelled) may still leave a preview. */
+  async function onSettle(job) {
+    if (job.saving_preview_id) saving = null;
+    await loadPreview();
   }
 
   /** Mirror the shared job model into the drawer's preview pane and banner. */
   function renderJob(job) {
-    if (promoting && job?.id === promoting && job.status !== 'running' && job.status !== 'completed') promoting = null;
+    const next = job?.status === 'running' ? job.saving_preview_id || null : null;
+    if (next) saving = next;
+    else if (saving && job?.status !== 'running' && !(job?.status === 'completed' && job.result?.saved_from_preview)) saving = null;
     renderPreviewMeta();
+  }
+
+  function onDrawer(open) {
+    if (open) loadPreview();
   }
 
   function history() {
@@ -978,5 +1509,20 @@ export function createRuleEngine(slots) {
     return { text: `Last saved ranking ${fmt.relative(run.started_at)} · ${fmt.count(run.file_count)} files`, run: run.id };
   }
 
-  return { mount, load, start, onComplete, adopt, renderJob, renderCollectBar, history, canSave, savePreview, revealLatest };
+  return {
+    mount,
+    load,
+    start,
+    onComplete,
+    onSettle,
+    onDrawer,
+    renderJob,
+    renderCollectBar,
+    history,
+    canSave,
+    saveLabel,
+    savePreview,
+    revealLatest,
+    previewState: () => ({ known: previewKnown, id: preview?.id || null }),
+  };
 }

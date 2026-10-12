@@ -252,21 +252,49 @@ The header shows the same jobs on every screen.
 ### Rule preview
 
 **Run ranking** always saves. Previewing is a rule-iteration tool, so it lives
-in the rule drawer beside the editor. **Preview ranking (not saved)** scores
-every observed file with the editor's rules but writes nothing and keeps only
-the top 100 in memory. The pane beside the editor shows the preview's progress,
-its counts (`41,200 scored · 312 positive`, with the change from the previous
-preview), and its top hits. It stays visible while you edit and notes when the
-rules have changed since it ran.
+in the rule drawer beside the editor. **Preview ranking (not saved)** (or
+`Ctrl+Enter` / `⌘↵` in the editor) scores every observed file with the editor's
+rules into a separate preview database. Nothing is written to the saved
+rankings. The server keeps the latest successful preview until it is saved,
+discarded, or replaced by a newer preview, or until the server stops. A reload
+shows it again, and its rules, starter-rule setting, and scan are known.
 
-The full preview opens under **Rule candidates** as **Unsaved preview**. It has
-a dashed warning frame and a banner, and it is never listed among saved
-rankings. Category and minimum-score filters apply to the 100 kept rows.
-Selection for Nemesis and manifests needs a saved ranking, so the preview does
-not offer it. **Save this ranking** re-runs exactly the rules, starter-rule
-setting, and scan that produced the preview, as a saved run. A new preview asks
-before replacing an unsaved one, and leaving the page with an unsaved preview
-asks for confirmation.
+The pane beside the editor shows the preview's progress, its counts
+(`41,200 scored · 312 positive`, with the change from the previous preview), and
+its top hits. It notes when the preview is behind:
+`Rules edited since this preview · Re-preview (⌘↵)` when the editor, starter
+rules, or scan differ from what was previewed; also when a newer scan has
+completed or review decisions have changed since.
+
+**Show the full preview** opens it under **Rule candidates** as **Unsaved
+preview**. The view has a dashed warning frame and a banner, and is never listed
+among saved rankings. It reads the preview the same way as a saved run, with full
+paging, Category, Min score, and **Explain**. Explanations are marked
+`Previewed rules · not saved` and open "Why other rules did not match". A
+**custom rule matches** disclosure lists each custom rule with its match count.
+A custom rule that matched nothing is flagged with a hint to use Explain.
+Selecting files for Nemesis or a manifest needs a saved ranking, so it is
+disabled on preview rows.
+
+**Compare with** sets a saved run to compare against. It defaults to the latest
+saved run on the same scan, or None. With a run selected the table adds **Was**
+(the saved run's priority) and **Δ**, and **Sort** switches between preview
+priority and biggest change. The counts above the table (`changed`, `raised`,
+`lowered`, `newly positive`, `no longer positive`) are filters. Raised, lowered,
+and the positive transitions are applied in the browser over the changed files,
+so a page may need to read several server pages. Comparing a different scan is
+flagged. The first comparison reads both rankings in full and can take a while
+on a large inventory.
+
+**Save preview (rules as of HH:MM)** promotes the preview. The saved run gets
+exactly the previewed scores; nothing is re-run. The card shows
+`Saving preview` with a meter while rows are copied, then `Ranking saved · from preview`, and
+the new run opens in Rule candidates. Saving asks for confirmation only when
+there is a reason to hesitate: the editor has changed, a newer scan has
+completed, or review decisions have changed since the preview. **Discard**
+deletes the preview from the server. A new preview asks before replacing an
+unsaved one. If a preview disappears (saved or discarded elsewhere, replaced, or
+the server restarted), the page says so and returns to the saved ranking.
 
 ### Results
 
