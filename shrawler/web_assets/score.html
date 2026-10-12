@@ -17,25 +17,26 @@
       <p>Rank every observed file with deterministic rules, assess it with a decision model, then queue what matters for collection. Both engines run independently and concurrently.</p>
     </section>
 
-    <!-- Status strip stays visible on both tabs: the engines are independent,
-         so an AI run started here keeps reporting while you work on rules. -->
+    <!-- Status strip stays visible on both tabs and at every scroll position:
+         the engines are independent, so an AI run started here keeps
+         reporting while you work on rules or read candidates far below. -->
     <section class="status-strip" aria-label="Engine status">
       <div class="engine-status" id="status-rule">
         <span class="engine-status__hue engine-status__hue--rule" aria-hidden="true"></span>
         <span class="engine-status__name">Rule ranking</span>
-        <span class="engine-status__state">idle</span>
-        <div class="engine-status__meter"><div class="meter__fill"></div></div>
+        <span class="engine-status__state"><span class="spinner spinner--inline" aria-hidden="true"></span><span class="engine-status__label">Idle</span></span>
+        <div class="engine-status__meter" role="progressbar" aria-label="Rule ranking progress" aria-valuemin="0" aria-valuemax="100"><div class="meter__fill"></div></div>
         <span class="engine-status__detail"></span>
       </div>
       <div class="engine-status" id="status-ai">
         <span class="engine-status__hue engine-status__hue--ai" aria-hidden="true"></span>
         <span class="engine-status__name">AI assessment</span>
-        <span class="engine-status__state">idle</span>
-        <div class="engine-status__meter"><div class="meter__fill"></div></div>
+        <span class="engine-status__state"><span class="spinner spinner--inline" aria-hidden="true"></span><span class="engine-status__label">Idle</span></span>
+        <div class="engine-status__meter" role="progressbar" aria-label="AI assessment progress" aria-valuemin="0" aria-valuemax="100"><div class="meter__fill"></div></div>
         <span class="engine-status__detail"></span>
       </div>
-      <button id="cancel-rule" class="btn btn--sm btn--danger" type="button" hidden>Cancel rule run</button>
-      <button id="cancel-ai" class="btn btn--sm btn--danger" type="button" hidden>Cancel AI run</button>
+      <button id="cancel-rule" class="btn btn--sm btn--danger" type="button" hidden><span>Cancel rule run</span></button>
+      <button id="cancel-ai" class="btn btn--sm btn--danger" type="button" hidden><span>Cancel AI run</span></button>
     </section>
 
     <nav class="tabs" role="tablist" aria-label="Scoring engine">

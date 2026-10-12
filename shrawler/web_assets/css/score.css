@@ -15,7 +15,17 @@
 
 /* -- Status strip ---------------------------------------------------------- */
 
+/* The run buttons sit far below the strip, so a strip that scrolls away is
+ * gone at exactly the moment a run starts. Sticky keeps both engines in view
+ * at every scroll position for the cost of one compact band. */
+html {
+  scroll-padding-top: calc(var(--header-height) + var(--status-strip-height, 0px) + var(--space-4));
+}
+
 .status-strip {
+  position: sticky;
+  top: var(--header-height);
+  z-index: 30;
   display: flex;
   flex-wrap: wrap;
   align-items: center;
@@ -25,11 +35,12 @@
   border: 1px solid var(--line);
   border-radius: var(--radius-md);
   background: var(--surface-1);
+  box-shadow: var(--shadow-1);
 }
 
 .engine-status {
   display: grid;
-  grid-template-columns: 8px auto auto;
+  grid-template-columns: 8px minmax(0, auto) minmax(0, 1fr);
   grid-template-areas:
     "hue name state"
     "hue meter meter"
@@ -58,7 +69,7 @@
   background: var(--ai-dim);
 }
 
-.engine-status[data-state="running"] .engine-status__hue {
+.engine-status[data-active="true"] .engine-status__hue {
   background: var(--accent);
   box-shadow: 0 0 0 3px var(--accent-wash);
   animation: pulse 1.4s ease-in-out infinite;
@@ -68,9 +79,16 @@
   background: var(--success);
 }
 
+.engine-status[data-state="partial"] .engine-status__hue,
+.engine-status[data-state="paused"] .engine-status__hue {
+  background: var(--warn);
+}
+
 .engine-status[data-state="failed"] .engine-status__hue,
-.engine-status[data-state="cancelled"] .engine-status__hue {
+.engine-status[data-state="cancelled"] .engine-status__hue,
+.engine-status[data-state="cancelling"] .engine-status__hue {
   background: var(--danger);
+  box-shadow: none;
 }
 
 .engine-status__name {
@@ -81,13 +99,41 @@
 
 .engine-status__state {
   grid-area: state;
+  display: inline-flex;
+  align-items: center;
+  justify-self: end;
+  gap: 6px;
+  min-width: 0;
   color: var(--text-mute);
   font: 11px var(--font-data);
-  text-transform: lowercase;
+  white-space: nowrap;
 }
 
-.engine-status[data-state="running"] .engine-status__state {
+/* Activity, not progress: the spinner says the engine is alive, the meter
+ * alone says how far it has got. */
+.engine-status__state .spinner {
+  display: none;
+  width: 11px;
+  height: 11px;
+  border-width: 1.5px;
+}
+
+.engine-status[data-active="true"] .engine-status__state .spinner {
+  display: inline-block;
+}
+
+.engine-status[data-active="true"] .engine-status__state {
   color: var(--accent-bright);
+}
+
+.engine-status[data-state="completed"] .engine-status__state {
+  color: var(--success);
+}
+
+.engine-status[data-state="failed"] .engine-status__state,
+.engine-status[data-state="cancelled"] .engine-status__state,
+.engine-status[data-state="cancelling"] .engine-status__state {
+  color: var(--danger);
 }
 
 .engine-status__meter {
@@ -106,11 +152,72 @@
   transition: width 200ms linear;
 }
 
+/* Nothing measured yet: an outlined empty track rather than a guessed fill,
+ * so "starting" cannot be mistaken for "0% done". */
+.engine-status__meter[data-measured="false"] {
+  background: transparent;
+  box-shadow: inset 0 0 0 1px var(--line-strong);
+}
+
 .engine-status__detail {
   grid-area: detail;
   overflow: hidden;
   color: var(--text-mute);
   font: 11px/1.5 var(--font-data);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* -- Run status beside the run buttons ------------------------------------- */
+
+.run-status {
+  display: inline-flex;
+  flex: 1 1 260px;
+  align-items: center;
+  gap: var(--space-2);
+  min-width: 0;
+  margin-left: var(--space-2);
+  color: var(--text-mute);
+  font: 11px/1.5 var(--font-data);
+}
+
+.run-status .spinner {
+  display: none;
+  flex: none;
+}
+
+.run-status[data-active="true"] .spinner {
+  display: inline-block;
+}
+
+.run-status__label {
+  flex: none;
+  color: var(--text-dim);
+  font-weight: 600;
+}
+
+.run-status[data-active="true"] .run-status__label {
+  color: var(--accent-bright);
+}
+
+.run-status[data-state="completed"] .run-status__label {
+  color: var(--success);
+}
+
+.run-status[data-state="partial"] .run-status__label,
+.run-status[data-state="paused"] .run-status__label {
+  color: var(--warn);
+}
+
+.run-status[data-state="failed"] .run-status__label,
+.run-status[data-state="cancelled"] .run-status__label,
+.run-status[data-state="cancelling"] .run-status__label {
+  color: var(--danger);
+}
+
+.run-status__detail {
+  min-width: 0;
+  overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -427,8 +534,16 @@
 /* -- Responsive ------------------------------------------------------------ */
 
 @media (max-width: 760px) {
+  /* Stacked engines make the strip too tall to pin over a phone viewport; the
+   * indicator beside each run button carries the state instead. */
   .status-strip {
+    position: static;
     gap: var(--space-3);
+  }
+
+  .run-status {
+    flex-basis: 100%;
+    margin-left: 0;
   }
 
   .engine-status {

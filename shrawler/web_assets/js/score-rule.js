@@ -15,9 +15,10 @@ import {
   option,
   post,
   select,
+  setBusy,
   severity,
 } from './core.js';
-import { dialogShell, openOverlay, panel, toast } from './overlay.js';
+import { dialogShell, openOverlay, panel, runStatus, toast } from './overlay.js';
 import { sendSummary, sendToNemesis } from './actions.js';
 import { engineChip } from './scores.js';
 
@@ -55,7 +56,9 @@ export function createRuleTab(root) {
     editor.setAttribute('aria-label', 'Custom rules (TOML)');
     nodes.editor = editor;
 
-    nodes.summary = el('p', 'panel__hint');
+    nodes.runStatus = runStatus();
+    nodes.previewButton = button('Preview ranking', { onClick: () => start(true) });
+    nodes.saveButton = button('Run and save ranking', { variant: 'primary', onClick: () => start(false) });
     const controls = el('div', 'field-grid');
     fill(controls, field('Source scan', nodes.scan), el('div', 'field', el('span', 'field__label', 'Starter rules'), nodes.builtins));
 
@@ -69,13 +72,7 @@ export function createRuleTab(root) {
         el('label', 'field__label', 'Custom rules (TOML)'),
         editor,
         importExport(editor),
-        el(
-          'div',
-          'btn-row',
-          button('Preview ranking', { onClick: () => start(true) }),
-          button('Run and save ranking', { variant: 'primary', onClick: () => start(false) }),
-        ),
-        nodes.summary,
+        el('div', 'btn-row run-row', nodes.previewButton, nodes.saveButton, nodes.runStatus.node),
       ],
     );
     fill(root, node);
@@ -216,16 +213,55 @@ export function createRuleTab(root) {
 
   async function start(wantsPreview) {
     ctx.clearError();
+    // Busy before the request leaves, so the click is acknowledged even while
+    // the server is still parsing the rules, and cannot be fired twice.
+    lockButtons(wantsPreview, 'Starting…');
+    requesting = true;
     try {
-      await post('/api/triage/jobs', {
+      const job = await post('/api/triage/jobs', {
         scan_id: nodes.scan.value || null,
         rules_toml: nodes.editor.value,
         builtins: nodes.builtins.firstChild.checked,
         preview: wantsPreview,
       });
-      nodes.summary.textContent = wantsPreview ? 'Starting preview…' : 'Ranking and saving…';
+      requesting = false;
+      ctx.started('rule', job);
     } catch (error) {
+      requesting = false;
+      renderJob(lastJob, lastView);
       ctx.fail(error.message);
+      ctx.refresh();
+    }
+  }
+
+  function lockButtons(previewing, label) {
+    setBusy(nodes.previewButton, previewing, label);
+    setBusy(nodes.saveButton, !previewing, label);
+    const idle = previewing ? nodes.saveButton : nodes.previewButton;
+    idle.disabled = true;
+    idle.title = 'A rule ranking is already running';
+  }
+
+  let lastJob = null;
+  let lastView = null;
+  // A timed poll can land while the POST is in flight and still report the
+  // previous job; it must not unlock the buttons the click just locked.
+  let requesting = false;
+
+  /** Paint this engine's job beside the buttons that start it. */
+  function renderJob(job, view) {
+    lastJob = job;
+    lastView = view;
+    nodes.runStatus.paint(view || { state: 'idle', active: false, headline: '', summary: '' });
+    if (view?.active) {
+      const verb = job.preview ? 'Previewing…' : 'Ranking…';
+      lockButtons(job.preview, view.state === 'starting' ? 'Starting…' : view.state === 'cancelling' ? 'Cancelling…' : verb);
+      return;
+    }
+    if (requesting) return;
+    for (const control of [nodes.previewButton, nodes.saveButton]) {
+      setBusy(control, false);
+      control.removeAttribute('title');
     }
   }
 
@@ -530,9 +566,6 @@ export function createRuleTab(root) {
 
   async function onComplete(job) {
     ctx.clearError();
-    nodes.summary.textContent = job.preview
-      ? 'Preview finished; no ranking saved.'
-      : `Ranking saved. Source scan status: ${job.result.scan_status}.`;
     if (job.preview && job.candidates) {
       preview = job.candidates;
       if (!nodes.run.querySelector('option[value="__preview"]')) nodes.run.append(option('__preview', 'Unsaved preview (first 100)'));
@@ -548,5 +581,5 @@ export function createRuleTab(root) {
     toast(job.preview ? 'Preview ranking ready' : 'Ranking saved');
   }
 
-  return { mount, load, onComplete, renderCollectBar };
+  return { mount, load, onComplete, renderCollectBar, renderJob };
 }

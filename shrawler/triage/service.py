@@ -82,6 +82,7 @@ class TriageService:
                         phase=phase, processed=count
                     ),
                     cancelled=self._cancel.is_set,
+                    on_total=lambda total: self._update(total=total),
                 )
                 candidates = list_results(
                     self.database, result["run_id"], limit=100, output=destination

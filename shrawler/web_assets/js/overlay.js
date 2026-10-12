@@ -208,6 +208,34 @@ export function meter(fraction, { label } = {}) {
   };
 }
 
+/**
+ * Run state painted beside the button that started it. The Score status strip
+ * reports the same job, but the analyst is looking at the button when they
+ * click, so the answer to "did that start?" has to be there too.
+ *
+ * Only the state label is a live region. Counts change on every poll and
+ * would turn a screen reader into a ticker; transitions are what matter.
+ */
+export function runStatus() {
+  const node = el('div', 'run-status');
+  const spinner = el('span', 'spinner spinner--inline');
+  spinner.setAttribute('aria-hidden', 'true');
+  const label = el('span', 'run-status__label');
+  label.setAttribute('role', 'status');
+  const detail = el('span', 'run-status__detail');
+  node.append(spinner, label, detail);
+  node.dataset.state = 'idle';
+  return {
+    node,
+    paint(view) {
+      node.dataset.state = view.state;
+      node.dataset.active = String(view.active);
+      if (label.textContent !== view.headline) label.textContent = view.headline;
+      detail.textContent = view.headline ? view.summary : '';
+    },
+  };
+}
+
 /** Inline error surface used by the Score screen panels. */
 export function errorLine(node, message) {
   clear(node);

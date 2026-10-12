@@ -228,6 +228,7 @@ def rank(
     progress: Optional[Callable[[int], None]] = None,
     on_phase: Optional[Callable[[str, int], None]] = None,
     cancelled: Optional[Callable[[], bool]] = None,
+    on_total: Optional[Callable[[int], None]] = None,
 ) -> Dict[str, Any]:
     destination = output or result_path(database)
     if destination.resolve() == database.resolve():
@@ -244,6 +245,14 @@ def rank(
         source.execute("BEGIN")
         scan = select_scan(source, scan_id)
         scan_data = dict(scan)
+        if on_total:
+            # Counted inside the same read snapshot the stream uses, so the
+            # denominator a caller shows is the number this run will score.
+            on_total(
+                source.execute(
+                    "SELECT COUNT(*) FROM scan_files WHERE scan_id=?", (scan["id"],)
+                ).fetchone()[0]
+            )
         with closing(sqlite3.connect(destination)) as target:
             target.execute("PRAGMA foreign_keys=ON")
             target.execute("PRAGMA journal_mode=WAL")
@@ -454,6 +463,11 @@ def rank(
                     scoring_started = perf_counter()
                     score_stream(stream)
                 finalize_started = perf_counter()
+                # Materializing the ranked tables is a long, count-free tail on
+                # a large inventory; name it so callers do not read a finished
+                # meter as a hung run.
+                if on_phase:
+                    on_phase("saving", count)
                 # Flush the trailing partial batch into staging, then move all
                 # rows into the ranked tables in public_id order. The ranked
                 # keys are random opaque IDs, so sorted insertion turns

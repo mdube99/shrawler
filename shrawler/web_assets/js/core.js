@@ -112,6 +112,27 @@ export function button(label, options = {}) {
   return node;
 }
 
+/**
+ * Put a button() into or out of its busy state. Disabling is what stops a
+ * second click reaching the server as a 409; the spinner and label are what
+ * tell the analyst the first click landed.
+ */
+export function setBusy(node, busy, label) {
+  const text = node.querySelector(':scope > span:not(.spinner)');
+  node.dataset.idleLabel ??= text.textContent;
+  node.disabled = busy;
+  node.setAttribute('aria-busy', String(busy));
+  const spinner = node.querySelector(':scope > .spinner');
+  if (busy && !spinner) {
+    const mark = el('span', 'spinner');
+    mark.setAttribute('aria-hidden', 'true');
+    node.prepend(mark);
+  } else if (!busy && spinner) {
+    spinner.remove();
+  }
+  text.textContent = busy && label ? label : node.dataset.idleLabel;
+}
+
 export function field(label, control, hint) {
   const wrap = el('label', 'field');
   wrap.append(el('span', 'field__label', label), control);

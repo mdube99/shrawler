@@ -2,8 +2,8 @@
 // cost figures, and candidates including the "strong value missed by rules"
 // view that answers "what did the rules miss".
 
-import { button, checkbox, clear, el, field, fill, fmt, json, number, on, option, post, select, severity } from './core.js';
-import { panel, toast } from './overlay.js';
+import { button, checkbox, clear, el, field, fill, fmt, json, number, on, option, post, select, setBusy, severity } from './core.js';
+import { panel, runStatus, toast } from './overlay.js';
 
 const PRIORITIES = [
   ['', 'All priorities'],
@@ -47,6 +47,8 @@ export function createAiTab(root) {
       field('Max questions per request', nodes.maxQuestions),
     );
     const stage = el('div', 'field', el('span', 'field__label', 'Preparation'), nodes.prepare);
+    nodes.runStatus = runStatus();
+    nodes.startButton = button('Prepare and assess', { variant: 'primary', onClick: () => start() });
 
     const run = panel(
       'Run an AI assessment',
@@ -57,9 +59,10 @@ export function createAiTab(root) {
         stage,
         el(
           'div',
-          'btn-row',
+          'btn-row run-row',
           button('Check endpoint', { onClick: () => checkEndpoint() }),
-          button('Prepare and assess', { variant: 'primary', onClick: () => start() }),
+          nodes.startButton,
+          nodes.runStatus.node,
         ),
       ],
     );
@@ -152,19 +155,45 @@ export function createAiTab(root) {
     loadResults();
   }
 
+  // A timed poll can land while the POST is in flight and still report the
+  // previous job; it must not unlock the button the click just locked.
+  let requesting = false;
+  let lastJob = null;
+  let lastView = null;
+
   async function start() {
     ctx.clearError();
+    // Busy before the request leaves, so a slow accept still reads as taken
+    // and a second click cannot reach the server as a 409.
+    setBusy(nodes.startButton, true, 'Starting…');
+    requesting = true;
     try {
       const budget = Number(nodes.budget.value || 0);
-      await post('/api/assessment/jobs', {
+      const job = await post('/api/assessment/jobs', {
         scan_id: nodes.scan.value || null,
         prepare: nodes.prepare.firstChild.checked,
         budget_seconds: Number.isFinite(budget) ? budget : 0,
         max_questions: Number(nodes.maxQuestions.value || 200),
       });
-      toast('Assessment started');
+      requesting = false;
+      ctx.started('ai', job);
     } catch (error) {
+      requesting = false;
+      renderJob(lastJob, lastView);
       ctx.fail(error.message);
+      ctx.refresh();
+    }
+  }
+
+  /** Paint this engine's job beside the button that starts it. */
+  function renderJob(job, view) {
+    lastJob = job;
+    lastView = view;
+    nodes.runStatus.paint(view || { state: 'idle', active: false, headline: '', summary: '' });
+    if (view?.active) {
+      setBusy(nodes.startButton, true, view.state === 'starting' ? 'Starting…' : view.state === 'cancelling' ? 'Cancelling…' : 'Assessing…');
+    } else if (!requesting) {
+      setBusy(nodes.startButton, false);
     }
   }
 
@@ -338,11 +367,16 @@ export function createAiTab(root) {
 
   async function onComplete(job) {
     ctx.clearError();
+    const outcome = {
+      partial: 'Assessment finished with unassessed files',
+      paused: 'Assessment paused at its time budget',
+      cancelled: 'Assessment cancelled',
+    };
+    toast(outcome[job.status] || 'Assessment finished');
     if (!job.assessment_run_id) return;
     try {
       await loadCatalog(job.assessment_run_id);
       await Promise.all([loadCoverage(), loadResults()]);
-      toast('Assessment finished');
     } catch (error) {
       ctx.fail(error.message);
     }
@@ -361,5 +395,5 @@ export function createAiTab(root) {
     }
   }
 
-  return { mount, load, onComplete, checkEndpoint };
+  return { mount, load, onComplete, checkEndpoint, renderJob };
 }

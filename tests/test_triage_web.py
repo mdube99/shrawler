@@ -195,6 +195,30 @@ class RankingHttpTests(unittest.TestCase):
             self.assertEqual(denied.exception.code, 403)
         self.assertEqual(source, self.database.read_bytes())
 
+    def test_ranking_job_publishes_a_real_total(self) -> None:
+        # The Score meter divides processed by total; without a published total
+        # the bar has no denominator and cannot move.
+        accepted = self.request("/api/triage/jobs", {"preview": True})
+        self.assertEqual(accepted["status"], "running")
+        self.assertEqual(accepted["phase"], "starting")
+        job = self.finished_job()
+        self.assertEqual(job["total"], 4)
+        self.assertEqual(job["processed"], job["total"])
+
+    def test_rank_reports_total_before_scoring_and_names_the_save_tail(self) -> None:
+        from shrawler.triage.rules import load
+        from shrawler.triage.storage import rank
+
+        events: List[Any] = []
+        rank(
+            self.database,
+            load(),
+            on_phase=lambda phase, count: events.append((phase, count)),
+            on_total=lambda total: events.append(("total", total)),
+        )
+        self.assertEqual(events[0], ("total", 4))
+        self.assertEqual(events[-1], ("saving", 4))
+
     def test_mutations_require_local_json_requests_even_without_token(self) -> None:
         self.server.state.token = ""
         for headers in (
