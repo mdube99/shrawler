@@ -1,233 +1,468 @@
-/* Score screen: status strip, tabs, and the panels of the rule, AI, and
- * collection surfaces. */
+/* Score screen: the run console (one card per engine, each card the status of
+ * its engine), the Configure drawers, the result tabs, the unsaved-preview
+ * treatment, the compact sticky bar, and the collection disclosure.
+ *
+ * Hue says which engine: violet for rules, cyan for AI. A running engine
+ * speaks only in its own hue. Success, warn, and danger are reserved for how a
+ * run ended, so a green card always means "this finished and was saved". */
 
-.score-head h1 {
-  font-size: 22px;
-  font-weight: 600;
-  letter-spacing: -0.025em;
+.score-page {
+  display: grid;
+  gap: var(--space-5);
 }
 
-.score-head p {
-  max-width: 78ch;
-  margin-top: 5px;
-  color: var(--text-dim);
+.score-page > * {
+  min-width: 0;
 }
 
-/* -- Status strip ---------------------------------------------------------- */
-
-/* The run buttons sit far below the strip, so a strip that scrolls away is
- * gone at exactly the moment a run starts. Sticky keeps both engines in view
- * at every scroll position for the cost of one compact band. */
 html {
-  scroll-padding-top: calc(var(--header-height) + var(--status-strip-height, 0px) + var(--space-4));
+  scroll-padding-top: calc(var(--header-height) + 44px + var(--space-4));
 }
 
-.status-strip {
-  position: sticky;
-  top: var(--header-height);
-  z-index: 30;
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: var(--space-3) var(--space-5);
-  margin-top: var(--space-4);
-  padding: var(--space-3) var(--space-4);
+/* -- Run console ----------------------------------------------------------- */
+
+.console {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--space-4);
+  align-items: start;
+}
+
+.engine-card {
+  --hue: var(--text-faint);
+  --hue-dim: var(--line-strong);
+  --hue-wash: transparent;
+  display: grid;
+  gap: var(--space-3);
+  min-width: 0;
+  padding: var(--space-4);
   border: 1px solid var(--line);
+  border-top: 3px solid var(--hue-dim);
   border-radius: var(--radius-md);
   background: var(--surface-1);
-  box-shadow: var(--shadow-1);
+  transition: background var(--ease), border-color var(--ease);
 }
 
-.engine-status {
-  display: grid;
-  grid-template-columns: 8px minmax(0, auto) minmax(0, 1fr);
-  grid-template-areas:
-    "hue name state"
-    "hue meter meter"
-    "hue detail detail";
-  align-items: center;
-  gap: 2px var(--space-2);
-  flex: 1 1 320px;
-  min-width: 260px;
+.engine-card[data-engine="rule"] {
+  --hue: var(--rule);
+  --hue-dim: var(--rule-dim);
+  --hue-wash: var(--rule-wash);
 }
 
-.engine-status__hue {
-  grid-area: hue;
-  width: 8px;
-  height: 8px;
+.engine-card[data-engine="ai"] {
+  --hue: var(--ai);
+  --hue-dim: var(--ai-dim);
+  --hue-wash: var(--ai-wash);
+}
+
+/* Active: the whole card takes on the engine's hue, so a running engine is
+ * visible from across the room, not only from its label. */
+.engine-card[data-active="true"] {
+  border-color: var(--hue-dim);
+  border-top-color: var(--hue);
+  background: linear-gradient(var(--hue-wash), var(--hue-wash)), var(--surface-1);
+}
+
+.engine-card[data-state="unavailable"] {
+  border-top-color: var(--line);
+}
+
+.engine-card__head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: var(--space-1) var(--space-2);
+}
+
+.engine-card__dot {
+  width: 9px;
+  height: 9px;
+  flex: none;
+  align-self: center;
   border-radius: 50%;
-  background: var(--text-faint);
-  align-self: start;
-  margin-top: 4px;
+  background: var(--hue-dim);
 }
 
-.engine-status__hue--rule {
-  background: var(--rule-dim);
-}
-
-.engine-status__hue--ai {
-  background: var(--ai-dim);
-}
-
-.engine-status[data-active="true"] .engine-status__hue {
-  background: var(--accent);
-  box-shadow: 0 0 0 3px var(--accent-wash);
+.engine-card[data-active="true"] .engine-card__dot {
+  background: var(--hue);
+  box-shadow: 0 0 0 3px var(--hue-wash);
   animation: pulse 1.4s ease-in-out infinite;
 }
 
-.engine-status[data-state="completed"] .engine-status__hue {
-  background: var(--success);
-}
-
-.engine-status[data-state="partial"] .engine-status__hue,
-.engine-status[data-state="paused"] .engine-status__hue {
-  background: var(--warn);
-}
-
-.engine-status[data-state="failed"] .engine-status__hue,
-.engine-status[data-state="cancelled"] .engine-status__hue,
-.engine-status[data-state="cancelling"] .engine-status__hue {
-  background: var(--danger);
-  box-shadow: none;
-}
-
-.engine-status__name {
-  grid-area: name;
-  font-size: 12px;
+.engine-card__name {
+  font-size: 15px;
   font-weight: 600;
+  letter-spacing: -0.01em;
 }
 
-.engine-status__state {
-  grid-area: state;
-  display: inline-flex;
-  align-items: center;
-  justify-self: end;
+.engine-card__kind {
+  margin-left: auto;
+  color: var(--text-faint);
+  font: 11px var(--font-data);
+}
+
+.engine-card__meta {
+  color: var(--text-mute);
+  font-size: 12px;
+}
+
+.engine-card__meta[data-tone="warn"] {
+  color: var(--warn);
+}
+
+.engine-card__status {
+  display: grid;
   gap: 6px;
   min-width: 0;
-  color: var(--text-mute);
-  font: 11px var(--font-data);
-  white-space: nowrap;
 }
 
-/* Activity, not progress: the spinner says the engine is alive, the meter
- * alone says how far it has got. */
-.engine-status__state .spinner {
+.engine-card__line {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-2);
+  min-width: 0;
+}
+
+.engine-card__line .spinner {
   display: none;
-  width: 11px;
-  height: 11px;
-  border-width: 1.5px;
+  flex: none;
+  align-self: center;
+  width: 13px;
+  height: 13px;
+  border-top-color: var(--hue);
 }
 
-.engine-status[data-active="true"] .engine-status__state .spinner {
+.engine-card[data-active="true"] .engine-card__line .spinner {
   display: inline-block;
 }
 
-.engine-status[data-active="true"] .engine-status__state {
-  color: var(--accent-bright);
+/* Idle reads as one muted line; anything else earns weight. */
+.engine-card__label {
+  color: var(--text-mute);
+  font-size: 13px;
+  font-weight: 500;
 }
 
-.engine-status[data-state="completed"] .engine-status__state {
+.engine-card[data-active="true"] .engine-card__label {
+  color: var(--hue);
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.engine-card[data-tone="success"] .engine-card__label {
   color: var(--success);
+  font-weight: 600;
 }
 
-.engine-status[data-state="failed"] .engine-status__state,
-.engine-status[data-state="cancelled"] .engine-status__state,
-.engine-status[data-state="cancelling"] .engine-status__state {
+.engine-card[data-tone="warn"] .engine-card__label {
+  color: var(--warn);
+  font-weight: 600;
+}
+
+.engine-card[data-tone="danger"] .engine-card__label {
   color: var(--danger);
+  font-weight: 600;
 }
 
-.engine-status__meter {
-  grid-area: meter;
-  height: 4px;
-  margin: 2px 0;
+/* A finished preview is neutral: it is a result, not a saved one. */
+.engine-card[data-tone="neutral"] .engine-card__label {
+  color: var(--text);
+  font-weight: 600;
+}
+
+.engine-card__percent {
+  margin-left: auto;
+  color: var(--text);
+  font: 600 26px/1 var(--font-data);
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -0.03em;
+}
+
+.engine-card__percent:empty {
+  display: none;
+}
+
+.engine-card__meter {
+  position: relative;
+  height: 7px;
   overflow: hidden;
   border-radius: 999px;
   background: var(--surface-3);
 }
 
-.engine-status__meter .meter__fill {
+.engine-card__meter .meter__fill {
   height: 100%;
   border-radius: inherit;
-  background: var(--accent);
-  transition: width 200ms linear;
+  background: var(--hue);
+  transition: width 300ms linear;
 }
 
-/* Nothing measured yet: an outlined empty track rather than a guessed fill,
- * so "starting" cannot be mistaken for "0% done". */
-.engine-status__meter[data-measured="false"] {
-  background: transparent;
-  box-shadow: inset 0 0 0 1px var(--line-strong);
+/* Nothing measured: a moving stripe across the whole track, never a guessed
+ * width and never a full bar that reads as "done". */
+.engine-card__meter[data-indeterminate="true"] .meter__fill {
+  width: 100%;
+  background: repeating-linear-gradient(
+    -45deg,
+    var(--hue-dim) 0 8px,
+    var(--hue) 8px 16px
+  );
+  background-size: 22.6px 100%;
+  opacity: 0.75;
+  animation: stripe 0.8s linear infinite;
 }
 
-.engine-status__detail {
-  grid-area: detail;
+.engine-card[data-state="lost"] .engine-card__meter .meter__fill {
+  background: var(--line-strong);
+  animation: none;
+}
+
+.engine-card__detail,
+.engine-card__timing {
   overflow: hidden;
   color: var(--text-mute);
   font: 11px/1.5 var(--font-data);
+  font-variant-numeric: tabular-nums;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-/* -- Run status beside the run buttons ------------------------------------- */
+.engine-card[data-active="true"] .engine-card__detail {
+  color: var(--text-dim);
+}
 
-.run-status {
-  display: inline-flex;
-  flex: 1 1 260px;
-  align-items: center;
-  gap: var(--space-2);
-  min-width: 0;
-  margin-left: var(--space-2);
+.engine-card[data-state="failed"] .engine-card__detail {
+  color: var(--text-dim);
+  white-space: normal;
+}
+
+.engine-card__warning {
   color: var(--text-mute);
   font: 11px/1.5 var(--font-data);
 }
 
-.run-status .spinner {
-  display: none;
-  flex: none;
-}
-
-.run-status[data-active="true"] .spinner {
-  display: inline-block;
-}
-
-.run-status__label {
-  flex: none;
-  color: var(--text-dim);
-  font-weight: 600;
-}
-
-.run-status[data-active="true"] .run-status__label {
-  color: var(--accent-bright);
-}
-
-.run-status[data-state="completed"] .run-status__label {
-  color: var(--success);
-}
-
-.run-status[data-state="partial"] .run-status__label,
-.run-status[data-state="paused"] .run-status__label {
+.engine-card__warning[data-tone="warn"] {
   color: var(--warn);
 }
 
-.run-status[data-state="failed"] .run-status__label,
-.run-status[data-state="cancelled"] .run-status__label,
-.run-status[data-state="cancelling"] .run-status__label {
-  color: var(--danger);
+.engine-card__outcome .btn {
+  text-decoration: none;
 }
 
-.run-status__detail {
+.engine-card__notice {
+  padding: var(--space-3);
+  border: 1px dashed var(--line-strong);
+  border-radius: var(--radius-sm);
+  color: var(--text-mute);
+  font-size: 12px;
+}
+
+.engine-card__inputs {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
+  gap: var(--space-3);
+  padding-top: var(--space-3);
+  border-top: 1px solid var(--line-soft);
+}
+
+.engine-card__actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.engine-card__actions > .btn:not(.btn--sm) {
+  min-width: 150px;
+}
+
+.engine-card__configure {
+  margin-left: auto;
+}
+
+.engine-card__configure svg {
+  transition: transform var(--ease);
+}
+
+.engine-card__configure[aria-expanded="true"] svg {
+  transform: rotate(90deg);
+}
+
+/* -- Configure drawers ----------------------------------------------------- */
+
+.engine-drawer {
+  --hue-dim: var(--line-strong);
+  grid-column: 1 / -1;
+  display: grid;
+  gap: var(--space-3);
   min-width: 0;
+  padding: var(--space-4);
+  border: 1px solid var(--line);
+  border-left: 3px solid var(--hue-dim);
+  border-radius: var(--radius-md);
+  background: var(--surface-1);
+}
+
+.engine-drawer[data-engine="rule"] {
+  --hue-dim: var(--rule-dim);
+}
+
+.engine-drawer[data-engine="ai"] {
+  --hue-dim: var(--ai-dim);
+}
+
+.engine-drawer__head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: var(--space-1) var(--space-3);
+}
+
+.engine-drawer__title {
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.endpoint-row .panel__hint {
+  flex: 1 1 280px;
+  min-width: 0;
+  font-family: var(--font-data);
+  font-size: 11px;
+}
+
+/* The rule workbench: editor on the left, the preview loop beside it, so an
+ * edit and its effect stay on screen together. */
+.rule-workbench {
+  display: grid;
+  grid-template-columns: minmax(0, 1.6fr) minmax(280px, 1fr);
+  gap: var(--space-4);
+  align-items: start;
+}
+
+.rule-workbench__editor {
+  display: grid;
+  gap: var(--space-2);
+  min-width: 0;
+}
+
+.rule-workbench__bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+}
+
+.rule-editor {
+  min-height: 260px;
+}
+
+.preview-pane {
+  position: sticky;
+  top: calc(var(--header-height) + var(--space-3));
+  display: grid;
+  gap: var(--space-2);
+  min-width: 0;
+  padding: var(--space-3);
+  border: 1px dashed var(--line-strong);
+  border-radius: var(--radius-md);
+  background: var(--surface-2);
+}
+
+.preview-pane[data-state="ready"] {
+  border-color: var(--warn);
+}
+
+.preview-pane[data-state="running"] {
+  border-color: var(--rule-dim);
+}
+
+.preview-pane__head {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.preview-pane__state {
+  color: var(--text-dim);
+  font: 11px/1.5 var(--font-data);
+}
+
+.preview-pane .engine-card__meter {
+  --hue: var(--rule);
+  --hue-dim: var(--rule-dim);
+  height: 5px;
+}
+
+.preview-pane__counts {
+  color: var(--text);
+  font: 600 13px/1.5 var(--font-data);
+  font-variant-numeric: tabular-nums;
+}
+
+.preview-pane__delta {
+  color: var(--text-mute);
+  font-weight: 400;
+  font-size: 11px;
+}
+
+.preview-pane__stale {
+  color: var(--warn);
+  font-size: 11px;
+}
+
+.preview-pane__list {
+  display: grid;
+  gap: 3px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.preview-pane__item {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-width: 0;
+  font-size: 12px;
+}
+
+.preview-pane__name {
   overflow: hidden;
+  color: var(--text-dim);
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-/* -- Tabs ------------------------------------------------------------------ */
+/* The "unsaved" tag is the one shape every preview surface shares. */
+.preview-pane__tag,
+.preview-banner__tag {
+  display: inline-flex;
+  align-items: center;
+  flex: none;
+  padding: 2px 8px;
+  border: 1px dashed var(--warn);
+  border-radius: 999px;
+  color: var(--warn);
+  font: 600 10px/1.4 var(--font-data);
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.drawer-error:empty,
+.results-error:empty,
+.collection-error:empty {
+  display: none;
+}
+
+/* -- Results --------------------------------------------------------------- */
+
+.results {
+  min-width: 0;
+}
 
 .tabs {
   display: flex;
   gap: var(--space-1);
-  margin-top: var(--space-4);
   border-bottom: 1px solid var(--line);
 }
 
@@ -257,8 +492,13 @@ html {
   color: var(--text);
 }
 
-.tab[aria-selected="true"]::after {
-  background: var(--accent);
+.tab[data-tab="rule"][aria-selected="true"]::after {
+  background: var(--rule);
+}
+
+.tab[data-tab="ai"][aria-selected="true"]::after,
+.tab[data-tab="missed"][aria-selected="true"]::after {
+  background: var(--ai);
 }
 
 .tab-panel {
@@ -267,12 +507,208 @@ html {
   padding-top: var(--space-4);
 }
 
+.results-body {
+  display: grid;
+  gap: var(--space-3);
+  min-width: 0;
+}
+
+.results-body > *,
+.panel__body > * {
+  min-width: 0;
+}
+
+.panel__body {
+  display: grid;
+  gap: var(--space-3);
+}
+
+/* A preview view is dressed differently from a saved one, top to bottom: a
+ * dashed warn frame and a banner that says nothing was written. */
+.panel[data-view="preview"] {
+  border-style: dashed;
+  border-color: var(--warn);
+}
+
+.preview-banner {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2) var(--space-3);
+  padding: var(--space-3);
+  border: 1px solid var(--accent-line);
+  border-radius: var(--radius-sm);
+  background: var(--accent-wash);
+}
+
+.preview-banner__text {
+  display: grid;
+  flex: 1 1 320px;
+  gap: 2px;
+  min-width: 0;
+  color: var(--text-dim);
+  font-size: 12px;
+}
+
+.preview-banner__text strong {
+  color: var(--text);
+  font: 600 13px var(--font-data);
+  font-variant-numeric: tabular-nums;
+}
+
+.pagination {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: var(--space-3);
+}
+
+.pagination span {
+  min-width: 72px;
+  color: var(--text-mute);
+  font: 11px var(--font-data);
+  text-align: center;
+}
+
+/* -- Collection disclosure ------------------------------------------------- */
+
+.collection-disclosure {
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  background: var(--surface-1);
+}
+
+.collection-disclosure > summary {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: var(--space-1) var(--space-3);
+  padding: var(--space-3) var(--space-4);
+  cursor: pointer;
+  list-style: none;
+}
+
+.collection-disclosure > summary::-webkit-details-marker {
+  display: none;
+}
+
+.collection-disclosure > summary::before {
+  content: "▸";
+  color: var(--text-faint);
+  transition: transform var(--ease);
+}
+
+.collection-disclosure[open] > summary::before {
+  transform: rotate(90deg);
+}
+
+.collection-disclosure[open] > summary {
+  border-bottom: 1px solid var(--line);
+}
+
+.collection-disclosure__title {
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.collection-disclosure__hint {
+  color: var(--text-mute);
+  font-size: 12px;
+}
+
+.collection-error {
+  padding: var(--space-3) var(--space-4) 0;
+}
+
 .collection-region {
   display: grid;
   gap: var(--space-4);
-  padding-top: var(--space-5);
-  margin-top: var(--space-5);
-  border-top: 1px solid var(--line);
+  padding: var(--space-4);
+}
+
+.collection-region > * {
+  min-width: 0;
+}
+
+/* -- Compact sticky bar ---------------------------------------------------- */
+
+/* Shown only while an engine is busy and both cards are off screen: one line
+ * that answers "is anything running?" from anywhere on the page. */
+.console-bar {
+  position: fixed;
+  top: var(--header-height);
+  left: 0;
+  right: 0;
+  z-index: 30;
+  border-bottom: 1px solid var(--line);
+  background: hsl(215 18% 9% / 0.94);
+  backdrop-filter: blur(6px);
+  box-shadow: var(--shadow-1);
+}
+
+.console-bar__inner {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  width: min(1600px, 100%);
+  margin-inline: auto;
+  padding: 6px var(--space-5);
+}
+
+.console-bar__jump {
+  display: flex;
+  flex: 1 1 auto;
+  align-items: center;
+  gap: var(--space-2);
+  min-width: 0;
+  padding: 2px 0;
+  border: 0;
+  background: transparent;
+  color: var(--text-mute);
+  font: 12px var(--font-data);
+  font-variant-numeric: tabular-nums;
+  text-align: left;
+}
+
+.console-bar__jump:hover {
+  color: var(--text);
+}
+
+.console-bar__engine {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  white-space: nowrap;
+}
+
+.console-bar__dot {
+  width: 8px;
+  height: 8px;
+  flex: none;
+  border-radius: 50%;
+  background: var(--line-strong);
+}
+
+.console-bar__engine[data-engine="rule"][data-active="true"] {
+  color: var(--rule);
+}
+
+.console-bar__engine[data-engine="ai"][data-active="true"] {
+  color: var(--ai);
+}
+
+.console-bar__engine[data-active="true"] .console-bar__dot {
+  background: currentColor;
+  animation: pulse 1.4s ease-in-out infinite;
+}
+
+.console-bar__engine[data-state="lost"] {
+  color: var(--warn);
+}
+
+.console-bar__sep {
+  color: var(--text-faint);
 }
 
 /* -- Score panels ---------------------------------------------------------- */
@@ -539,21 +975,23 @@ html {
 
 /* -- Responsive ------------------------------------------------------------ */
 
-@media (max-width: 760px) {
-  /* Stacked engines make the strip too tall to pin over a phone viewport; the
-   * indicator beside each run button carries the state instead. */
-  .status-strip {
+@media (max-width: 1100px) {
+  .rule-workbench {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .preview-pane {
     position: static;
-    gap: var(--space-3);
+  }
+}
+
+@media (max-width: 760px) {
+  .console {
+    grid-template-columns: minmax(0, 1fr);
   }
 
-  .run-status {
-    flex-basis: 100%;
-    margin-left: 0;
-  }
-
-  .engine-status {
-    flex: 1 1 100%;
+  .console-bar__inner {
+    padding-inline: var(--space-3);
   }
 
   .tabs {
@@ -566,8 +1004,22 @@ html {
   }
 }
 
+@media (prefers-reduced-motion: reduce) {
+  .engine-card__meter[data-indeterminate="true"] .meter__fill,
+  .engine-card[data-active="true"] .engine-card__dot,
+  .console-bar__engine[data-active="true"] .console-bar__dot {
+    animation: none;
+  }
+}
+
 @keyframes pulse {
   50% {
     opacity: 0.45;
+  }
+}
+
+@keyframes stripe {
+  to {
+    background-position: 22.6px 0;
   }
 }

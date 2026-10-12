@@ -210,28 +210,86 @@ says which engine produced a number and the rail says how urgent it is.
 
 ## Score
 
-**Score** covers both engines and is reached at `/score`. A status strip stays
-visible above the tabs whichever tab is open, because the two engines run
-independently: an AI run started on one tab keeps reporting while you work on
-the other. While a job runs it reports observed files, batches, pending, failed,
-in-flight, reused, and retried requests. Cancel is available for either engine.
+**Score** covers both engines and is reached at `/score`. The page opens on a
+run console: one card per engine, side by side, Rule ranking in violet and AI
+assessment in cyan. Each card is that engine's status and its controls.
 
-**Rule ranking** takes a source scan and optional starter rules. The rule builder
-is a drawer that generates TOML into the editor below it; the editor is the
-honest interface and can be edited directly or imported and exported. Candidates
-list score, file, observed location, reasons, and per-file explanations. Match
-counts and directory examples sit behind a disclosure.
+- **State.** The card starts at `Checking…` and shows nothing until the server
+  has answered. An idle engine is one muted line with its last outcome, such as
+  `Last saved ranking 3m ago · 41,200 files`. A running engine takes on its hue
+  and shows the phase, a large percentage, a progress meter, and its counts:
+  scored or assessed files, plus batches, pending, failed, in-flight, reused,
+  and retried requests for AI. Elapsed time comes from the job's `started_at`,
+  and an estimate of the time left appears once there is a real rate. Starting,
+  staging, planning, and the final rule save are not measured, so they show a
+  moving stripe rather than a guessed or full bar.
+- **Staleness.** After two failed polls in a row a card reads
+  `Connection lost · last update Ns ago` and its spinner stops. When a counted
+  phase's `updated_at` stops moving for a minute, the card reads
+  `No progress for Ns`. If every engine is unreachable, a single page banner says
+  the server cannot be reached.
+- **Start and cancel.** The primary button (**Run ranking** or **Start
+  assessment**) becomes **Cancel** in place while its engine runs. Only the
+  essential inputs are on the card: the source scan, the starter-rules toggle
+  for rules, and the time budget for AI. A refused start or a failed cancel is
+  reported inside that card; it never clears or overwrites the other engine.
+- **Outcome.** A finished run says how it ended, for example
+  `Ranking saved · just now · 41,200 scored · 312 positive`, with **View
+  candidates** and **Open in Explore** (which opens Explore with that run
+  selected). Success, warning, and danger colours are kept for outcomes. Failed,
+  partial, and paused runs raise a notification that stays until dismissed.
+- **Configure** opens a drawer under the console. The rule drawer holds the TOML
+  editor, Import/Export, the rule builder, and the preview workbench. The AI
+  drawer holds the per-request question cap, the staging choice, and **Check
+  endpoint**.
+- An engine the server does not provide shows a permanent explanation in place
+  of its controls instead of an error.
 
-**AI assessment** takes a source scan, staging choice, time budget, and a
-question cap, and can probe the configured endpoint. Coverage reports per-run
-totals, batch progress, latency, and the real billed token and cost figures.
-Candidates can be filtered to strong values the rules missed, which is the
-clearest statement of what the rule engine did not find.
+When the console scrolls out of view and an engine is busy, a one-line bar under
+the header carries the state (`Rule: Scoring files 43% · AI: idle`) with Cancel.
+The header shows the same jobs on every screen.
 
-**Collection queue** is shared. Manifests are created from the selected ranking,
-run with retry, and report a per-file outcome. File families group saved metadata
-by possible dates and versions and record review decisions, which a later ranking
-applies. See [File-family review](families.md).
+### Rule preview
+
+**Run ranking** always saves. Previewing is a rule-iteration tool, so it lives
+in the rule drawer beside the editor. **Preview ranking (not saved)** scores
+every observed file with the editor's rules but writes nothing and keeps only
+the top 100 in memory. The pane beside the editor shows the preview's progress,
+its counts (`41,200 scored · 312 positive`, with the change from the previous
+preview), and its top hits. It stays visible while you edit and notes when the
+rules have changed since it ran.
+
+The full preview opens under **Rule candidates** as **Unsaved preview**. It has
+a dashed warning frame and a banner, and it is never listed among saved
+rankings. Category and minimum-score filters apply to the 100 kept rows.
+Selection for Nemesis and manifests needs a saved ranking, so the preview does
+not offer it. **Save this ranking** re-runs exactly the rules, starter-rule
+setting, and scan that produced the preview, as a saved run. A new preview asks
+before replacing an unsaved one, and leaving the page with an unsaved preview
+asks for confirmation.
+
+### Results
+
+Results sit below the console in three tabs:
+
+- **Rule candidates** lists score, file, observed location, reasons, and
+  per-file explanations for a saved ranking (or the unsaved preview). Match
+  counts and directory examples sit behind a disclosure.
+- **AI candidates** shows coverage for the selected assessment run (per-run
+  totals, batch progress, latency, and the real billed token and cost figures)
+  and the assessed files by priority. Coverage refreshes every 5 seconds while an
+  assessment runs.
+- **Missed by rules** lists files the rule engine scored low that the model
+  still judged worth strong review. It is the clearest statement of what the
+  rule engine did not find.
+
+Candidate links open Explore searched to that file.
+
+**Collection & file families** sits in a closed disclosure at the bottom of the
+page and loads when opened. Manifests are created from the selected saved
+ranking, run with retry, and report a per-file outcome. File families group
+saved metadata by possible dates and versions and record review decisions,
+which a later ranking applies. See [File-family review](families.md).
 
 Assets are served from disk through an allow-list of extensions and validated
 with `ETag` and `Last-Modified`, so a reload revalidates instead of re-downloading.
@@ -286,6 +344,6 @@ their local databases.
 Collection manifests are shared with the CLI: on the Score page, select
 candidates, save and review a manifest, then collect or retry failed files. This
 is the advanced staging path with a total byte budget; the **Send to Nemesis**
-actions on Explore and the Rule ranking tab do not create a manifest. Offline
+actions on Explore and the Rule candidates tab do not create a manifest. Offline
 sessions are read-only: they can review saved manifests, but creating or running
 one requires a connection.

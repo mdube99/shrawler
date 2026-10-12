@@ -878,7 +878,21 @@ dialog::backdrop {
   border-left-color: var(--danger);
 }
 
-.toast button {
+.toast[data-tone="warn"] {
+  border-left-color: var(--warn);
+}
+
+/* Informational: something finished that is not a success, such as an
+ * unsaved preview. Neutral, so success keeps meaning "saved". */
+.toast[data-tone="info"] {
+  border-left-color: var(--text-faint);
+}
+
+.toast__action {
+  flex: none;
+}
+
+.toast button:not(.btn) {
   display: grid;
   place-items: center;
   width: 24px;
@@ -890,7 +904,7 @@ dialog::backdrop {
   color: var(--text-mute);
 }
 
-.toast button:hover {
+.toast button:not(.btn):hover {
   background: var(--surface-4);
   color: var(--text);
 }

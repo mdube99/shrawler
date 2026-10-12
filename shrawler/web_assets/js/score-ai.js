@@ -1,9 +1,10 @@
-// AI assessment tab: run form, endpoint check, coverage with real token and
-// cost figures, and candidates including the "strong value missed by rules"
-// view that answers "what did the rules miss".
+// AI assessment engine: the essential inputs on its console card, the
+// Configure drawer (question cap, staging, endpoint check), coverage with real
+// token and cost figures, and two result tabs: AI candidates, and the strong
+// values the rules missed, which answers "what did the rule engine not find".
 
-import { button, checkbox, clear, el, field, fill, fmt, json, number, on, option, post, select, setBusy, severity } from './core.js';
-import { panel, runStatus, toast } from './overlay.js';
+import { button, checkbox, clear, el, field, fill, fmt, href, icon, json, number, on, option, select, setBusy, severity } from './core.js';
+import { panel, toast } from './overlay.js';
 
 const PRIORITIES = [
   ['', 'All priorities'],
@@ -15,199 +16,246 @@ const PRIORITIES = [
 ];
 
 const PAGE = 100;
+// Coverage is re-read this often while a run is active, so the numbers below
+// the console move with the card instead of waiting for the run to end.
+const LIVE_COVERAGE_MS = 5000;
 
-export function createAiTab(root) {
-  const ctx = { status: {}, fail() {}, clearError() {}, collection: null };
+export function createAiEngine(slots) {
+  // Held by reference: the shell's `status` and `job` are live getters.
+  let ctx = { status: {}, start: async () => null, repaint() {}, showResults() {}, view: () => ({}), job: null };
   const nodes = {};
   let catalog = { runs: [], scans: [], endpoint: '', model: '' };
-  let offset = 0;
-  let loadToken = 0;
   let directoriesVisible = false;
+  let mounted = false;
+  let liveAt = 0;
+  let liveBusy = false;
+  let usage = null;
+  let endpointNote = '';
+  const tables = {};
 
   function mount(context) {
-    Object.assign(ctx, context);
-    build();
+    ctx = context;
+    if (mounted) return;
+    mounted = true;
+    buildInputs();
+    buildDrawer();
+    buildResults();
+    tables.missed = candidateTable(slots.missed, { missed: true });
+    paintMeta();
   }
 
-  function build() {
+  /* -- Card inputs ----------------------------------------------------------- */
+
+  function buildInputs() {
     nodes.scan = select([['', 'Latest completed inventory scan']]);
-    nodes.prepare = checkbox('Stage ledger and directory context first', true);
     nodes.budget = number('0', 0);
     nodes.budget.classList.add('input--num');
     nodes.budget.title = 'Seconds; 0 means unlimited';
+    fill(slots.inputs, field('Source scan', nodes.scan), field('Time budget (s, 0 = none)', nodes.budget));
+  }
+
+  /** Endpoint, model, and the run's billed cost, folded into the card. */
+  function paintMeta() {
+    const parts = [];
+    if (catalog.model) parts.push(`Model ${catalog.model}`);
+    if (endpointNote) parts.push(endpointNote);
+    if (usage?.billed_input_tokens) parts.push(`$${(usage.estimated_cost_usd || 0).toFixed(2)} billed on the selected run`);
+    slots.meta.textContent = parts.join(' · ') || 'Every observed file, with shared directory context.';
+    slots.meta.dataset.tone = endpointNote.startsWith('Endpoint unreachable') ? 'warn' : '';
+    ctx.repaint();
+  }
+
+  function start() {
+    const budget = Number(nodes.budget.value || 0);
+    return ctx.start('/api/assessment/jobs', {
+      scan_id: nodes.scan.value || null,
+      prepare: nodes.prepare.firstChild.checked,
+      budget_seconds: Number.isFinite(budget) && budget >= 0 ? Math.floor(budget) : 0,
+      max_questions: Number(nodes.maxQuestions.value || 200),
+    });
+  }
+
+  /* -- Configure drawer ------------------------------------------------------ */
+
+  function buildDrawer() {
+    nodes.prepare = checkbox('Stage ledger and directory context first', true);
     nodes.maxQuestions = number('200', 1);
     nodes.maxQuestions.classList.add('input--num');
     nodes.gateway = el('p', 'panel__hint', 'Checking the configured decision endpoint…');
-
-    const form = el('div', 'field-grid');
+    nodes.check = button('Check endpoint', { size: 'sm', name: 'refresh', onClick: () => checkEndpoint() });
+    const grid = el('div', 'field-grid');
     fill(
-      form,
-      field('Source scan', nodes.scan),
-      field('Time budget (seconds, 0 = unlimited)', nodes.budget),
+      grid,
       field('Max questions per request', nodes.maxQuestions),
+      el('div', 'field', el('span', 'field__label', 'Preparation'), nodes.prepare),
     );
-    const stage = el('div', 'field', el('span', 'field__label', 'Preparation'), nodes.prepare);
-    nodes.runStatus = runStatus();
-    nodes.startButton = button('Prepare and assess', { variant: 'primary', onClick: () => start() });
-
-    const run = panel(
-      'Run an AI assessment',
-      'Probabilistic. Every observed file, with shared directory context.',
-      [
-        nodes.gateway,
-        form,
-        stage,
-        el(
-          'div',
-          'btn-row run-row',
-          button('Check endpoint', { onClick: () => checkEndpoint() }),
-          nodes.startButton,
-          nodes.runStatus.node,
-        ),
-      ],
+    fill(
+      slots.drawer,
+      el(
+        'header',
+        'engine-drawer__head',
+        el('h3', 'engine-drawer__title', 'Configure AI assessment'),
+        el('span', 'field__hint', 'Probabilistic. Model priority is metadata-based review value, not confirmed content.'),
+      ),
+      grid,
+      el('div', 'btn-row endpoint-row', nodes.check, nodes.gateway),
     );
-    fill(root, run.node);
-    buildCoverage();
-    buildCandidates();
   }
 
-  function buildCoverage() {
+  /* -- Results --------------------------------------------------------------- */
+
+  function buildResults() {
+    nodes.resultsError = el('div', 'results-error');
     nodes.run = select([['', 'Latest assessment run']]);
     const controls = el('div', 'field-grid');
-    fill(controls, field('Assessment run', nodes.run));
-    controls.append(
-      button('Refresh', { size: 'sm', onClick: () => loadCoverage() }),
+    fill(
+      controls,
+      field('Assessment run', nodes.run),
+      button('Refresh', { size: 'sm', name: 'refresh', onClick: () => Promise.all([loadCoverage(), tables.ai.load(), tables.missed.load()]) }),
       button('Per-directory coverage', { size: 'sm', onClick: () => toggleDirectories() }),
     );
     nodes.coverageSummary = el('p', 'panel__hint');
     nodes.coverageStats = el('div', 'stat-row');
     nodes.directories = el('div', 'coverage-directories');
     nodes.directories.hidden = true;
-    root.append(
-      panel('Coverage', 'Unfinished coverage is always reported.', [
-        controls,
-        nodes.coverageSummary,
-        nodes.coverageStats,
-        nodes.directories,
-      ]).node,
-    );
+    nodes.empty = el('div', 'empty');
+    nodes.empty.hidden = true;
+    nodes.coverage = panel('Coverage', 'Unfinished coverage is always reported.', [
+      controls,
+      nodes.coverageSummary,
+      nodes.coverageStats,
+      nodes.directories,
+    ]).node;
+    fill(slots.results, nodes.resultsError, nodes.empty, nodes.coverage);
+    tables.ai = candidateTable(slots.results, { missed: false });
     on(nodes.run, 'change', () => {
-      offset = 0;
-      loadCoverage();
-      loadResults();
+      tables.ai.reset();
+      tables.missed.reset();
+      usage = null;
+      loadCoverage().catch((error) => resultsError(error.message));
+      tables.ai.load();
+      tables.missed.load();
     });
   }
 
-  function buildCandidates() {
-    nodes.label = select(PRIORITIES);
-    nodes.missed = checkbox('Only strong value missed by rules', false);
-    const controls = el('div', 'field-grid');
-    fill(controls, field('Priority', nodes.label), el('div', 'field', el('span', 'field__label', 'Comparison'), nodes.missed));
-    controls.append(button('Refresh', { size: 'sm', onClick: () => loadResults() }));
-    nodes.resultSummary = el('p', 'panel__hint');
-    nodes.rows = el('tbody');
+  function resultsError(message) {
+    fill(nodes.resultsError, message ? el('div', 'banner', icon('alert'), el('span', undefined, message)) : null);
+  }
 
-    const table = el('table', 'data-grid score-grid');
+  /** One candidate table. The missed view is the same query with missed=1. */
+  function candidateTable(root, { missed }) {
+    const table = { offset: 0, token: 0 };
+    const label = missed ? null : select(PRIORITIES);
+    const summary = el('p', 'panel__hint');
+    const error = el('div', 'results-error');
+    const rows = el('tbody');
+    const grid = el('table', 'data-grid score-grid');
     fill(
-      table,
+      grid,
       el(
         'thead',
         {},
-        el(
-          'tr',
-          {},
-          el('th', 'numeric', 'Priority'),
-          el('th', undefined, 'File'),
-          el('th', undefined, 'Observed location'),
-          el('th', undefined, 'Distribution'),
-        ),
+        el('tr', {}, el('th', 'numeric', 'Priority'), el('th', undefined, 'File'), el('th', undefined, 'Observed location'), el('th', undefined, 'Distribution')),
       ),
-      nodes.rows,
+      rows,
     );
-    nodes.page = {
+    const page = {
       prev: button('Previous', { size: 'sm', onClick: () => step(-PAGE) }),
       next: button('Next', { size: 'sm', onClick: () => step(PAGE) }),
       label: el('span', undefined, 'Page 1'),
     };
     const pager = el('div', 'pagination');
-    fill(pager, nodes.page.prev, nodes.page.label, nodes.page.next);
-
-    root.append(
-      panel('AI candidates', 'Model priority is metadata-based review value, not confirmed content.', [
-        controls,
-        nodes.resultSummary,
-        el('div', 'grid-shell score-grid-shell', table),
-        pager,
-      ]).node,
+    fill(pager, page.prev, page.label, page.next);
+    const controls = el('div', 'field-grid');
+    if (label) controls.append(field('Priority', label));
+    controls.append(button('Refresh', { size: 'sm', name: 'refresh', onClick: () => table.load() }));
+    const source = el('p', 'field__hint');
+    const { node } = panel(
+      missed ? 'Missed by rules' : 'AI candidates',
+      missed
+        ? 'Files the rule engine scored low that the model still judged worth strong review: the clearest statement of what the rules did not find.'
+        : 'Model priority is metadata-based review value, not confirmed content.',
+      [error, missed ? source : null, controls, summary, el('div', 'grid-shell score-grid-shell', grid), pager],
     );
-    on(nodes.label, 'change', () => {
-      offset = 0;
-      loadResults();
-    });
-    on(nodes.missed.firstChild, 'change', () => {
-      offset = 0;
-      loadResults();
-    });
-  }
-
-  function step(delta) {
-    offset = Math.max(0, offset + delta);
-    loadResults();
-  }
-
-  // A timed poll can land while the POST is in flight and still report the
-  // previous job; it must not unlock the button the click just locked.
-  let requesting = false;
-  let lastJob = null;
-  let lastView = null;
-
-  async function start() {
-    ctx.clearError();
-    // Busy before the request leaves, so a slow accept still reads as taken
-    // and a second click cannot reach the server as a 409.
-    setBusy(nodes.startButton, true, 'Starting…');
-    requesting = true;
-    try {
-      const budget = Number(nodes.budget.value || 0);
-      const job = await post('/api/assessment/jobs', {
-        scan_id: nodes.scan.value || null,
-        prepare: nodes.prepare.firstChild.checked,
-        budget_seconds: Number.isFinite(budget) ? budget : 0,
-        max_questions: Number(nodes.maxQuestions.value || 200),
+    root.append(node);
+    if (label) {
+      on(label, 'change', () => {
+        table.offset = 0;
+        table.load();
       });
-      requesting = false;
-      ctx.started('ai', job);
-    } catch (error) {
-      requesting = false;
-      renderJob(lastJob, lastView);
-      ctx.fail(error.message);
-      ctx.refresh();
     }
-  }
 
-  /** Paint this engine's job beside the button that starts it. */
-  function renderJob(job, view) {
-    lastJob = job;
-    lastView = view;
-    nodes.runStatus.paint(view || { state: 'idle', active: false, headline: '', summary: '' });
-    if (view?.active) {
-      setBusy(nodes.startButton, true, view.state === 'starting' ? 'Starting…' : view.state === 'cancelling' ? 'Cancelling…' : 'Assessing…');
-    } else if (!requesting) {
-      setBusy(nodes.startButton, false);
+    function step(delta) {
+      table.offset = Math.max(0, table.offset + delta);
+      table.load();
     }
-  }
 
-  async function checkGateway() {
-    try {
-      const report = await json('/api/assessment/check');
-      if (!report.reachable) {
-        nodes.gateway.textContent = `Endpoint unreachable: ${report.error}`;
-        return;
+    table.reset = () => {
+      table.offset = 0;
+    };
+
+    table.empty = (message) => {
+      clear(rows);
+      summary.textContent = message;
+      page.prev.disabled = true;
+      page.next.disabled = true;
+    };
+
+    table.load = async () => {
+      if (!ctx.status.assessment_enabled) return table.empty('AI assessment is disabled for this server.');
+      if (!nodes.run.value) return table.empty('No assessment run yet. Start one from the AI card above.');
+      const token = ++table.token;
+      const params = new URLSearchParams({ limit: String(PAGE), offset: String(table.offset), run: nodes.run.value });
+      if (label?.value) params.set('label', label.value);
+      if (missed) params.set('missed', '1');
+      source.textContent = `Assessment run ${nodes.run.selectedOptions[0]?.textContent || nodes.run.value}`;
+      try {
+        const data = await json(`/api/assessment/files?${params}`);
+        if (token !== table.token) return;
+        fill(error);
+        render(data);
+      } catch (failure) {
+        if (token === table.token) fill(error, el('div', 'banner', icon('alert'), el('span', undefined, failure.message)));
       }
-      nodes.gateway.textContent = `Endpoint HTTP ${report.http_status} in ${report.latency_ms} ms · model ${report.resolved_model} · answers ${report.returns_answers} · usage ${report.returns_usage}`;
-    } catch (error) {
-      ctx.fail(error.message);
+    };
+
+    function render(data) {
+      clear(rows);
+      for (const item of data.items) {
+        const row = el('tr', 'rail');
+        row.dataset.severity = severity(item.priority).band;
+        const priority = el('td', 'numeric');
+        const text = item.priority_name ? `${item.priority} ${item.priority_name}` : String(item.priority ?? item.choice ?? '—');
+        // The AI chip keeps the AI hue; its weight tracks how strong the call was.
+        const chip = el('span', 'score score--ai');
+        chip.dataset.strong = String(Number(item.priority) >= 3);
+        chip.textContent = text;
+        chip.title = text;
+        priority.append(chip);
+        const link = el('a', 'candidate-link', item.file_name);
+        link.href = href(`/?q=${encodeURIComponent(item.unc_path)}`);
+        const distribution = item.distribution
+          ? Object.entries(item.distribution)
+              .map(([key, value]) => `${key} ${Number(value).toFixed(2)}`)
+              .join(', ')
+          : '—';
+        fill(row, priority, el('td', undefined, link), el('td', 'score-path', item.unc_path), el('td', 'score-reasons', distribution));
+        rows.append(row);
+      }
+      if (!data.items.length) {
+        const row = el('tr');
+        const cell = el('td', 'empty', missed ? 'Nothing the rules missed in this run.' : 'No assessed candidates match this filter.');
+        cell.colSpan = 4;
+        row.append(cell);
+        rows.append(row);
+      }
+      summary.textContent = `Showing ${fmt.count(data.items.length)} ${missed ? 'rule-missed' : 'assessed'} file${data.items.length === 1 ? '' : 's'}.`;
+      page.label.textContent = `Page ${Math.floor(table.offset / PAGE) + 1}`;
+      page.prev.disabled = table.offset === 0;
+      page.next.disabled = data.items.length < PAGE;
     }
+
+    return table;
   }
 
   async function loadCatalog(preferred) {
@@ -222,21 +270,26 @@ export function createAiTab(root) {
     const chosen = preferred || nodes.run.value;
     fill(
       nodes.run,
-      option('', 'Latest assessment run'),
+      option('', catalog.runs.length ? 'Latest assessment run' : 'No assessment run yet'),
       ...catalog.runs.map((item) => option(item.id, `${fmt.stamp(item.created_at)} · ${fmt.count(item.total_observed)} files · ${item.status}`)),
     );
     if (catalog.runs.some((item) => item.id === chosen)) nodes.run.value = chosen;
     else nodes.run.value = catalog.runs.length ? catalog.runs[0].id : '';
-    nodes.gateway.textContent = `Endpoint: ${catalog.endpoint} · model: ${catalog.model}`;
+    paintMeta();
   }
 
   async function loadCoverage() {
-    if (!nodes.run.value) return;
-    const params = new URLSearchParams({ run: nodes.run.value });
-    const status = await json(`/api/assessment/status?${params}`);
+    if (!nodes.run.value) {
+      nodes.coverageSummary.textContent = 'No assessment run yet. Start one from the AI card above.';
+      clear(nodes.coverageStats);
+      return;
+    }
+    const run = nodes.run.value;
+    const status = await json(`/api/assessment/status?${new URLSearchParams({ run })}`);
+    if (run !== nodes.run.value) return;
     nodes.coverageSummary.textContent = `${fmt.count(status.total_observed)} observed · ${fmt.count(status.assessed)} assessed · ${fmt.count(status.in_flight)} in flight · ${fmt.count(status.pending)} pending · ${fmt.count(status.failed)} failed · reconciled ${status.reconciled ? 'yes' : 'NO'}`;
     const batches = status.batches || {};
-    const usage = status.usage || {};
+    usage = status.usage || {};
     const latency = status.latency_ms || {};
     const stats = [
       ['batches', `${fmt.count(batches.completed || 0)} / ${fmt.count(batches.total || 0)} done`],
@@ -255,26 +308,28 @@ export function createAiTab(root) {
     clear(nodes.coverageStats);
     for (const [label, value] of stats) {
       const entry = el('span');
-      entry.append(el('b', undefined, `${label} `), document.createTextNode(value));
+      entry.append(el('b', undefined, `${label} `), document.createTextNode(String(value)));
       nodes.coverageStats.append(entry);
     }
+    paintMeta();
   }
 
   async function toggleDirectories() {
     directoriesVisible = !directoriesVisible;
     nodes.directories.hidden = !directoriesVisible;
-    if (!directoriesVisible) return;
-    clear(nodes.directories);
+    if (!directoriesVisible || !nodes.run.value) return;
     fill(nodes.directories, el('span', 'spinner'), el('span', 'field__hint', 'Loading directory coverage…'));
     try {
-      const data = await json(`/api/assessment/coverage?run=${nodes.run.value}`);
+      const data = await json(`/api/assessment/coverage?${new URLSearchParams({ run: nodes.run.value })}`);
       clear(nodes.directories);
       if (!data.directories.length) {
         nodes.directories.append(el('p', 'field__hint', 'No directory context stored for this run yet.'));
         return;
       }
       for (const entry of data.directories.slice(0, 500)) {
-        const counts = Object.entries(entry.counts).map(([key, value]) => `${key} ${value}`).join(', ');
+        const counts = Object.entries(entry.counts)
+          .map(([key, value]) => `${key} ${value}`)
+          .join(', ');
         nodes.directories.append(el('p', undefined, `${entry.host || ''}\\${entry.share || ''}${entry.directory || ''} — ${counts} (${entry.enumeration || ''})`));
       }
     } catch (error) {
@@ -283,117 +338,112 @@ export function createAiTab(root) {
     }
   }
 
-  async function loadResults() {
-    const token = ++loadToken;
-    const params = new URLSearchParams({ limit: String(PAGE), offset: String(offset) });
-    if (nodes.run.value) params.set('run', nodes.run.value);
-    if (nodes.label.value) params.set('label', nodes.label.value);
-    if (nodes.missed.firstChild.checked) params.set('missed', '1');
+  /* -- Endpoint -------------------------------------------------------------- */
+
+  /**
+   * Probe the configured gateway. It is a real network call, so it runs under
+   * a bounded budget and reports in place rather than as a page error.
+   */
+  async function checkEndpoint({ timeout = 15000 } = {}) {
+    setBusy(nodes.check, true, 'Checking…');
     try {
-      const data = await json(`/api/assessment/files?${params}`);
-      if (token !== loadToken) return;
-      renderResults(data);
+      const report = await Promise.race([
+        json('/api/assessment/check'),
+        new Promise((_, reject) => setTimeout(() => reject(new Error(`no answer within ${timeout / 1000}s`)), timeout)),
+      ]);
+      if (!report.reachable) {
+        nodes.gateway.textContent = `Endpoint unreachable: ${report.error}`;
+        endpointNote = 'Endpoint unreachable · see Configure';
+      } else {
+        nodes.gateway.textContent = `Endpoint HTTP ${report.http_status} in ${report.latency_ms} ms · model ${report.resolved_model} · answers ${report.returns_answers} · usage ${report.returns_usage}`;
+        endpointNote = `endpoint OK in ${report.latency_ms} ms`;
+      }
     } catch (error) {
-      if (token === loadToken) ctx.fail(error.message);
+      nodes.gateway.textContent = `Endpoint check failed: ${error.message}`;
+      endpointNote = 'Endpoint unreachable · see Configure';
+    } finally {
+      setBusy(nodes.check, false);
+      paintMeta();
     }
   }
 
-  function renderResults(data) {
-    clear(nodes.rows);
-    for (const item of data.items) {
-      const row = el('tr', 'rail');
-      row.dataset.severity = severity(item.priority).band;
-      const priority = el('td', 'numeric');
-      const label = item.priority_name ? `${item.priority} ${item.priority_name}` : String(item.priority ?? item.choice ?? '—');
-      // The AI chip keeps the AI hue; its weight tracks how strong the call was.
-      const chip = el('span', 'score score--ai');
-      chip.dataset.strong = String(Number(item.priority) >= 3);
-      chip.textContent = label;
-      chip.title = label;
-      priority.append(chip);
-      const link = el('a', 'candidate-link', item.file_name);
-      link.href = `/?q=${encodeURIComponent(item.unc_path)}`;
-      const distribution = item.distribution
-        ? Object.entries(item.distribution).map(([key, value]) => `${key} ${Number(value).toFixed(2)}`).join(', ')
-        : '—';
-      fill(
-        row,
-        priority,
-        el('td', undefined, link),
-        el('td', 'score-path', item.unc_path),
-        el('td', 'score-reasons', distribution),
-      );
-      nodes.rows.append(row);
-    }
-    if (!data.items.length) {
-      const row = el('tr');
-      const cell = el('td', 'empty', 'No assessed candidates match this filter.');
-      cell.colSpan = 4;
-      row.append(cell);
-      nodes.rows.append(row);
-    }
-    const missed = nodes.missed.firstChild.checked;
-    nodes.resultSummary.textContent = missed
-      ? 'Files the rule engine gave a low score and the model still judged worth strong review. Model priority is review value, not confirmed content.'
-      : `Showing ${fmt.count(data.items.length)} assessed file${data.items.length === 1 ? '' : 's'}. Model priority is review value, not confirmed content.`;
-    nodes.page.label.textContent = `Page ${Math.floor(offset / PAGE) + 1}`;
-    nodes.page.prev.disabled = offset === 0;
-    nodes.page.next.disabled = data.items.length < PAGE;
-  }
+  /* -- Lifecycle ------------------------------------------------------------- */
 
   async function load() {
-    if (!ctx.status.assessment_enabled) return;
+    if (!ctx.status.assessment_enabled) {
+      nodes.coverage.hidden = true;
+      nodes.empty.hidden = false;
+      fill(
+        nodes.empty,
+        el('strong', undefined, 'AI assessment is disabled'),
+        el('span', undefined, 'Enable [jev] with a model endpoint in the Shrawler configuration and restart the server.'),
+      );
+      tables.ai.empty('AI assessment is disabled for this server.');
+      tables.missed.empty('AI assessment is disabled for this server.');
+      return;
+    }
     try {
       await loadCatalog();
     } catch (error) {
-      ctx.fail(error.message);
+      resultsError(error.message);
       return;
     }
-    // No run means no assessment database to query. The endpoints resolve a
-    // run implicitly and 400 when none exists, so the tab says so rather than
-    // firing a request that cannot succeed.
-    if (!nodes.run.value) {
-      nodes.coverageSummary.textContent = 'No assessment run yet. Start one above.';
-      nodes.resultSummary.textContent = 'No assessed candidates yet.';
-      clear(nodes.rows);
-      return;
-    }
+    nodes.gateway.textContent = `Endpoint: ${catalog.endpoint} · model: ${catalog.model}`;
     try {
-      await Promise.all([loadCoverage(), loadResults()]);
+      await Promise.all([loadCoverage(), tables.ai.load(), tables.missed.load()]);
     } catch (error) {
-      ctx.fail(error.message);
+      resultsError(error.message);
     }
+  }
+
+  /** Keep coverage live while a run is active, at a bounded rate. */
+  async function tick(job) {
+    if (!job?.assessment_run_id || liveBusy || Date.now() - liveAt < LIVE_COVERAGE_MS) return;
+    liveBusy = true;
+    liveAt = Date.now();
+    try {
+      if (!catalog.runs.some((run) => run.id === job.assessment_run_id)) await loadCatalog(job.assessment_run_id);
+      if (nodes.run.value === job.assessment_run_id) await loadCoverage();
+    } catch {
+      /* The next tick retries; the card already reports connection loss. */
+    } finally {
+      liveBusy = false;
+    }
+  }
+
+  function renderJob(job, view) {
+    if (view?.jobActive) tick(job);
   }
 
   async function onComplete(job) {
-    ctx.clearError();
     const outcome = {
-      partial: 'Assessment finished with unassessed files',
-      paused: 'Assessment paused at its time budget',
-      cancelled: 'Assessment cancelled',
+      completed: ['Assessment complete', 'ok', false],
+      partial: ['Assessment finished with unassessed files', 'warn', true],
+      paused: ['Assessment paused at its time budget', 'warn', true],
+      cancelled: ['Assessment cancelled · answers so far are kept', 'ok', false],
     };
-    toast(outcome[job.status] || 'Assessment finished');
+    const [message, tone, sticky] = outcome[job.status] || ['Assessment finished', 'ok', false];
+    const assessed = job.counts?.assessed ?? job.processed;
+    toast(`${message} · ${fmt.count(assessed)} assessed`, tone, {
+      sticky,
+      action: job.assessment_run_id ? { label: 'View candidates', onClick: () => ctx.showResults() } : undefined,
+    });
     if (!job.assessment_run_id) return;
     try {
       await loadCatalog(job.assessment_run_id);
-      await Promise.all([loadCoverage(), loadResults()]);
+      tables.ai.reset();
+      tables.missed.reset();
+      await Promise.all([loadCoverage(), tables.ai.load(), tables.missed.load()]);
     } catch (error) {
-      ctx.fail(error.message);
+      resultsError(error.message);
     }
   }
 
-  async function checkEndpoint() {
-    try {
-      const report = await json('/api/assessment/check');
-      if (!report.reachable) {
-        nodes.gateway.textContent = `Endpoint unreachable: ${report.error}`;
-        return;
-      }
-      nodes.gateway.textContent = `Endpoint HTTP ${report.http_status} in ${report.latency_ms} ms · model ${report.resolved_model} · answers ${report.returns_answers} · usage ${report.returns_usage}`;
-    } catch (error) {
-      ctx.fail(error.message);
-    }
+  function history() {
+    const run = catalog.runs[0];
+    if (!run) return { text: 'No assessment run yet.' };
+    return { text: `Last assessment ${fmt.relative(run.created_at)} · ${fmt.count(run.total_observed)} files · ${run.status}`, run: run.id };
   }
 
-  return { mount, load, onComplete, checkEndpoint, renderJob };
+  return { mount, load, start, onComplete, renderJob, history, checkEndpoint };
 }

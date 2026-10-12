@@ -11,44 +11,54 @@
   <link rel="stylesheet" href="/assets/css/score.css">
 </head>
 <body>
-  <main class="workspace">
-    <section class="score-head">
-      <h1>Score</h1>
-      <p>Rank every observed file with deterministic rules, assess it with a decision model, then queue what matters for collection. Both engines run independently and concurrently.</p>
+  <main class="workspace score-page">
+    <!-- Page level only for "the server cannot be reached". Every engine
+         reports its own failures inside its own card or results panel. -->
+    <div id="page-banner" class="banner" role="alert" hidden></div>
+
+    <!-- The run console. Each card is the status of its engine and the place
+         that starts and cancels it, so the answer to "is it running?" sits
+         where the analyst is already looking. The page starts in "Checking…":
+         nothing is known until the first job poll answers. -->
+    <section id="console" class="console" aria-label="Scoring engines">
+      <article id="card-rule" class="engine-card" data-engine="rule" data-state="unknown" aria-labelledby="card-rule-name">
+        <header class="engine-card__head">
+          <span class="engine-card__dot" aria-hidden="true"></span>
+          <h2 id="card-rule-name" class="engine-card__name">Rule ranking</h2>
+          <span class="engine-card__kind">Deterministic · metadata only</span>
+        </header>
+        <p class="engine-card__line"><span class="engine-card__label">Checking…</span></p>
+      </article>
+      <article id="card-ai" class="engine-card" data-engine="ai" data-state="unknown" aria-labelledby="card-ai-name">
+        <header class="engine-card__head">
+          <span class="engine-card__dot" aria-hidden="true"></span>
+          <h2 id="card-ai-name" class="engine-card__name">AI assessment</h2>
+          <span class="engine-card__kind">Probabilistic · decision model</span>
+        </header>
+        <p class="engine-card__line"><span class="engine-card__label">Checking…</span></p>
+      </article>
+      <section id="drawer-rule" class="engine-drawer" data-engine="rule" aria-label="Configure rule ranking" hidden></section>
+      <section id="drawer-ai" class="engine-drawer" data-engine="ai" aria-label="Configure AI assessment" hidden></section>
     </section>
 
-    <!-- Status strip stays visible on both tabs and at every scroll position:
-         the engines are independent, so an AI run started here keeps
-         reporting while you work on rules or read candidates far below. -->
-    <section class="status-strip" aria-label="Engine status">
-      <div class="engine-status" id="status-rule">
-        <span class="engine-status__hue engine-status__hue--rule" aria-hidden="true"></span>
-        <span class="engine-status__name">Rule ranking</span>
-        <span class="engine-status__state"><span class="spinner spinner--inline" aria-hidden="true"></span><span class="engine-status__label">Idle</span></span>
-        <div class="engine-status__meter" role="progressbar" aria-label="Rule ranking progress" aria-valuemin="0" aria-valuemax="100"><div class="meter__fill"></div></div>
-        <span class="engine-status__detail"></span>
-      </div>
-      <div class="engine-status" id="status-ai">
-        <span class="engine-status__hue engine-status__hue--ai" aria-hidden="true"></span>
-        <span class="engine-status__name">AI assessment</span>
-        <span class="engine-status__state"><span class="spinner spinner--inline" aria-hidden="true"></span><span class="engine-status__label">Idle</span></span>
-        <div class="engine-status__meter" role="progressbar" aria-label="AI assessment progress" aria-valuemin="0" aria-valuemax="100"><div class="meter__fill"></div></div>
-        <span class="engine-status__detail"></span>
-      </div>
-      <button id="cancel-rule" class="btn btn--sm btn--danger" type="button" hidden><span>Cancel rule run</span></button>
-      <button id="cancel-ai" class="btn btn--sm btn--danger" type="button" hidden><span>Cancel AI run</span></button>
+    <section class="results" aria-label="Results">
+      <nav class="tabs" role="tablist" aria-label="Results">
+        <button id="tab-rule" class="tab" type="button" role="tab" data-tab="rule" aria-selected="true" aria-controls="results-rule">Rule candidates</button>
+        <button id="tab-ai" class="tab" type="button" role="tab" data-tab="ai" aria-selected="false" aria-controls="results-ai" tabindex="-1">AI candidates</button>
+        <button id="tab-missed" class="tab" type="button" role="tab" data-tab="missed" aria-selected="false" aria-controls="results-missed" tabindex="-1">Missed by rules</button>
+      </nav>
+      <section id="results-rule" class="tab-panel" role="tabpanel" aria-labelledby="tab-rule"></section>
+      <section id="results-ai" class="tab-panel" role="tabpanel" aria-labelledby="tab-ai" hidden></section>
+      <section id="results-missed" class="tab-panel" role="tabpanel" aria-labelledby="tab-missed" hidden></section>
     </section>
 
-    <nav class="tabs" role="tablist" aria-label="Scoring engine">
-      <button id="tab-rule" class="tab" type="button" role="tab" aria-selected="true" aria-controls="panel-rule">Rule ranking</button>
-      <button id="tab-ai" class="tab" type="button" role="tab" aria-selected="false" aria-controls="panel-ai">AI assessment</button>
-    </nav>
-
-    <div id="error-banner" class="banner" role="alert" hidden></div>
-
-    <section id="panel-rule" class="tab-panel" role="tabpanel" aria-labelledby="tab-rule"></section>
-    <section id="panel-ai" class="tab-panel" role="tabpanel" aria-labelledby="tab-ai" hidden></section>
-    <section id="panel-collection" class="collection-region"></section>
+    <details id="collection-disclosure" class="collection-disclosure">
+      <summary>
+        <span class="collection-disclosure__title">Collection &amp; file families</span>
+        <span class="collection-disclosure__hint">Staged Nemesis manifests and review decisions</span>
+      </summary>
+      <div id="panel-collection" class="collection-region"></div>
+    </details>
   </main>
   <script type="module" src="/assets/js/score.js"></script>
 </body>

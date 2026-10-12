@@ -15,21 +15,40 @@ function toastRegion() {
   return region;
 }
 
-/** Show a transient message. Errors stay longer because they need reading. */
-export function toast(message, tone = 'ok') {
+/**
+ * Show a transient message. Errors stay longer because they need reading.
+ *
+ * `sticky` keeps the toast until dismissed, for outcomes the analyst must not
+ * miss (a failed or partial run). `action` adds one button, such as "View
+ * candidates", that runs and then dismisses the toast.
+ */
+export function toast(message, tone = 'ok', { sticky = false, action } = {}) {
   const node = el('div', 'toast');
   node.dataset.tone = tone;
-  node.setAttribute('role', tone === 'error' ? 'alert' : 'status');
+  node.setAttribute('role', tone === 'error' || tone === 'warn' ? 'alert' : 'status');
   const dismiss = el('button');
   dismiss.type = 'button';
   dismiss.setAttribute('aria-label', 'Dismiss notification');
   dismiss.append(icon('close'));
-  node.append(el('span', undefined, message), dismiss);
+  node.append(el('span', undefined, message));
+  if (action) {
+    const run = button(action.label, {
+      size: 'sm',
+      onClick: () => {
+        node.remove();
+        action.onClick();
+      },
+    });
+    run.classList.add('toast__action');
+    node.append(run);
+  }
+  node.append(dismiss);
   toastRegion().append(node);
-  let timer = setTimeout(() => node.remove(), tone === 'error' ? 9000 : 4000);
+  const life = tone === 'error' || tone === 'warn' ? 9000 : action ? 7000 : 4000;
+  let timer = sticky ? 0 : setTimeout(() => node.remove(), life);
   on(node, 'mouseenter', () => clearTimeout(timer));
   on(node, 'mouseleave', () => {
-    timer = setTimeout(() => node.remove(), 2000);
+    if (!sticky) timer = setTimeout(() => node.remove(), 2000);
   });
   on(dismiss, 'click', () => node.remove());
   return node;
@@ -208,35 +227,7 @@ export function meter(fraction, { label } = {}) {
   };
 }
 
-/**
- * Run state painted beside the button that started it. The Score status strip
- * reports the same job, but the analyst is looking at the button when they
- * click, so the answer to "did that start?" has to be there too.
- *
- * Only the state label is a live region. Counts change on every poll and
- * would turn a screen reader into a ticker; transitions are what matter.
- */
-export function runStatus() {
-  const node = el('div', 'run-status');
-  const spinner = el('span', 'spinner spinner--inline');
-  spinner.setAttribute('aria-hidden', 'true');
-  const label = el('span', 'run-status__label');
-  label.setAttribute('role', 'status');
-  const detail = el('span', 'run-status__detail');
-  node.append(spinner, label, detail);
-  node.dataset.state = 'idle';
-  return {
-    node,
-    paint(view) {
-      node.dataset.state = view.state;
-      node.dataset.active = String(view.active);
-      if (label.textContent !== view.headline) label.textContent = view.headline;
-      detail.textContent = view.headline ? view.summary : '';
-    },
-  };
-}
-
-/** Inline error surface used by the Score screen panels. */
+/** Inline error surface. */
 export function errorLine(node, message) {
   clear(node);
   node.hidden = !message;

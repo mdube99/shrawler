@@ -131,7 +131,7 @@ export function createCollection(root) {
       ? `${fmt.count(manifest.expected_files)} planned files · ${fmt.bytes(manifest.expected_bytes)} expected · ${fmt.bytes(manifest.consumed_bytes)} received · limits ${fmt.bytes(manifest.max_file_size)} per file and ${fmt.bytes(manifest.max_total_bytes)} total. Previously collected files are skipped; status does not establish freshness.${
           ctx.status.retrieval_enabled ? '' : ' Offline session: retrieval disabled.'
         }`
-      : 'No saved manifests yet. Select candidates on the Rule ranking tab and choose Save selected candidates to stage one.';
+      : 'No saved manifests yet. Tick candidates on the Rule candidates tab, then choose Save selected candidates to stage one.';
     if (!manifest) return;
     for (const item of manifest.items) nodes.items.append(manifestRow(item));
     if (!manifest.items.length) {
@@ -163,7 +163,7 @@ export function createCollection(root) {
 
   async function create(fileIds, requireScore = false) {
     try {
-      if (!source.run || source.run === '__preview') throw new Error('Select a saved rule ranking first.');
+      if (!source.run) throw new Error('Select a saved rule ranking first.');
       if (fileIds && !fileIds.length) throw new Error('Select candidates from the ranking first.');
       const manifest = await post('/api/collection/create', {
         run_id: source.run,
