@@ -53,7 +53,7 @@ from .triage.scoring import (
     combine_priority,
     combined_sql,
 )
-from .triage.service import TriageBusyError, TriageService
+from .triage.service import PreviewGoneError, TriageBusyError, TriageService
 from .triage.storage import (
     WEB_SORT_INDEXES,
     catalog as triage_catalog,
@@ -2816,14 +2816,26 @@ class WebHandler(BaseHTTPRequestHandler):
             return
         try:
             run_id = query.get("run", [None])[0]
+            # A retained rule preview is read through the same listing and
+            # explanation code as a saved run, just from its own database.
+            output: Optional[Path] = None
+            if "preview" in query and parsed.path in (
+                "/api/triage/files",
+                "/api/triage/explain",
+            ):
+                if run_id is not None:
+                    raise ValueError("use either run or preview, not both")
+                output, run_id = service.preview_source(query["preview"][0])
+            after = None
+            if "after_score" in query or "after_id" in query:
+                after = (int(query["after_score"][0]), query["after_id"][0])
             if parsed.path == "/api/triage/catalog":
                 self._json(triage_catalog(service.database))
             elif parsed.path == "/api/triage/job":
                 self._json({"job": service.status()})
+            elif parsed.path == "/api/triage/preview":
+                self._json({"preview": service.preview()})
             elif parsed.path == "/api/triage/files":
-                after = None
-                if "after_score" in query or "after_id" in query:
-                    after = (int(query["after_score"][0]), query["after_id"][0])
                 self._json(
                     triage_list(
                         service.database,
@@ -2831,15 +2843,34 @@ class WebHandler(BaseHTTPRequestHandler):
                         query.get("category", [None])[0],
                         min(100, int(query.get("limit", ["100"])[0])),
                         int(query.get("min_score", ["0"])[0]),
+                        output=output,
                         after=after,
                     )
                 )
             elif parsed.path == "/api/triage/explain":
                 self._json(
-                    triage_explain(service.database, query["file_id"][0], run_id)
+                    triage_explain(
+                        service.database, query["file_id"][0], run_id, output
+                    )
+                )
+            elif parsed.path == "/api/triage/compare":
+                changed = query.get("changed", ["1"])[0]
+                if changed not in ("0", "1"):
+                    raise ValueError("changed must be 0 or 1")
+                self._json(
+                    service.compare(
+                        query["preview"][0],
+                        query.get("base", [None])[0],
+                        order=query.get("order", ["delta"])[0],
+                        limit=min(100, int(query.get("limit", ["100"])[0])),
+                        after=after,
+                        changed_only=changed == "1",
+                    )
                 )
             else:
                 self._error(404, "Unknown ranking endpoint", "not_found")
+        except PreviewGoneError as exc:
+            self._error(410, str(exc), "preview_gone")
         except (ValueError, KeyError, OSError, sqlite3.Error) as exc:
             self._error(400, str(exc), "invalid_query")
 
@@ -2989,8 +3020,22 @@ class WebHandler(BaseHTTPRequestHandler):
             elif path == "/api/triage/cancel":
                 service.cancel()
                 self._json({"cancel_requested": True})
+            elif path in ("/api/triage/preview/save", "/api/triage/preview/discard"):
+                if set(payload) != {"id"} or not isinstance(payload["id"], str):
+                    raise ValueError("Provide the preview id")
+                if path.endswith("/save"):
+                    self._json(service.save_preview(payload["id"]), 202)
+                else:
+                    self._json(service.discard_preview(payload["id"]))
             else:
                 self._error(404, "Unknown ranking endpoint", "not_found")
+        except PreviewGoneError as exc:
+            logging.warning(
+                "POST %s rejected: %s",
+                escape_terminal(self.path),
+                escape_terminal(str(exc)),
+            )
+            self._error(410, str(exc), "preview_gone")
         except (TriageBusyError, CollectionBusyError, JevBusyError) as exc:
             logging.warning(
                 "POST %s rejected: %s",

@@ -337,5 +337,241 @@ class RankingHttpTests(unittest.TestCase):
         self.assertEqual(failure.exception.code, 403)
 
 
+    PS1_RULES = (
+        "version = 1\n[[rules]]\nid = \"custom.ps1\"\ndescription = \"scripts\"\n"
+        "category = \"scripts\"\nsignal_group = \"scripts\"\npoints = 40\n"
+        "[rules.when]\nextension_any = [\".ps1\"]\n"
+    )
+
+    def status_of(self, path: str, payload: Optional[Dict[str, Any]] = None) -> int:
+        try:
+            self.request(path, payload)
+        except urllib.error.HTTPError as error:
+            return error.code
+        return 200
+
+    def preview_job(self, **payload: Any) -> Dict[str, Any]:
+        self.request("/api/triage/jobs", {"preview": True, **payload})
+        return self.finished_job()
+
+    def test_preview_is_retained_and_read_through_ranking_endpoints(self) -> None:
+        job = self.preview_job(rules_toml=self.PS1_RULES)
+        self.assertEqual(job["preview_id"], job["id"])
+        self.assertEqual(job["rules_toml"], self.PS1_RULES)
+        self.assertTrue(job["builtins"])
+        self.assertEqual(job["run_id"], job["result"]["run_id"])
+        self.assertEqual(job["scan_id"], job["result"]["scan_id"])
+        self.assertEqual(job["summary"]["positive_files"], 4)
+        self.assertTrue((self.root / "triage-previews" / f"{job['id']}.db").exists())
+        self.assertFalse(result_path(self.database).exists())
+        preview = self.request("/api/triage/preview")["preview"]
+        self.assertEqual(preview["id"], job["id"])
+        self.assertEqual(preview["run_id"], job["run_id"])
+        self.assertEqual(preview["rules_toml"], self.PS1_RULES)
+        self.assertEqual(preview["files_scored"], 4)
+        self.assertEqual(preview["scan_short_id"], job["scan_id"][:6])
+        self.assertEqual(
+            preview["stale"], {"newer_scan": False, "reviews_changed": False}
+        )
+        pages: List[str] = []
+        cursor = ""
+        while True:
+            page = self.request(
+                f"/api/triage/files?preview={job['id']}&limit=1{cursor}"
+            )
+            self.assertEqual(page["run_id"], job["run_id"])
+            pages.extend(item["file_id"] for item in page["items"])
+            if not page["next_cursor"]:
+                break
+            score, after = page["next_cursor"]
+            cursor = f"&after_score={score}&after_id={after}"
+        self.assertEqual(len(set(pages)), 4)
+        scripts = self.request(f"/api/triage/files?preview={job['id']}&category=scripts")
+        self.assertEqual([item["file_name"] for item in scripts["items"]], ["deploy.ps1"])
+        detail = self.request(
+            f"/api/triage/explain?preview={job['id']}&file_id={pages[0]}"
+        )
+        self.assertEqual(detail["run_id"], job["run_id"])
+        self.assertIn("rule_diagnostics", detail)
+        self.assertEqual(
+            self.status_of(f"/api/triage/files?preview={job['id']}&run=x"), 400
+        )
+        self.assertEqual(self.status_of("/api/triage/files?preview=missing"), 410)
+        self.assertEqual(
+            self.status_of(f"/api/triage/explain?preview=missing&file_id={pages[0]}"),
+            410,
+        )
+        self.request("/api/review/build", {})
+        families = self.request("/api/review/families?scan=" + job["scan_id"])
+        self.request(
+            "/api/review/decide",
+            {
+                "scope": "family",
+                "target": families["items"][0]["family_id"],
+                "disposition": "exclude",
+            },
+        )
+        self.assertTrue(
+            self.request("/api/triage/preview")["preview"]["stale"]["reviews_changed"]
+        )
+
+    def test_only_the_latest_preview_is_kept_and_replaced_on_completion(self) -> None:
+        from shrawler.triage import service as module
+
+        first = self.preview_job()
+        first_path = self.root / "triage-previews" / f"{first['id']}.db"
+        entered = threading.Event()
+        released = threading.Event()
+        real_rank = module.rank
+
+        def slow_rank(*args: Any, **kwargs: Any) -> Any:
+            entered.set()
+            released.wait(timeout=3)
+            return real_rank(*args, **kwargs)
+
+        with patch.object(module, "rank", side_effect=slow_rank):
+            self.request("/api/triage/jobs", {"preview": True})
+            self.assertTrue(entered.wait(timeout=2))
+            # The old preview stays readable while the new one runs.
+            self.assertTrue(first_path.exists())
+            self.assertEqual(
+                self.request("/api/triage/preview")["preview"]["id"], first["id"]
+            )
+            released.set()
+            second = self.finished_job()
+        self.assertFalse(first_path.exists())
+        self.assertEqual(
+            sorted(path.name for path in (self.root / "triage-previews").glob("*.db")),
+            [f"{second['id']}.db"],
+        )
+        self.assertEqual(self.status_of(f"/api/triage/files?preview={first['id']}"), 410)
+        self.assertEqual(
+            self.request("/api/triage/preview")["preview"]["id"], second["id"]
+        )
+        self.assertEqual(
+            self.request("/api/triage/preview/discard", {"id": second["id"]}),
+            {"discarded": True},
+        )
+        self.assertIsNone(self.request("/api/triage/preview")["preview"])
+        self.assertFalse(any((self.root / "triage-previews").iterdir()))
+
+    def test_saving_a_preview_promotes_identical_scores(self) -> None:
+        from shrawler.triage.storage import list_results
+
+        job = self.preview_job(rules_toml=self.PS1_RULES)
+        before = self.request(f"/api/triage/files?preview={job['id']}")["items"]
+        categories = self.request(
+            f"/api/triage/files?preview={job['id']}&category=scripts"
+        )["items"]
+        accepted = self.request("/api/triage/preview/save", {"id": job["id"]})
+        self.assertEqual(accepted["phase"], "saving preview")
+        self.assertEqual(accepted["total"], 4)
+        saved = self.finished_job()
+        run_id = saved["result"]["run_id"]
+        self.assertEqual(run_id, job["run_id"])
+        self.assertEqual(saved["processed"], 4)
+        self.assertFalse((self.root / "triage-previews" / f"{job['id']}.db").exists())
+        self.assertIsNone(self.request("/api/triage/preview")["preview"])
+        after = self.request(f"/api/triage/files?run={run_id}")["items"]
+        self.assertEqual(
+            [(item["file_id"], item["priority"], item["unc_path"]) for item in before],
+            [(item["file_id"], item["priority"], item["unc_path"]) for item in after],
+        )
+        self.assertEqual(
+            [item["file_id"] for item in categories],
+            [
+                item["file_id"]
+                for item in self.request(
+                    f"/api/triage/files?run={run_id}&category=scripts"
+                )["items"]
+            ],
+        )
+        self.assertEqual(
+            list_results(self.database, run_id)["summary"], job["summary"]
+        )
+        self.assertEqual(self.request("/api/triage/catalog")["runs"][0]["id"], run_id)
+        self.assertEqual(
+            self.status_of("/api/triage/preview/save", {"id": job["id"]}), 410
+        )
+
+    def test_compare_preview_against_saved_run(self) -> None:
+        self.request("/api/triage/jobs", {"preview": False})
+        base = self.finished_job()["result"]["run_id"]
+        job = self.preview_job(rules_toml=self.PS1_RULES)
+        compared = self.request(f"/api/triage/compare?preview={job['id']}&base={base}")
+        summary = compared["summary"]
+        self.assertEqual(summary["changed"], 1)
+        self.assertEqual(summary["raised"], 1)
+        self.assertEqual(summary["lowered"], 0)
+        self.assertEqual(summary["no_longer_positive"], 0)
+        self.assertTrue(summary["same_scan"])
+        self.assertEqual(summary["rule_matches"]["custom.ps1"], [0, 1])
+        self.assertEqual(len(compared["items"]), 1)
+        item = compared["items"][0]
+        self.assertEqual(item["file_name"], "deploy.ps1")
+        self.assertGreater(item["delta"], 0)
+        self.assertEqual(
+            item["preview_priority"] - item["base_priority"], item["delta"]
+        )
+        everything = self.request(
+            f"/api/triage/compare?preview={job['id']}&base={base}&order=preview&changed=0&limit=3"
+        )
+        self.assertEqual(len(everything["items"]), 3)
+        self.assertIsNotNone(everything["next_cursor"])
+        score, after = everything["next_cursor"]
+        rest = self.request(
+            f"/api/triage/compare?preview={job['id']}&base={base}&order=preview"
+            f"&changed=0&after_score={score}&after_id={after}"
+        )
+        self.assertEqual(len(rest["items"]), 1)
+        self.assertEqual(rest["summary"], summary)
+        self.assertEqual(
+            self.status_of(f"/api/triage/compare?preview={job['id']}&order=sideways"),
+            400,
+        )
+        self.assertEqual(self.status_of("/api/triage/compare?preview=gone"), 410)
+
+    def test_preview_save_conflicts_and_gone(self) -> None:
+        self.assertEqual(self.status_of("/api/triage/preview/save", {"id": "nope"}), 410)
+        self.assertEqual(self.status_of("/api/triage/preview/save", {}), 400)
+        job = self.preview_job()
+        entered = threading.Event()
+        released = threading.Event()
+
+        def hold(*_args: Any, **_kwargs: Any) -> None:
+            entered.set()
+            released.wait(timeout=3)
+
+        try:
+            with patch.object(self.service, "_work", side_effect=hold):
+                self.service.start({})
+                self.assertTrue(entered.wait(timeout=1))
+                self.assertEqual(
+                    self.status_of("/api/triage/preview/save", {"id": job["id"]}),
+                    409,
+                )
+        finally:
+            released.set()
+        self.service._thread.join(timeout=3)
+        self.assertEqual(
+            self.request("/api/triage/preview/discard", {"id": job["id"]}),
+            {"discarded": True},
+        )
+        self.assertEqual(
+            self.status_of("/api/triage/preview/save", {"id": job["id"]}), 410
+        )
+
+    def test_previews_are_removed_on_close_and_startup(self) -> None:
+        job = self.preview_job()
+        directory = self.root / "triage-previews"
+        self.assertTrue((directory / f"{job['id']}.db").exists())
+        TriageService(self.database, self.root)
+        self.assertFalse(directory.exists())
+        job = self.preview_job()
+        self.assertTrue((directory / f"{job['id']}.db").exists())
+        self.service.close()
+        self.assertFalse(directory.exists())
+
+
 if __name__ == "__main__":
     unittest.main()
