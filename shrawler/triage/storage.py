@@ -572,9 +572,14 @@ def list_results(
     min_score: int = 0,
     output: Optional[Path] = None,
     after: Optional[Tuple[int, str]] = None,
+    file_ids: Optional[List[str]] = None,
 ) -> Dict[str, Any]:
     if not 1 <= limit <= 10000 or min_score < 0:
         raise ValueError("limit must be 1..10000 and minimum score must be nonnegative")
+    if file_ids is not None and (
+        type(file_ids) is not list or not all(type(i) is str for i in file_ids)
+    ):
+        raise ValueError("file_ids must be a list of candidate IDs")
     with closing(connect_readonly(output or result_path(database))) as connection:
         run = select_run(connection, database, run_id)
         connection.execute("ATTACH DATABASE ? AS inventory", (str(database.resolve()),))
@@ -606,20 +611,31 @@ def list_results(
             query += (
                 " AND f.priority=0 AND json_extract(f.result_json, '$.review') IS NULL"
             )
+        if file_ids is not None:
+            # A named selection is a membership question, not a page of a
+            # ranking: ask for exactly those IDs instead of the top `limit`.
+            selected = sorted(set(file_ids))
+            query += (
+                f" AND {identifier} IN ({','.join('?' for _ in selected)})"
+                if selected
+                else " AND 0"
+            )
+            values.extend(selected)
         if after is not None:
             if type(after[0]) is not int or after[0] < 0:
                 raise ValueError("invalid ranking cursor")
             query += f" AND ({score} < ? OR ({score} = ? AND {identifier} > ?))"
             values.extend((after[0], after[0], after[1]))
+        page = max(limit, len(set(file_ids))) if file_ids else limit
         query += f" ORDER BY {score} DESC, {identifier} LIMIT ?"
-        rows = list(connection.execute(query, (*values, limit + 1)))
+        rows = list(connection.execute(query, (*values, page + 1)))
         items = [
             {
                 **json.loads(row["resolved_metadata_json"]),
                 **json.loads(row["result_json"]),
                 "review_score": row["review_score"],
             }
-            for row in rows[:limit]
+            for row in rows[:page]
         ]
         summary: Dict[str, Any] = {}
         if connection.execute(
@@ -637,7 +653,7 @@ def list_results(
             "summary": summary,
             "items": items,
             "next_cursor": [items[-1]["review_score"], items[-1]["file_id"]]
-            if len(rows) > limit
+            if len(rows) > page
             else None,
         }
 

@@ -97,7 +97,10 @@ background that would hurt the legibility of the path text.
 
 File actions offer **View file**, **Download**, and **Send to Nemesis**.
 Sending to Nemesis saves a [collection manifest](collection.md) with byte caps
-and retry; it is the only path for anything acting on more than one file.
+and retry; it is the only path for anything acting on more than one file. The
+selection does not need a rule rating: a file the selected ranking run never
+covered is queued as unrated, and the confirmation reports how many of the
+selection those are.
 
 **Percentage actions** act on a share of a ranked set rather than a hand-picked
 selection. Choose the filtered set or the whole scan, a percentage, and a

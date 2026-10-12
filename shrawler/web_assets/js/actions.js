@@ -569,23 +569,33 @@ export async function downloadRows(rows, onProgress) {
  * Queue rows through the collection manifest path. Every collection goes
  * through here so it gets byte caps, a saved manifest, and retry; there is no
  * second, direct-send path.
+ *
+ * A ranking run is a preference, not a gate. Explore shows files the selected
+ * run never rated -- most often ones captured after rules last ran -- and those
+ * still have exact paths, so the manifest resolves them from the inventory.
  */
 export async function queueRows(rows, { rankingRun, rankingCategory, name, status }) {
-  if (!rankingRun) {
-    throw new Error('Sending to Nemesis needs a saved rule ranking. Run one on the Score screen first.');
-  }
   if (!rows.length) throw new Error('No files selected.');
-  const fileIds = rows.slice(0, QUEUE_CEILING).map((row) => row.id);
+  const chosen = rows.slice(0, QUEUE_CEILING);
+  const fileIds = chosen.map((row) => row.id);
+  const unrated = chosen.filter((row) => !row.ranking_run_id).length;
   const cap = Number(status.nemesis_max_bytes) || 50 * 1024 ** 2;
   const accepted = await confirm({
     title: `Send ${fmt.count(fileIds.length)} files to Nemesis?`,
     message: 'The manifest is saved before retrieval starts, so it can be re-run and retried from the Score screen.',
-    detail: `Per-file cap ${fmt.bytes(cap)} · total cap ${fmt.bytes(cap * 20)} · source ranking ${rankingRun.slice(0, 8)}`,
+    detail: [
+      `Per-file cap ${fmt.bytes(cap)}`,
+      `total cap ${fmt.bytes(cap * 20)}`,
+      rankingRun ? `source ranking ${rankingRun.slice(0, 8)}` : 'no rule ranking',
+      unrated ? `${fmt.count(unrated)} without a rule rating` : null,
+    ]
+      .filter(Boolean)
+      .join(' · '),
     confirmLabel: 'Save manifest',
   });
   if (!accepted) return null;
   const manifest = await post('/api/collection/create', {
-    run_id: rankingRun,
+    run_id: rankingRun || null,
     category: rankingCategory || null,
     min_score: 0,
     limit: QUEUE_CEILING,

@@ -5,7 +5,7 @@ import json
 import os
 import sqlite3
 import uuid
-from contextlib import contextmanager
+from contextlib import closing, contextmanager
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Callable, Dict, Generator, List, Optional
@@ -83,17 +83,33 @@ class CollectionQueue:
         for value in (limit, max_file_size, max_total_bytes):
             if type(value) is not int or value < 1:
                 raise ValueError("Counts and byte limits must be positive integers")
+        if limit > 10000:
+            raise ValueError("Selection is limited to the first 10000 candidates")
         if type(min_score) is not int or min_score < 0:
             raise ValueError("Minimum score must be a nonnegative integer")
         if type(name) is not str or not 1 <= len(name) <= 200:
             raise ValueError("Name must contain 1..200 characters")
-        candidates = list_results(self.database, run_id, category, limit, min_score)
-        if file_ids is not None:
-            if type(file_ids) is not list or not all(type(i) is str for i in file_ids):
-                raise ValueError("file_ids must be a list of candidate IDs")
-            available = {item["file_id"] for item in candidates["items"]}
-            if not set(file_ids) <= available:
-                raise ValueError("Selection contains files outside the saved query")
+        if file_ids is not None and (
+            type(file_ids) is not list
+            or not file_ids
+            or not all(type(i) is str for i in file_ids)
+        ):
+            raise ValueError("file_ids must be a non-empty list of candidate IDs")
+        candidates = self._candidates(run_id, category, limit, min_score, file_ids)
+        ranked = candidates["items"] if candidates else []
+        if file_ids is None:
+            selection = ranked
+        else:
+            # A hand-picked file the selected run never rated -- most often one
+            # captured after the ranking ran -- still has an exact path. Resolve
+            # it from the inventory so the manifest stays a frozen list of real
+            # files instead of a page of a ranking.
+            unrated = sorted(set(file_ids) - {item["file_id"] for item in ranked})
+            selection = ranked + self._inventory_items(unrated)
+        # Record the run only when it contributed something. A selection the run
+        # never rated has no source ranking, and naming one would imply reasons
+        # that are not in the manifest.
+        recorded = candidates if (file_ids is None or ranked) else None
         previously = {
             item["file_id"]
             for manifest in self.list()
@@ -108,7 +124,7 @@ class CollectionQueue:
             targets = sorted(
                 {
                     (candidate["host"], candidate["share"])
-                    for candidate in candidates["items"]
+                    for candidate in selection
                 }
             )
             prior_paths: set = set()
@@ -129,9 +145,7 @@ class CollectionQueue:
             source.close()
         items: List[Dict[str, Any]] = []
         expected = 0
-        for candidate in candidates["items"]:
-            if file_ids is not None and candidate["file_id"] not in file_ids:
-                continue
+        for candidate in selection:
             prior = (
                 candidate["file_id"] in previously
                 or (
@@ -155,17 +169,22 @@ class CollectionQueue:
                     **candidate,
                     "reasons": [
                         s["description"]
-                        for s in candidate["signals"]
+                        for s in candidate.get("signals") or []
                         if s["credited_points"] > 0
                     ]
                     or [
                         s["description"]
-                        for s in candidate["signals"]
+                        for s in candidate.get("signals") or []
                         if s["category"] in FALLBACK_CATEGORIES
                     ]
-                    or [
-                        f"Selected by saved ranking query (score {candidate['review_score']})"
-                    ],
+                    or (
+                        [
+                            f"Selected by saved ranking query "
+                            f"(score {candidate['review_score']})"
+                        ]
+                        if candidate.get("review_score") is not None
+                        else ["Selected by hand; not included in a rule ranking"]
+                    ),
                     "previously_collected": prior,
                     "status": status,
                     "attempts": [],
@@ -179,13 +198,13 @@ class CollectionQueue:
             "created_at": utc_now(),
             "source_database": str(self.database),
             "query": {
-                "run_id": candidates["run_id"],
+                "run_id": recorded["run_id"] if recorded else None,
                 "category": category,
                 "limit": limit,
                 "min_score": min_score,
                 "file_ids": file_ids,
             },
-            "scan_id": candidates["scan_id"],
+            "scan_id": recorded["scan_id"] if recorded else None,
             "max_file_size": max_file_size,
             "max_total_bytes": max_total_bytes,
             "consumed_bytes": 0,
@@ -195,6 +214,77 @@ class CollectionQueue:
         }
         self._save(manifest)
         return manifest
+
+    def _candidates(
+        self,
+        run_id: Optional[str],
+        category: Optional[str],
+        limit: int,
+        min_score: int,
+        file_ids: Optional[List[str]],
+    ) -> Optional[Dict[str, Any]]:
+        """Ranked candidates for the selection, or None when there is no run.
+
+        A named run that fails to resolve is still an error. An unnamed run is
+        only a preference: a hand-picked selection survives an inventory that
+        has never been ranked, which is what makes an ad-hoc manifest possible.
+        """
+        requested = sorted(set(file_ids)) if file_ids is not None else None
+        try:
+            return list_results(
+                self.database,
+                run_id,
+                category,
+                limit,
+                min_score,
+                file_ids=requested,
+            )
+        except ValueError:
+            if run_id or file_ids is None:
+                raise
+            return None
+
+    def _inventory_items(self, file_ids: List[str]) -> List[Dict[str, Any]]:
+        """Resolve files straight from the inventory, with no rule rating.
+
+        The shape matches a ranked candidate so the rest of manifest creation
+        (paths, prior collection, byte limits) treats both identically. Reaching
+        here means the selected run does not cover the file, not that the file
+        is missing from the inventory.
+        """
+        if not file_ids:
+            return []
+        with closing(connect_readonly(self.database)) as source:
+            placeholders = ",".join("?" for _ in file_ids)
+            rows = source.execute(
+                "SELECT public_id, host, share, remote_path, unc_path, file_name, "
+                "extension, size_bytes, readable_size, mtime_utc, "
+                "scan_timestamp_utc FROM files "
+                f"WHERE public_id IN ({placeholders})",
+                file_ids,
+            ).fetchall()
+        found = {
+            str(row["public_id"]): {
+                "file_id": str(row["public_id"]),
+                "host": str(row["host"]),
+                "share": str(row["share"]),
+                "remote_path": str(row["remote_path"]),
+                "unc_path": str(row["unc_path"]),
+                "file_name": str(row["file_name"]),
+                "extension": str(row["extension"]),
+                "size_bytes": int(row["size_bytes"]),
+                "readable_size": str(row["readable_size"]),
+                "mtime_utc": str(row["mtime_utc"]),
+                "scan_timestamp_utc": str(row["scan_timestamp_utc"]),
+                "signals": [],
+                "review_score": None,
+            }
+            for row in rows
+        }
+        missing = [file_id for file_id in file_ids if file_id not in found]
+        if missing:
+            raise ValueError("Unknown file ID: " + ", ".join(sorted(missing)[:5]))
+        return [found[file_id] for file_id in file_ids]
 
     @staticmethod
     def _path(value: str) -> str:

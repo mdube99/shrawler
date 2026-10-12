@@ -10,7 +10,7 @@ from unittest.mock import patch
 from shrawler.collection import CollectionBusyError, CollectionQueue, main
 from shrawler.store import ScanStore
 from shrawler.triage.rules import load
-from shrawler.triage.storage import rank
+from shrawler.triage.storage import connect_readonly, rank
 
 from .test_triage import metadata
 from .test_triage_web import RankingHttpTests
@@ -103,6 +103,64 @@ class CollectionTests(unittest.TestCase):
             with self.assertRaises(CollectionBusyError):
                 self.queue.run(manifest["id"], lambda *_: None)
 
+    def capture_later(self, path: str) -> str:
+        """Add a file after the ranking run, so it carries no rating."""
+        store = ScanStore(self.root, "spider")
+        store.upsert_host("server", "server", "complete")
+        store.upsert_share("server", "DATA", "complete", {})
+        store.add_file("server", "DATA", metadata(path, size=4))
+        store.finish("completed", {})
+        store.close()
+        with connect_readonly(self.database) as source:
+            return str(
+                source.execute(
+                    "SELECT public_id FROM files WHERE remote_path=?", (path,)
+                ).fetchone()[0]
+            )
+
+    def test_unrated_selection_becomes_an_ad_hoc_manifest(self):
+        late = self.capture_later("/Deployments/late.config")
+        manifest = self.queue.create(file_ids=[late])
+        self.assertEqual([i["file_id"] for i in manifest["items"]], [late])
+        self.assertEqual(manifest["items"][0]["status"], "pending")
+        self.assertEqual(
+            manifest["items"][0]["reasons"],
+            ["Selected by hand; not included in a rule ranking"],
+        )
+        # The run never covered this capture, so the manifest claims no source.
+        self.assertIsNone(manifest["query"]["run_id"])
+        self.assertIsNone(manifest["scan_id"])
+        self.assertEqual(manifest["expected_files"], 1)
+        output = StringIO()
+        with redirect_stdout(output):
+            self.assertEqual(main(["create", str(self.database), "--file-id", late]), 0)
+        self.assertEqual(json.loads(output.getvalue())["items"][0]["file_id"], late)
+
+    def test_mixed_selection_keeps_ratings_and_adds_unrated(self):
+        late = self.capture_later("/Deployments/late.config")
+        rated = self.queue.create(limit=1)["items"][0]["file_id"]
+        manifest = self.queue.create(file_ids=[late, rated])
+        by_id = {item["file_id"]: item for item in manifest["items"]}
+        self.assertEqual(set(by_id), {late, rated})
+        self.assertIsNotNone(by_id[rated]["review_score"])
+        self.assertIsNone(by_id[late]["review_score"])
+        self.assertIsNotNone(manifest["query"]["run_id"])
+
+    def test_rated_selection_below_the_page_limit_is_kept(self):
+        # `limit` bounds a ranking page, not a named selection: the last ranked
+        # file is still reachable when only one candidate would be listed.
+        ranked = self.queue.create(limit=3)["items"]
+        last = ranked[-1]["file_id"]
+        manifest = self.queue.create(limit=1, file_ids=[last])
+        self.assertEqual([i["file_id"] for i in manifest["items"]], [last])
+        self.assertIsNotNone(manifest["items"][0]["review_score"])
+
+    def test_named_run_that_does_not_exist_still_fails(self):
+        # An unnamed run is a preference; a named one is a promise.
+        rated = self.queue.create(limit=1)["items"][0]["file_id"]
+        with self.assertRaises(ValueError):
+            self.queue.create(run_id="missing", file_ids=[rated])
+
     def test_smb_transport_only_retrieves_exact_source(self):
         from shrawler.collection import smb_retriever
         from shrawler.smb import SMBAuth
@@ -142,9 +200,13 @@ class CollectionHttpTests(RankingHttpTests):
         import urllib.error
 
         rank(self.database, load())
-        manifest = self.request("/api/collection/create", {"limit": 2})
-        self.assertEqual(CollectionQueue(self.database).get(manifest["id"]), manifest)
+        # The WebUI cannot create a manifest offline; the persistence/CLI path
+        # still can, which is how a manifest exists for the guard checks below.
+        manifest = CollectionQueue(self.database).create(limit=2)
         self.assertEqual(self.request("/api/collection")["items"][0], manifest)
+        with self.assertRaises(urllib.error.HTTPError) as failure:
+            self.request("/api/collection/create", {"limit": 2})
+        self.assertEqual(failure.exception.code, 400)
         with self.assertRaises(urllib.error.HTTPError) as failure:
             self.request("/api/collection/run", {"id": manifest["id"]})
         self.assertEqual(failure.exception.code, 400)
