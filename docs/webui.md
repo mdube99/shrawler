@@ -48,7 +48,11 @@ The interface has two screens: **Explore** at `/` and **Score** at `/score`.
 ## Explore
 
 Explore is the landing screen and the default view. The table is the product;
-everything else ranks it.
+everything else ranks it. When a scoring engine is running, the shared header
+shows a small live pill (`Ranking 43%` or `Rule preview 43%` / `AI 1,200 of
+8,000`) that links to Score, so a run stays visible from every screen. With no
+ranking saved yet, the engine bar offers **Rank now**, which starts the built-in
+metadata-only rule ranking without leaving Explore.
 
 Search sits above the grid with `/` to focus it. Filters live behind a single
 trigger that shows the active count (`Filters · 3`) and open as a popover, or a
@@ -100,14 +104,14 @@ values for one parameter, returns `400` with code `invalid_query`. `q`,
 `share` as a filter, not as the share to open.
 
 **Engine run selection** is a dedicated control rather than one more filter.
-`Ranking` and `AI` each select a saved run or none, and Overall is their
+`Rules` and `AI` each select a saved run or none, and Overall is their
 weighted blend. Deselecting either engine re-weights Overall to the other
 alone instead of filtering rows away, so "focus on AI only" is expressed by
 turning the rule run off. Both engines keep their own column at all times, in
 their own hues, for whichever runs are selected.
 
 The three score columns form one cluster under a shared **Scores** header: a
-larger severity-coloured **Overall** pill, then smaller **Rule** and **AI 0–4**
+larger severity-coloured **Overall** pill, then smaller **Rules** and **AI 0–4**
 pills in each engine's hue. The explanation of what each number is lives in the
 column header's tooltip rather than a second line of text. The Overall header's
 tooltip follows the engine selection exactly like the note beside the selectors,
