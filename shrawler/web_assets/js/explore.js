@@ -19,6 +19,7 @@ import {
   mountShell,
   on,
   onPopState,
+  post,
   readParams,
   renderShellStatus,
   serverParams,
@@ -139,6 +140,8 @@ const filters = createFilters({
   runs,
   facets: () => facets,
   commit,
+  onRunRanking: startRanking,
+  rankingEnabled: () => status.triage_enabled !== false,
 });
 
 /* -- Grid ------------------------------------------------------------------ */
@@ -442,8 +445,7 @@ function actionContext() {
 async function send(items, trigger) {
   busy = true;
   renderSelectionBar();
-  if (trigger) setBusy(trigger, true, 'Sending…');
-  try {
+  if (trigger) setBusy(trigger, true, 'Sending…');  try {
     const summary = await sendToNemesis(items, {
       status,
       confirmFirst: items.length > 1 || items.some((row) => row.nemesis_status === 'uploaded'),
@@ -458,6 +460,33 @@ async function send(items, trigger) {
     busy = false;
     if (trigger) setBusy(trigger, false);
     render();
+  }
+}
+
+/**
+ * Start the built-in rule ranking straight from Explore. Metadata-only and
+ * safe: the header job pill reports progress, and the normal status poll
+ * surfaces the finished run as "new rankings available".
+ */
+let rankingRequest = false;
+async function startRanking(trigger) {
+  if (rankingRequest) return;
+  rankingRequest = true;
+  if (trigger) setBusy(trigger, true, 'Starting…');
+  try {
+    await post('/api/triage/jobs', {
+      scan_id: null,
+      rules_toml: 'version = 1\n',
+      builtins: true,
+      preview: false,
+    });
+    toast('Rule ranking started · progress in the header');
+    await pollStatus();
+  } catch (error) {
+    toast(error.message, 'error');
+  } finally {
+    rankingRequest = false;
+    if (trigger) setBusy(trigger, false);
   }
 }
 

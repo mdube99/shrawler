@@ -89,7 +89,7 @@ const VALUE_LABELS = {
 
 const valueLabel = (key, value) => (VALUE_LABELS[key] || String)(value);
 
-export function createFilters({ root, state, defaults, runs, facets, commit }) {
+export function createFilters({ root, state, defaults, runs, facets, commit, onRunRanking, rankingEnabled }) {
   let closePopover = null;
   let panel = null;
   let activeFacet = FACETS[0];
@@ -310,7 +310,11 @@ export function createFilters({ root, state, defaults, runs, facets, commit }) {
     const label = FIELD_LABELS[key];
     const items = [el('div', 'filter-pane__head', el('span', 'filter-pane__title', label))];
     if (!state.ranking_run) {
-      items.push(el('p', 'field__hint', 'Select a ranking run above to filter by rule rating.'));
+      const hint = el('p', 'field__hint', 'Select a ranking run above to filter by rule rating. ');
+      const link = el('a', 'link', 'Rank this inventory');
+      link.href = href('/score');
+      hint.append(link);
+      items.push(hint);
       return items;
     }
     const list = el('ul', 'facet-options');
@@ -459,7 +463,11 @@ export function createFilters({ root, state, defaults, runs, facets, commit }) {
 
   function renderRuns() {
     const completed = runs.ranking.filter((run) => run.status === 'completed');
-    fill(root.ranking, option(NONE, 'No ranking selected'), ...completed.map((run) => option(run.id, `${fmt.stamp(run.started_at)} · ${fmt.count(run.file_count)} files`)));
+    fill(
+      root.ranking,
+      option(NONE, 'No ranking selected'),
+      ...completed.map((run, index) => option(run.id, `${index === 0 ? 'Latest · ' : ''}${fmt.stamp(run.started_at)} · ${fmt.count(run.file_count)} files`)),
+    );
     const namedRule = completed.some((run) => run.id === state.ranking_run);
     if (!namedRule && state.ranking_run === AUTO) {
       // The URL did not name a run, so adopt the newest saved one: Combined then
@@ -502,11 +510,23 @@ export function createFilters({ root, state, defaults, runs, facets, commit }) {
     root.jev.disabled = !usable.length;
     const mix = composition();
     if (!runs.ranking.length && !runs.jev.length) {
-      // Nothing to select yet, so point at the screen that can create a run.
+      // Nothing to select yet. Point at Score, and offer the safe metadata-only
+      // ranking right here so the landing page can fill its own score columns.
       const link = el('a', 'link', 'Run a rule ranking');
       link.href = href('/score');
       clear(root.note);
       root.note.append('No scores yet · ', link);
+      if (onRunRanking && (rankingEnabled ? rankingEnabled() : true)) {
+        root.note.append(
+          ' ',
+          button('Rank now', {
+            size: 'sm',
+            variant: 'primary',
+            title: 'Rank this inventory with the built-in rules. Metadata only; no file content is read.',
+            onClick: (event) => onRunRanking(event.currentTarget),
+          }),
+        );
+      }
     } else {
       root.note.textContent = mix.note;
     }
