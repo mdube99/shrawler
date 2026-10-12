@@ -90,9 +90,9 @@ export function createTree({ root, loadingNode, params, selection, onSelect, sco
       on(box, 'click', (event) => event.stopPropagation());
       on(box, 'change', () => onSelect(node, box.checked));
       const label = el('span', 'tree-label tree-label--file');
-      label.append(el('span', 'type-tag', (node.extension || 'file').replace(/^\./, '').slice(0, 5).toUpperCase()), el('span', undefined, node.file_name));
+      label.append(el('span', 'type-tag', (node.extension || 'file').replace(/^\./, '').slice(0, 6).toUpperCase()), el('span', undefined, node.file_name));
       const meta = el('span', 'tree-file-meta');
-      fill(meta, scoreFor ? scoreFor(node) : null, el('span', undefined, node.readable_size || fmt.bytes(node.size_bytes)), el('span', undefined, fmt.date(node.mtime_utc)));
+      fill(meta, scoreFor ? scoreFor(node) : null, el('span', undefined, fmt.bytes(node.size_bytes)), el('span', undefined, fmt.date(node.mtime_utc)));
       line.append(box, icon('file'), label, meta);
       line.setAttribute('aria-expanded', String(selectedId === node.id));
       on(line, 'click', () => toggleFile(node, nodeKey));
@@ -182,7 +182,10 @@ export function createTree({ root, loadingNode, params, selection, onSelect, sco
         const panel = document.getElementById(`tree-details-${item.id}`);
         if (!panel) return;
         const bottom = panel.getBoundingClientRect().bottom;
-        if (bottom > innerHeight) window.scrollBy({ top: bottom - innerHeight + 20, behavior: 'smooth' });
+        if (bottom > innerHeight) {
+          const behavior = matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth';
+          window.scrollBy({ top: bottom - innerHeight + 20, behavior });
+        }
       });
     }
   }

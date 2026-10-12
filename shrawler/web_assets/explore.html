@@ -13,13 +13,7 @@
 <body>
   <!-- The header is mounted by core.js so both screens share one definition. -->
   <main class="workspace">
-    <section class="explore-head">
-      <div>
-        <h1>Explore</h1>
-        <p><strong>Find the file that matters.</strong> Read the table to find sensitive files, then view, download, or queue them for collection.</p>
-      </div>
-      <p class="local-badge" id="mode-badge"><span>Connecting…</span></p>
-    </section>
+    <h1 class="sr-only">Explore</h1>
 
     <section class="search-bar" aria-label="Search and filters">
       <div class="search-row">
@@ -27,7 +21,7 @@
           <span class="search-field__icon" id="search-icon" aria-hidden="true"></span>
           <span class="spinner spinner--inline search-field__spinner" id="search-spinner" hidden></span>
           <label class="sr-only" for="query">Search saved file inventory</label>
-          <input id="query" type="search" placeholder="Search filenames, paths, hosts…" autocomplete="off" autofocus>
+          <input id="query" type="search" placeholder="Search filenames, paths, hosts…" autocomplete="off">
           <button id="clear-query" class="copy-btn search-field__clear" type="button" aria-label="Clear search" hidden></button>
           <kbd aria-label="Keyboard shortcut: slash">/</kbd>
         </div>
@@ -102,7 +96,7 @@
               </tr>
               <tr>
                 <th class="numeric" scope="col"><button class="sort-btn" type="button" data-sort="combined" id="combined-header" title="Overall priority 0–100">Overall<span class="sort-caret" aria-hidden="true"></span></button></th>
-                <th class="numeric" scope="col"><button class="sort-btn" type="button" data-sort="priority" title="Rule rating 0–100 · matched static filename, path, and metadata rules; 80+ is fully alarmed">Rule<span class="sort-caret" aria-hidden="true"></span></button></th>
+                <th class="numeric" scope="col"><button class="sort-btn" type="button" data-sort="priority" title="Rule rating · matched static filename, path, and metadata rules; 80+ is fully alarmed">Rule<span class="sort-caret" aria-hidden="true"></span></button></th>
                 <th class="numeric" scope="col"><button class="sort-btn" type="button" data-sort="jev" title="AI rating 0–4 · Jev-style decision model">AI 0–4<span class="sort-caret" aria-hidden="true"></span></button></th>
               </tr>
             </thead>
@@ -110,9 +104,16 @@
           </table>
         </div>
         <nav class="pagination" aria-label="Results pagination">
+          <button id="first" class="btn btn--sm" type="button">First</button>
           <button id="previous" class="btn btn--sm" type="button">Previous</button>
           <span id="page">Page 1</span>
+          <select id="page-size" class="select" aria-label="Files per page">
+            <option value="25">25 / page</option>
+            <option value="50">50 / page</option>
+            <option value="100" selected>100 / page</option>
+          </select>
           <button id="next" class="btn btn--sm" type="button">Next</button>
+          <button id="last" class="btn btn--sm" type="button">Last</button>
         </nav>
       </div>
 

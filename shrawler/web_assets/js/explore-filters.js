@@ -94,6 +94,8 @@ export function createFilters({ root, state, defaults, runs, facets, commit }) {
   let panel = null;
   let activeFacet = FACETS[0];
   let search = '';
+  let activeFilterCount = 0;
+  let ratingFull = 80;
 
   const aiUsable = () => runs.jev.some((run) => JEV_USABLE.includes(run.status));
 
@@ -343,7 +345,7 @@ export function createFilters({ root, state, defaults, runs, facets, commit }) {
     pane.append(...(FACETS.includes(activeFacet) ? facetPane(activeFacet) : scorePane(activeFacet)));
     const foot = el('div', 'btn-row popover__foot');
     foot.append(
-      button('Reset filters', {
+      button('Clear all filters', {
         size: 'sm',
         onClick: () => {
           search = '';
@@ -372,7 +374,7 @@ export function createFilters({ root, state, defaults, runs, facets, commit }) {
   function chip(name, value, { exclude = false, onRemove, onFlip } = {}) {
     const node = el('span', `filter-chip${exclude ? ' filter-chip--exclude' : ''}`);
     if (onFlip) {
-      const flip = el('button', 'filter-chip__sign', icon(exclude ? 'minus' : 'plus'));
+      const flip = el('button', 'filter-chip__sign', icon('swap'));
       flip.type = 'button';
       const label = `${exclude ? 'Include' : 'Exclude'} ${name.toLowerCase()} ${value} instead`;
       flip.setAttribute('aria-label', label);
@@ -417,6 +419,7 @@ export function createFilters({ root, state, defaults, runs, facets, commit }) {
       if (state[key]) chips.push(chip(FIELD_LABELS[key], valueLabel(key, state[key]), { onRemove: () => commit({ [key]: '' }) }));
     }
     const count = chips.length;
+    activeFilterCount = count;
     if (count > 1) chips.push(button('Clear filters', { size: 'sm', variant: 'ghost', onClick: () => commit(resetPatch()) }));
     clear(root.chips);
     root.chips.append(...chips);
@@ -497,7 +500,15 @@ export function createFilters({ root, state, defaults, runs, facets, commit }) {
     }
     root.jev.disabled = !usable.length;
     const mix = composition();
-    root.note.textContent = mix.note;
+    if (!runs.ranking.length && !runs.jev.length) {
+      // Nothing to select yet, so point at the screen that can create a run.
+      const link = el('a', 'link', 'Run a scan on the Score screen');
+      link.href = '/score';
+      clear(root.note);
+      root.note.append('Overall unavailable · ', link);
+    } else {
+      root.note.textContent = mix.note;
+    }
     // The Combined column header must never claim a blend that is not active.
     if (root.combinedHeader) root.combinedHeader.title = `Overall priority 0–100 · ${mix.header}`;
   }
@@ -511,11 +522,12 @@ export function createFilters({ root, state, defaults, runs, facets, commit }) {
   function composition() {
     const rule = !!state.ranking_run;
     const ai = aiEnabled();
-    if (rule && ai) return { note: 'Overall blends both engines', header: 'rules and AI' };
-    if (rule) return { note: 'Overall uses the rule rating · no AI run selected', header: 'rules only' };
+    if (rule && ai) return { note: 'Overall blends the rule rating and the AI score', header: 'rules and AI' };
+    if (rule) return { note: `Overall scales the rule rating so ${ratingFull} = 100 · no AI run selected`, header: 'rules only' };
     if (ai) return { note: 'Overall uses the AI score · no rule rating', header: 'AI only' };
+    const anyRuns = runs.ranking.length > 0 || runs.jev.length > 0;
     return {
-      note: aiUsable() ? 'Overall unavailable · no engine selected' : 'Overall unavailable · no runs saved yet',
+      note: anyRuns ? 'Overall unavailable · no engine selected' : 'Overall unavailable · no runs saved yet',
       header: '—',
     };
   }
@@ -543,5 +555,5 @@ export function createFilters({ root, state, defaults, runs, facets, commit }) {
   // to "none" before it ever learns there are runs to pick from.
   renderChips();
 
-  return { renderRuns, renderChips, columnAvailable, aiEnabled, apply, close: shut, write };
+  return { renderRuns, renderChips, columnAvailable, aiEnabled, compositionHeader: () => composition().header, apply, close: shut, write, activeCount: () => activeFilterCount, clear: () => commit(resetPatch()), setRatingFull: (value) => { ratingFull = Number(value) || 80; } };
 }

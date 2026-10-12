@@ -1,31 +1,6 @@
 /* Explore screen: search and filter bar, engine selection, the data grid, the
  * row detail panel, the tree, and the selection/percentage surfaces. */
 
-.explore-head {
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: var(--space-5);
-  margin-bottom: var(--space-4);
-}
-
-.explore-head h1 {
-  font-size: 22px;
-  font-weight: 600;
-  letter-spacing: -0.025em;
-}
-
-.explore-head p {
-  max-width: 68ch;
-  margin-top: 5px;
-  color: var(--text-dim);
-}
-
-.explore-head strong {
-  color: var(--text);
-  font-weight: 500;
-}
-
 .local-badge {
   display: inline-flex;
   align-items: center;
@@ -589,14 +564,35 @@ body:has(.selection-bar:not([hidden])) .toast-region {
 
 /* Two-row header: a "Scores" group sits over the three engine columns. Both
  * rows stick, so the labels stay put while the body scrolls under them. */
+/* The table fits on desktop, so the shell must not become a scroll container:
+ * that is what stops the sticky header from sticking. Horizontal scroll is
+ * only enabled below the table's min-width. */
+.explore-grid-shell {
+  overflow: visible;
+}
+
+@media (max-width: 860px) {
+  .explore-grid-shell {
+    overflow-x: auto;
+    overflow-y: clip;
+  }
+
+  /* Keep the panel readable while the wide table scrolls under it. */
+  .explore-grid .detail-panel {
+    position: sticky;
+    left: 0;
+    max-width: calc(100vw - var(--space-4));
+  }
+}
+
 .explore-grid thead tr:first-child th {
   height: 24px;
-  top: 0;
+  top: calc(var(--header-height) + var(--search-height, 0px));
 }
 
 .explore-grid thead tr:nth-child(2) th {
   height: 30px;
-  top: 24px;
+  top: calc(var(--header-height) + var(--search-height, 0px) + 24px);
 }
 
 .explore-grid thead .scores-group {
@@ -609,18 +605,27 @@ body:has(.selection-bar:not([hidden])) .toast-region {
 
 /* A sort header with no run behind it is not actionable; dim it rather than
  * accepting a click that would silently do nothing. */
-.explore-grid .sort-btn:disabled {
+.explore-grid .sort-btn:disabled,
+.explore-grid .sort-btn[aria-disabled="true"] {
   opacity: 0.4;
   cursor: default;
 }
 
-.explore-grid .sort-btn:disabled:hover {
+.explore-grid .sort-btn:disabled:hover,
+.explore-grid .sort-btn[aria-disabled="true"]:hover {
   color: inherit;
 }
 
 .explore-grid th:first-child,
 .explore-grid .check-cell {
   padding-inline: 0 4px;
+  text-align: center;
+}
+
+/* The no-results cell spans every column, so the message must not become a
+ * grid item itself; the inner .empty div owns the layout instead. */
+.explore-grid td.empty-cell {
+  padding: 0;
   text-align: center;
 }
 
@@ -799,7 +804,8 @@ body:has(.selection-bar:not([hidden])) .toast-region {
 }
 
 /* Keep the Nemesis badge on the outer edge, away from the download button. */
-.actions-inner .btn--primary > .row-badge {
+.actions-inner .btn--primary > .row-badge,
+.row-action > .row-badge {
   left: -5px;
   right: auto;
 }
@@ -818,6 +824,11 @@ body:has(.selection-bar:not([hidden])) .toast-region {
   border-color: hsl(2 55% 46%);
   color: hsl(2 66% 76%);
   background: var(--danger-wash);
+}
+
+.row-badge--downloaded {
+  border-color: hsl(212 45% 44%);
+  color: hsl(212 60% 78%);
 }
 
 /* A file already sent keeps the action but drops the solid weight, so the
@@ -893,6 +904,10 @@ body:has(.selection-bar:not([hidden])) .toast-region {
   background: var(--surface-2);
 }
 
+.detail-row {
+  scroll-margin-top: calc(var(--header-height) + var(--search-height, 0px) + var(--row-height));
+}
+
 .detail-panel {
   display: grid;
   grid-template-columns: minmax(0, 1.4fr) minmax(0, 1fr);
@@ -900,6 +915,7 @@ body:has(.selection-bar:not([hidden])) .toast-region {
     "head       head"
     "primary    primary"
     "assess     collection"
+    "explain    explain"
     "technical  technical";
   gap: var(--space-4) var(--space-5);
   padding: var(--space-4);
@@ -1192,6 +1208,35 @@ body:has(.selection-bar:not([hidden])) .toast-region {
   padding-top: var(--space-2);
 }
 
+.detail-explain {
+  grid-area: explain;
+  padding-top: var(--space-3);
+  border-top: 1px solid var(--line);
+}
+
+.explain-body {
+  display: grid;
+  gap: var(--space-2);
+  padding-top: var(--space-2);
+}
+
+.explain-signal {
+  display: grid;
+  gap: 2px;
+  padding: var(--space-2);
+  border-left: 2px solid var(--accent-line);
+  border-radius: var(--radius-sm);
+  background: var(--surface-3);
+}
+
+.explain-signal strong {
+  font-size: 12px;
+}
+
+.explain-signal .field__hint {
+  margin: 0;
+}
+
 .pagination {
   display: flex;
   align-items: center;
@@ -1205,6 +1250,13 @@ body:has(.selection-bar:not([hidden])) .toast-region {
   color: var(--text-mute);
   font: 11px var(--font-data);
   text-align: center;
+}
+
+.pagination .select {
+  width: auto;
+  min-height: 26px;
+  padding: 3px 26px 3px 8px;
+  font-size: 11px;
 }
 
 /* -- Tree ------------------------------------------------------------------ */
@@ -1587,6 +1639,7 @@ body:has(.selection-bar:not([hidden])) .toast-region {
       "primary"
       "assess"
       "collection"
+      "explain"
       "technical";
   }
 
@@ -1613,11 +1666,6 @@ body:has(.selection-bar:not([hidden])) .toast-region {
 }
 
 @media (max-width: 640px) {
-  .explore-head {
-    flex-direction: column;
-    gap: var(--space-2);
-  }
-
   .search-row {
     flex-wrap: wrap;
   }

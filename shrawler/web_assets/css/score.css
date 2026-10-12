@@ -305,6 +305,12 @@ html {
   min-width: 0;
 }
 
+/* A lone action in the grid (the Refresh button) should size to its label
+ * instead of stretching across the whole cell. */
+.field-grid > .btn {
+  justify-self: start;
+}
+
 .field-grid > .field,
 .field,
 .select,

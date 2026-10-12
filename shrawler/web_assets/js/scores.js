@@ -45,17 +45,17 @@ export function combinedChip(item) {
  * noticeable without borrowing the severity ramp. A missing value renders as the
  * same-size dashed pill so the column never jumps, with a tooltip that says why.
  */
-export function engineChip(kind, score, label) {
+export function engineChip(kind, score, label, ratingFull = 80) {
   const chip = el('span', score === null ? `score score--${kind} score--empty` : `score score--${kind}`);
-  chip.dataset.strong = String((score ?? 0) >= 76);
-  chip.textContent = score === null ? '-' : String(score);
+  chip.dataset.strong = String((score ?? 0) >= ratingFull);
+  chip.textContent = score === null ? '—' : String(score);
   chip.title =
     score === null
       ? kind === 'rule'
         ? 'Not rated · run a ranking on the Score screen'
         : 'Not assessed'
       : kind === 'rule'
-        ? `${label} ${score} · matched static filename, path, and metadata rules · 80+ fully alarmed`
+        ? `${label} ${score} · matched static filename, path, and metadata rules · ${ratingFull}+ fully alarmed`
         : `${label} ${score}/4 · Jev-style decision model`;
   return chip;
 }

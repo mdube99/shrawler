@@ -7,6 +7,7 @@
 // and there is no second source of truth to desync from what is on screen.
 
 import {
+  button,
   clear,
   delegate,
   el,
@@ -21,6 +22,7 @@ import {
   readParams,
   renderShellStatus,
   serverParams,
+  setBusy,
   severity,
   shellError,
   writeParams,
@@ -77,6 +79,18 @@ const sortLabel = (key) => SORTS[key] || 'Path';
 const $ = (id) => document.getElementById(id);
 const shell = mountShell('/');
 
+/** Respect the OS reduced-motion setting for programmatic scrolling. */
+const scrollBehavior = () => (matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth');
+/** Re-focus after a table rebuild without scrolling the row again. */
+function focusLater(selector) {
+  requestAnimationFrame(() => document.querySelector(selector)?.focus({ preventScroll: true }));
+}
+
+/** Total pages in the last page payload, so pagination can state its end. */
+function totalPages() {
+  return page.per_page ? Math.max(1, Math.ceil(page.total / page.per_page)) : 1;
+}
+
 // The URL distinguishes three states for a run: absent (pick the newest),
 // "none" (explicitly no run, so a pasted link keeps showing no ratings), or an
 // id. AUTO is a read-time placeholder only.
@@ -127,6 +141,7 @@ function selectionBox(item) {
   const box = el('input', 'file-checkbox');
   box.type = 'checkbox';
   box.checked = selection.has(item.id);
+  box.dataset.fileId = item.id;
   box.setAttribute('aria-label', `Select ${item.file_name}`);
   // The modifier state has to be read from the click: the change event that
   // follows carries no keyboard or shift state.
@@ -154,6 +169,7 @@ function toggle(item, selected, range) {
   } else if (selected) selection.set(item.id, item);
   else selection.delete(item.id);
   render();
+  focusLater(`.file-checkbox[data-file-id="${CSS.escape(item.id)}"]`);
 }
 
 function rowFor(item, index) {
@@ -174,7 +190,7 @@ function rowFor(item, index) {
   const combinedCell = el('td', 'score-cell');
   combinedCell.append(combinedChip(item));
   const ruleCell = el('td', 'score-cell');
-  ruleCell.append(engineChip('rule', ruleScore(item), 'Rule rating'));
+  ruleCell.append(engineChip('rule', ruleScore(item), 'Rule rating', Number(status.rating_full) || 80));
   const aiCell = el('td', 'score-cell');
   aiCell.append(engineChip('ai', aiScore(item), 'AI rating'));
 
@@ -203,7 +219,7 @@ function rowFor(item, index) {
   locationCell.append(el('span', 'location', `${item.host || 'Unknown host'} › ${item.share || 'Unknown share'}`));
 
   const sizeCell = el('td', 'numeric');
-  sizeCell.append(el('span', 'size-value', item.readable_size || fmt.bytes(item.size_bytes)));
+  sizeCell.append(el('span', 'size-value', fmt.bytes(item.size_bytes)));
 
   const dateCell = el('td', 'numeric');
   const time = el('time', 'date-value', fmt.relative(item.mtime_utc));
@@ -238,9 +254,24 @@ function renderTable() {
   clear(body);
   if (!page.items.length) {
     const row = el('tr');
-    const cell = el('td', 'empty');
+    const cell = el('td', 'empty-cell');
     cell.colSpan = 10;
-    fill(cell, el('strong', undefined, 'No files match these filters.'), el('span', undefined, 'Try a broader search or clear an active filter.'));
+    const message = el('div', 'empty');
+    if (Number(status.file_count) === 0) {
+      message.append(
+        el('strong', undefined, 'No files indexed yet'),
+        el('span', undefined, 'Run a scan to populate the inventory.'),
+      );
+    } else {
+      message.append(
+        el('strong', undefined, 'No files match these filters.'),
+        el('span', undefined, 'Try a broader search or clear an active filter.'),
+      );
+      if (filters.activeCount() > 0) {
+        message.append(button('Clear filters', { size: 'sm', onClick: () => filters.clear() }));
+      }
+    }
+    fill(cell, message);
     row.append(cell);
     body.append(row);
     renderSelectionBar();
@@ -275,6 +306,8 @@ function renderSelectionBar() {
   $('download-selection').title = offlineTitle;
   $('queue-selection').title = nemesisTitle || offlineTitle;
   const onPage = page.items.filter((item) => selection.has(item.id)).length;
+  const offPage = files.length - onPage;
+  $('selection-count').textContent = offPage > 0 ? `${fmt.count(files.length)} selected · ${fmt.count(offPage)} not in view` : `${fmt.count(files.length)} selected`;
   $('select-page').checked = !!page.items.length && onPage === page.items.length;
   $('select-page').indeterminate = onPage > 0 && onPage < page.items.length;
 }
@@ -284,7 +317,12 @@ function renderSortHeaders() {
     const cell = header.closest('th');
     // A column with no run behind it cannot be sorted by; disabling the button
     // is clearer than accepting a click that does nothing.
-    header.disabled = !filters.columnAvailable(header.dataset.sort);
+    const available = filters.columnAvailable(header.dataset.sort);
+    header.toggleAttribute('aria-disabled', !available);
+    if (header.dataset.sort === 'combined') header.title = `Overall priority 0–100 · ${filters.compositionHeader()}`;
+    if (header.dataset.sort === 'priority') {
+      header.title = `Rule rating · unbounded total · ${Number(status.rating_full) || 80}+ is fully alarmed`;
+    }
     if (header.dataset.sort === state.sort) cell.setAttribute('aria-sort', state.direction === 'desc' ? 'descending' : 'ascending');
     else cell.removeAttribute('aria-sort');
   }
@@ -304,7 +342,7 @@ function renderSkeleton() {
   }
 }
 
-function setBusy(value) {
+function setWorking(value) {
   busy = value;
   $('search-spinner').hidden = !value;
   $('search-icon').hidden = value;
@@ -316,7 +354,7 @@ async function loadTable() {
   if (tableController) tableController.abort();
   tableController = new AbortController();
   const signal = tableController.signal;
-  setBusy(true);
+  setWorking(true);
   errorLine($('error-banner'), '');
   const params = query();
   params.set('page', state.page || '1');
@@ -346,15 +384,20 @@ async function loadTable() {
   } finally {
     if (tableController && tableController.signal === signal) {
       tableController = null;
-      setBusy(false);
+      setWorking(false);
     }
   }
 }
 
 function renderPagination() {
+  const pages = totalPages();
+  $('first').disabled = Number(state.page) <= 1;
   $('previous').disabled = Number(state.page) <= 1;
   $('next').disabled = !page.has_next;
-  $('page').textContent = `Page ${state.page}`;
+  $('last').disabled = Number(state.page) >= pages;
+  $('page').textContent = `Page ${state.page} of ${fmt.count(pages)}`;
+  const size = String(page.per_page || state.per_page || 100);
+  if ([...$('page-size').options].some((option) => option.value === size)) $('page-size').value = size;
 }
 
 /* -- Actions --------------------------------------------------------------- */
@@ -384,15 +427,16 @@ function actionContext() {
         render();
       }
     },
-    onSend: (items) => send(items),
+    onSend: (items, trigger) => send(items, trigger),
     onClose: () => toggleExpanded(null),
     onFilter: (key, value, mode) => filters.apply(key, value, mode),
   };
 }
 
-async function send(items) {
+async function send(items, trigger) {
   busy = true;
   renderSelectionBar();
+  if (trigger) setBusy(trigger, true, 'Sending…');
   try {
     const summary = await sendToNemesis(items, {
       status,
@@ -406,6 +450,7 @@ async function send(items) {
     toast(error.message, 'error');
   } finally {
     busy = false;
+    if (trigger) setBusy(trigger, false);
     render();
   }
 }
@@ -414,17 +459,30 @@ function toggleExpanded(id) {
   const wasOpen = expandedId;
   expandedId = expandedId === id ? null : id;
   renderTable();
-  if (expandedId) document.getElementById(`details-${expandedId}`)?.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
-  else if (wasOpen) document.querySelector(`.file-trigger[data-file-id="${CSS.escape(wasOpen)}"]`)?.focus({ preventScroll: true });
+  if (expandedId) {
+    // Keep keyboard users in the panel they just opened rather than dropping
+    // focus back to the page body.
+    focusLater(`#details-${CSS.escape(expandedId)} .detail-panel`);
+    document.getElementById(`details-${expandedId}`)?.scrollIntoView({ block: 'nearest', behavior: scrollBehavior() });
+  } else if (wasOpen) {
+    focusLater(`.file-trigger[data-file-id="${CSS.escape(wasOpen)}"]`);
+  }
 }
 
 /** Percentage actions. The preflight lives in actions.js with the rest of the flow. */
 function openPercentageDialog() {
   const run = selectedRun();
+  const candidate = ['combined', 'priority', 'jev', 'modified', 'size'].find((key) => filters.columnAvailable(key));
+  // The action turns a percentage into the files in a sorted order. When the
+  // table's current sort has no engine behind it, fall back to one that does
+  // rather than resolving a File Z→A slice and calling it a ranking.
+  const sortKey = ['combined', 'priority', 'jev', 'size', 'modified'].includes(state.sort) && filters.columnAvailable(state.sort)
+    ? state.sort
+    : candidate || 'modified';
   percentageDialog({
     params: { ...state, ranking_run: run },
-    sortKey: state.sort,
-    sortName: sortLabel(state.sort),
+    sortKey,
+    sortName: sortLabel(sortKey),
     status,
     onDone: render,
   });
@@ -473,6 +531,13 @@ function render() {
 }
 
 function reload() {
+  // A sort whose engine run is gone would leave the summary claiming a ranking
+  // the table no longer has; fall back to Modified and rewrite the URL.
+  if (!filters.columnAvailable(state.sort)) {
+    state.sort = 'modified';
+    state.direction = 'desc';
+    writeParams({ ...state, ranking_run: state.ranking_run || NONE }, DEFAULTS, { replace: true });
+  }
   filters.renderRuns();
   filters.renderChips();
   renderSortHeaders();
@@ -494,7 +559,7 @@ delegate($('rows'), 'click', '.file-row', (event, row) => {
 
 for (const header of document.querySelectorAll('.sort-btn')) {
   on(header, 'click', () => {
-    if (header.disabled) {
+    if (header.getAttribute('aria-disabled') === 'true') {
       toast('Select the matching engine run first', 'error');
       return;
     }
@@ -543,6 +608,10 @@ on($('download-selection'), 'click', async () => {
     $('selection-size').textContent = message;
   });
   busy = false;
+  if (stats.cancelled) {
+    render();
+    return;
+  }
   toast(`${fmt.count(stats.total - stats.failed)} downloads started${stats.failed ? ` · ${stats.failed} failed` : ''}`, stats.failed ? 'error' : 'ok');
   render();
 });
@@ -550,8 +619,11 @@ on($('download-selection'), 'click', async () => {
 on($('queue-selection'), 'click', () => send([...selection.values()]));
 on($('select-percent'), 'click', openPercentageDialog);
 
+on($('first'), 'click', () => commit({ page: '1' }, { keepPage: true, push: true }));
 on($('previous'), 'click', () => commit({ page: String(Math.max(1, Number(state.page) - 1)) }, { keepPage: true, push: true }));
 on($('next'), 'click', () => commit({ page: String(Number(state.page) + 1) }, { keepPage: true, push: true }));
+on($('last'), 'click', () => commit({ page: String(totalPages()) }, { keepPage: true, push: true }));
+on($('page-size'), 'change', () => commit({ per_page: $('page-size').value, page: '1' }));
 
 on($('expand-tree'), 'click', () => tree.expandAll());
 on($('collapse-tree'), 'click', () => tree.collapseAll());
@@ -597,10 +669,18 @@ async function pollStatus() {
 async function boot() {
   status = await json('/api/status');
   lastRevision = Number.isInteger(status.revision) ? status.revision : null;
+  filters.setRatingFull(status.rating_full);
   renderShellStatus(shell, status);
   fill($('search-icon'), icon('search'));
   fill($('clear-query'), icon('close'));
-  fill($('mode-badge'), el('span', undefined, status.retrieval_enabled ? 'Live retrieval from SMB' : 'Offline metadata only'));
+  // The table header sticks below the sticky search bar, whose height changes
+  // as the toolbar wraps; publish it so th top offsets stay correct.
+  const searchBar = document.querySelector('.search-bar');
+  if (searchBar) {
+    const publishSearchHeight = () => document.documentElement.style.setProperty('--search-height', `${searchBar.offsetHeight}px`);
+    publishSearchHeight();
+    if ('ResizeObserver' in window) new ResizeObserver(publishSearchHeight).observe(searchBar);
+  }
   runs.ranking = status.ranking_runs || [];
   runs.jev = status.jev_runs || [];
   $('query').value = state.q;

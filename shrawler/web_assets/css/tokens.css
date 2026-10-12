@@ -80,7 +80,7 @@
   --text: hsl(206 26% 93%);
   --text-dim: hsl(210 12% 74%);
   --text-mute: hsl(211 11% 62%);
-  --text-faint: hsl(212 10% 50%);
+  --text-faint: hsl(212 10% 54%);
 
   /* Engine identity. Fixed everywhere; never reused for decoration. */
   --rule: hsl(255 74% 74%);

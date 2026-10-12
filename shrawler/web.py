@@ -48,6 +48,7 @@ from .triage.jev.storage import assessment_path
 from .triage.review import ReviewStore
 from .triage.scoring import (
     DEFAULT_SCORING,
+    RATING_FULL,
     ScoringConfig,
     combine_priority,
     combined_sql,
@@ -524,6 +525,7 @@ class FileIndex:
             "host_count": len(self.facets()["hosts"]),
             "revision": 0,
             "scan_active": False,
+            "rating_full": RATING_FULL,
         }
 
     def _matching(
@@ -1418,6 +1420,7 @@ class DatabaseIndex:
             "host_count": host_count,
             "revision": revision_value,
             "scan_active": bool(active[0]),
+            "rating_full": self.scoring.rating_full,
             "ranking_runs": self.ranking_catalog().get("runs", []),
             "jev_runs": jev_catalog(self.path),
         }

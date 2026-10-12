@@ -61,6 +61,11 @@ export function createRuleTab(root) {
     nodes.saveButton = button('Run and save ranking', { variant: 'primary', onClick: () => start(false) });
     const controls = el('div', 'field-grid');
     fill(controls, field('Source scan', nodes.scan), el('div', 'field', el('span', 'field__label', 'Starter rules'), nodes.builtins));
+    // Keep the small TOML actions on the same row as the run actions; a
+    // separate row made them look like a different level of decision.
+    const runRow = el('div', 'btn-row run-row');
+    importExport(editor, runRow);
+    runRow.append(nodes.previewButton, nodes.saveButton, nodes.runStatus.node);
 
     const { node, body } = panel(
       'Run a rule ranking',
@@ -71,14 +76,13 @@ export function createRuleTab(root) {
         ruleBuilder(editor),
         el('label', 'field__label', 'Custom rules (TOML)'),
         editor,
-        importExport(editor),
-        el('div', 'btn-row run-row', nodes.previewButton, nodes.saveButton, nodes.runStatus.node),
+        runRow,
       ],
     );
     fill(root, node);
   }
 
-  function importExport(editor) {
+  function importExport(editor, target) {
     const picker = el('input');
     picker.type = 'file';
     picker.accept = '.toml,text/plain';
@@ -92,8 +96,7 @@ export function createRuleTab(root) {
       }
       editor.value = await file.text();
     });
-    const wrap = el('div', 'btn-row');
-    wrap.append(
+    target.append(
       button('Export TOML', {
         size: 'sm',
         onClick: () => {
@@ -108,7 +111,6 @@ export function createRuleTab(root) {
       button('Import TOML', { size: 'sm', onClick: () => picker.click() }),
       picker,
     );
-    return wrap;
   }
 
   /**

@@ -32,7 +32,7 @@ const EXECUTABLE = new Set('.zip .7z .rar .tar .gz .exe .dll .msi .ps1 .bat .cmd
 export const PERMISSIONS = ['read', 'write', 'add_file', 'add_subdirectory', 'write_dac', 'write_owner'];
 
 export function typeLabel(extension) {
-  return (extension || 'file').replace(/^\./, '').slice(0, 5).toUpperCase() || 'FILE';
+  return (extension || 'file').replace(/^\./, '').slice(0, 6).toUpperCase() || 'FILE';
 }
 
 export function typeTag(extension) {
@@ -269,12 +269,57 @@ function nemesisValue(item) {
 }
 
 /**
+ * "Why this score": the ranking run's category scores and credited signals,
+ * loaded only when a row is expanded. The stored result stays the source of
+ * truth, so this is the same explanation the Score screen shows.
+ */
+function explainSection(item) {
+  const details = el('details', 'disclosure detail-explain', el('summary', undefined, 'Why this score'));
+  const body = el('div', 'explain-body');
+  details.append(body);
+  if (!item.ranking_run_id) {
+    body.append(el('p', 'field__hint', 'No ranking run selected for this file.'));
+    return details;
+  }
+  body.append(el('p', 'field__hint', 'Loading the ranking explanation…'));
+  const params = new URLSearchParams({ file_id: item.id, run_id: item.ranking_run_id });
+  json(`/api/triage/explain?${params}`)
+    .then((detail) => {
+      const parts = [el('p', 'field__hint', `Overall priority ${detail.priority}. Metadata evidence only.`)];
+      const categories = Object.entries(detail.category_scores || {});
+      if (categories.length) parts.push(kvList(categories.map(([name, value]) => kv(name, String(value)))));
+      const signals = detail.signals || [];
+      if (!signals.length) {
+        parts.push(el('p', 'field__hint', 'No ranking rule matched this file.'));
+      } else {
+        for (const signal of signals.slice(0, 6)) {
+          parts.push(
+            el(
+              'div',
+              'explain-signal',
+              el('strong', undefined, `+${signal.credited_points} · ${signal.description}`),
+              el('span', 'field__hint', `${signal.category} / ${signal.signal_group} · ${signal.rule_id}${signal.capped_by_rule ? ` · capped by ${signal.capped_by_rule}` : ''}`),
+            ),
+          );
+        }
+        if (signals.length > 6) parts.push(el('p', 'field__hint', `+${signals.length - 6} more signals in the Score screen.`));
+      }
+      fill(body, ...parts);
+    })
+    .catch((error) => {
+      fill(body, el('p', 'field__hint', error.message));
+    });
+  return details;
+}
+
+/**
  * The row-expand detail panel. Shared by the table and the tree so both views
  * describe a file identically.
  */
 export function detailPanel(item, ctx) {
   const { status, describe, onDownload, onSend, onClose, onFilter } = ctx;
   const panel = el('div', 'detail-panel');
+  panel.tabIndex = -1;
   panel.setAttribute('role', 'region');
   panel.setAttribute('aria-label', `Details for ${item.file_name}`);
   panel.dataset.severity = severity(combinedScore(item)).band;
@@ -321,7 +366,7 @@ export function detailPanel(item, ctx) {
     const sent = item.nemesis_status === 'uploaded';
     const nemesisButton = button(sent ? 'Send again' : 'Send to Nemesis', {
       name: 'upload',
-      onClick: () => onSend([item]),
+      onClick: () => onSend([item], nemesisButton),
     });
     if (sent) nemesisButton.title = 'Upload another copy to Nemesis';
     if (status.nemesis_enabled === false) {
@@ -372,7 +417,7 @@ export function detailPanel(item, ctx) {
     ]),
   );
 
-  fill(panel, head, primary, assessment, collection, technical);
+  fill(panel, head, primary, assessment, explainSection(item), collection, technical);
   return panel;
 }
 
@@ -463,10 +508,11 @@ export function rowActions(item, ctx) {
 
   const queue = button('Nemesis', {
     name: 'upload',
-    variant: 'primary',
+    // Offline there is no retrieval, so the solid call-to-action is a lie.
+    variant: offline ? '' : 'primary',
     size: 'sm',
     onClick: () => {
-      if (!queue.disabled) onSend([item]);
+      if (!queue.disabled) onSend([item], queue);
     },
   });
   queue.setAttribute('aria-label', `${repeat ? 'Send again' : 'Send'} ${item.file_name} to Nemesis`);
@@ -506,7 +552,9 @@ export function rowActions(item, ctx) {
     download.title = 'Remote retrieval is disabled in offline mode';
   }
   if (downloaded) {
+    const count = Number(item.download_count) || 1;
     download.dataset.state = 'downloaded';
+    download.append(el('span', 'row-badge row-badge--downloaded', count > 1 ? String(count) : '✓'));
     download.setAttribute('aria-label', `Download ${item.file_name} again (${downloaded.label.toLowerCase()})`);
     download.title = `${downloaded.title} · download again`;
   }
@@ -541,19 +589,22 @@ export async function resolveTarget({ params, scope, percent, sortKey, signal })
   query.set('sort', sortKey);
   query.set('direction', 'desc');
   query.set('include_total', '1');
-  query.set('per_page', String(PAGE));
   query.set('page', '1');
   const first = await json(`/api/files?${query}`, { signal });
   const total = Number(first.total) || 0;
+  const perPage = Number(first.per_page) || first.items.length || PAGE;
   const wanted = Math.min(total, Math.ceil((total * percent) / 100));
   const rows = first.items.slice(0, wanted);
   let page = 1;
-  while (rows.length < wanted && page * PAGE < wanted) {
+  // Follow the server's page size, not the client's request: the API caps
+  // `per_page`, so asking for more than the cap would stop the walk early.
+  while (rows.length < wanted) {
     page += 1;
     query.set('page', String(page));
     const next = await json(`/api/files?${query}`, { signal });
     if (!next.items.length) break;
     rows.push(...next.items);
+    if (next.items.length < perPage && rows.length < wanted) break;
   }
   return {
     total,
@@ -609,6 +660,14 @@ export function preflightLines(target, plan) {
 /* -- Committing ------------------------------------------------------------ */
 
 export async function downloadRows(rows, onProgress) {
+  if (rows.length > 5) {
+    const accepted = await confirm({
+      title: `Download ${fmt.count(rows.length)} files?`,
+      message: 'Your browser will start one download per file.',
+      confirmLabel: 'Download all',
+    });
+    if (!accepted) return { total: rows.length, failed: 0, cancelled: true };
+  }
   let failed = 0;
   for (let index = 0; index < rows.length; index += 1) {
     const row = rows[index];
@@ -763,8 +822,9 @@ export async function downloadOne(item) {
  * can show the preflight before anything commits. The dialog never performs
  * the action itself: the destination is always an explicit second click.
  */
-export function percentageControl({ onApply }) {
+export function percentageControl({ onApply, sortName = 'Overall' }) {
   const node = el('div', 'percentage-control');
+  let selected = 25;
 
   const radios = el('div', 'btn-row');
   const filtered = checkbox('Filtered set', true);
@@ -775,7 +835,7 @@ export function percentageControl({ onApply }) {
     node.firstChild.value = index === 0 ? 'filtered' : 'scan';
   }
   radios.append(filtered, whole);
-  node.append(field('Act on', radios, 'ranked by Overall'));
+  node.append(field('Act on', radios, `top N% by ${sortName}`));
 
   const presets = el('div', 'btn-row');
   const custom = el('input', 'input');
@@ -786,25 +846,26 @@ export function percentageControl({ onApply }) {
   custom.setAttribute('aria-label', 'Custom percentage');
   custom.classList.add('input--num');
   on(custom, 'input', () => {
+    selected = null;
     for (const other of presets.children) other.removeAttribute('aria-pressed');
   });
   for (const value of [10, 25, 50, 100]) {
     const preset = button(`${value}%`, {
       size: 'sm',
-      variant: value === 25 ? 'primary' : '',
       onClick: () => {
         for (const other of presets.children) other.removeAttribute('aria-pressed');
         preset.setAttribute('aria-pressed', 'true');
         custom.value = '';
+        selected = value;
       },
     });
+    if (value === 25) preset.setAttribute('aria-pressed', 'true');
     presets.append(preset);
   }
-  const apply = button('Preflight', { name: 'chevron', size: 'sm', variant: 'primary' });
-  apply.classList.add('icon-chevron-left');
+  const apply = button('Preflight', { size: 'sm', variant: 'primary' });
   on(apply, 'click', () => {
     const raw = custom.value.trim();
-    const percent = raw === '' ? 25 : Number(raw);
+    const percent = raw === '' ? selected ?? 25 : Number(raw);
     if (!Number.isFinite(percent) || percent < 1 || percent > 100) {
       toast('Percentage must be between 1 and 100', 'error');
       return;
@@ -829,8 +890,8 @@ export function percentageDialog({ params, sortKey, sortName, status, onDone }) 
     dialogShell({
       title: 'Act on a percentage',
       subtitle: 'Percentages resolve to files and bytes before anything is committed.',
-      body: [percentageControl({ onApply: resolve }), report],
-      footer: el('span', 'field__hint', `Ranked by ${sortName} unless another sort is active.`),
+      body: [percentageControl({ onApply: resolve, sortName }), report],
+      footer: el('span', 'field__hint', `Resolved by ${sortName}.`),
       onClose: () => handle.close(),
     }).node,
   );
@@ -857,6 +918,7 @@ export function percentageDialog({ params, sortKey, sortName, status, onDone }) 
           const stats = await downloadRows(target.rows, (message) => {
             progress.textContent = message;
           });
+          if (stats.cancelled) return;
           toast(
             `${fmt.count(stats.total - stats.failed)} downloads started${stats.failed ? ` · ${stats.failed} failed` : ''}`,
             stats.failed ? 'error' : 'ok',

@@ -86,6 +86,7 @@ const PATHS = {
   clock: ['M12 4a8 8 0 1 0 0 16 8 8 0 0 0 0-16z', 'M12 8v4l3 2'],
   plus: ['M12 5v14M5 12h14'],
   minus: ['M5 12h14'],
+  swap: ['M7 7h10l-3-3m3 3-3 3', 'M17 17H7l3 3m-3-3 3-3'],
 };
 
 export function icon(name) {
@@ -418,7 +419,8 @@ export function mountShell(current) {
 
 /** Render one line of live inventory state into the shared status region. */
 export function renderShellStatus(shell, status) {
-  shell.text.textContent = `${fmt.count(status.file_count)} files · ${fmt.count(status.host_count)} hosts`;
+  const mode = status.retrieval_enabled === undefined ? '' : ` · ${status.retrieval_enabled ? 'Live' : 'Offline'}`;
+  shell.text.textContent = `${fmt.count(status.file_count)} files · ${fmt.count(status.host_count)} ${Number(status.host_count) === 1 ? 'host' : 'hosts'}${mode}`;
   shell.status.dataset.tone = 'ready';
   const optimization = status.index_optimization || {};
   const busy = !['idle', 'completed'].includes(optimization.status);
