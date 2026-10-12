@@ -1,9 +1,9 @@
 // Collection queue, file families, and review decisions.
 //
-// Shared by both engines and by the Explore screen: every collection in the
-// application is a saved manifest, so caps, retry, and per-file outcomes
-// behave identically no matter where the selection was made. Single analyst,
-// so no attribution anywhere.
+// Holds the rule tab's candidate selection and the optional staged-manifest
+// panel. Quick sends to Nemesis bypass both: they upload directly and never
+// create a manifest. The selection is shared so the panel can stage exactly
+// what the rule tab checked. Single analyst, so no attribution anywhere.
 
 import { button, clear, el, field, fill, fmt, json, number, on, option, post, select } from './core.js';
 import { panel, toast } from './overlay.js';
@@ -14,7 +14,7 @@ const FAMILY_PAGE = 100;
 export function createCollection(root) {
   const ctx = { status: {}, fail() {}, clearError() {} };
   const nodes = {};
-  const selected = new Set();
+  const selected = new Map();
   const listeners = [];
   let manifests = [];
   let scans = [];
@@ -63,7 +63,7 @@ export function createCollection(root) {
       field('Total limit (bytes)', nodes.totalLimit),
     );
     const actions = el('div', 'btn-row');
-    const saveSelected = button('Save selected candidates', { onClick: () => create([...selected]) });
+    const saveSelected = button('Save selected candidates', { onClick: () => create([...selected.keys()]) });
     const addAll = button('Add all matching', { onClick: () => create() });
     const addEvidence = button('Add all with supporting evidence', {
       title: 'Candidates with a positive ranking score; excludes zero-score extension-only matches',
@@ -107,8 +107,8 @@ export function createCollection(root) {
       nodes.items,
     );
     const { node } = panel(
-      'Nemesis queue',
-      'One story: byte caps, a saved manifest, retry, and a per-file outcome.',
+      'Staged Nemesis manifests',
+      'Optional bulk path: freeze a bounded selection as a manifest, then collect and retry it with caps. Quick sends upload directly and skip this.',
       [controls, actions, nodes.status, el('div', 'grid-shell score-grid-shell', table)],
     );
     fill(root, node);
@@ -131,7 +131,7 @@ export function createCollection(root) {
       ? `${fmt.count(manifest.expected_files)} planned files · ${fmt.bytes(manifest.expected_bytes)} expected · ${fmt.bytes(manifest.consumed_bytes)} received · limits ${fmt.bytes(manifest.max_file_size)} per file and ${fmt.bytes(manifest.max_total_bytes)} total. Previously collected files are skipped; status does not establish freshness.${
           ctx.status.retrieval_enabled ? '' : ' Offline session: retrieval disabled.'
         }`
-      : 'No saved manifests yet. Select candidates on the Rule ranking tab, or use a percentage action on Explore.';
+      : 'No saved manifests yet. Select candidates on the Rule ranking tab and choose Save selected candidates to stage one.';
     if (!manifest) return;
     for (const item of manifest.items) nodes.items.append(manifestRow(item));
     if (!manifest.items.length) {
@@ -177,7 +177,7 @@ export function createCollection(root) {
       });
       ctx.clearError();
       await refresh(manifest.id);
-      toast(`Saved ${manifest.name} · ${fmt.count(manifest.expected_files)} files to send to Nemesis`);
+      toast(`Saved ${manifest.name} · ${fmt.count(manifest.expected_files)} files staged for later collection`);
       return manifest;
     } catch (error) {
       ctx.fail(error.message);
@@ -354,16 +354,18 @@ export function createCollection(root) {
     has(fileId) {
       return selected.has(fileId);
     },
-    toggle(fileId, checked) {
-      if (checked) selected.add(fileId);
+    /** Remember the whole row, so a reader can label its progress and errors. */
+    toggle(fileId, checked, item) {
+      if (checked) selected.set(fileId, item || { file_id: fileId });
       else selected.delete(fileId);
       notify();
     },
+    /** The selected rows, for the rule tab's direct Nemesis send. */
+    items() {
+      return [...selected.values()];
+    },
     get size() {
       return selected.size;
-    },
-    createFromSelection() {
-      return create([...selected]);
     },
   };
 }

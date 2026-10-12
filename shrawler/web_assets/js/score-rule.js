@@ -18,6 +18,7 @@ import {
   severity,
 } from './core.js';
 import { dialogShell, openOverlay, panel, toast } from './overlay.js';
+import { sendSummary, sendToNemesis } from './actions.js';
 import { engineChip } from './scores.js';
 
 const CONTEXT_MODES = [
@@ -410,7 +411,7 @@ export function createRuleTab(root) {
       box.type = 'checkbox';
       box.checked = ctx.collection?.has(item.file_id) || false;
       on(box, 'change', () => {
-        ctx.collection?.toggle(item.file_id, box.checked);
+        ctx.collection?.toggle(item.file_id, box.checked, item);
         renderCollectBar();
       });
       collect.append(box, el('span', undefined, 'Nemesis'));
@@ -430,12 +431,39 @@ export function createRuleTab(root) {
 
   function renderCollectBar() {
     const count = ctx.collection?.size || 0;
-    fill(
-      nodes.collectBar,
-      el('span', 'panel__hint', `${fmt.count(count)} candidate${count === 1 ? '' : 's'} selected for collection`),
-      button('Save selected to Nemesis', { size: 'sm', onClick: () => ctx.collection?.createFromSelection() }),
-    );
-    nodes.collectBar.lastChild.disabled = count === 0;
+    const hint = el('span', 'panel__hint', `${fmt.count(count)} candidate${count === 1 ? '' : 's'} selected for Nemesis`);
+    const send = button('Send selected to Nemesis', { size: 'sm', onClick: () => sendSelection(send, hint) });
+    send.disabled = count === 0 || ctx.status.nemesis_enabled === false;
+    if (ctx.status.nemesis_enabled === false) send.title = 'Configure Nemesis URL, authentication, and project first';
+    fill(nodes.collectBar, hint, send);
+  }
+
+  /**
+   * Send the selected candidates straight to Nemesis. No manifest is created:
+   * the direct delivery path retrieves each file and uploads it in one request,
+   * and its persistent spool holds failures for retry.
+   */
+  async function sendSelection(trigger, hint) {
+    const rows = ctx.collection?.items() || [];
+    if (!rows.length) return;
+    trigger.disabled = true;
+    try {
+      const summary = await sendToNemesis(rows, {
+        status: ctx.status,
+        confirmFirst: rows.length > 1,
+        onProgress: (message) => {
+          hint.textContent = message;
+        },
+      });
+      if (summary) {
+        toast(sendSummary(summary), summary.failed || summary.unknown ? 'error' : 'ok');
+        ctx.clearError();
+      }
+    } catch (error) {
+      toast(error.message, 'error');
+    } finally {
+      renderCollectBar();
+    }
   }
 
   function renderCounts(summary) {

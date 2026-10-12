@@ -246,7 +246,7 @@ function nemesisValue(item) {
  * describe a file identically.
  */
 export function detailPanel(item, ctx) {
-  const { status, describe, onDownload, onQueue, onClose } = ctx;
+  const { status, describe, onDownload, onSend, onClose } = ctx;
   const panel = el('div', 'detail-panel');
   panel.setAttribute('role', 'region');
   panel.setAttribute('aria-label', `Details for ${item.file_name}`);
@@ -291,6 +291,11 @@ export function detailPanel(item, ctx) {
       },
     });
     if (!previewable) previewButton.setAttribute('aria-disabled', 'true');
+    const nemesisButton = button('Send to Nemesis', { name: 'upload', onClick: () => onSend([item]) });
+    if (status.nemesis_enabled === false) {
+      nemesisButton.disabled = true;
+      nemesisButton.title = 'Configure Nemesis URL, authentication, and project first';
+    }
     actions.append(
       previewButton,
       button('Download', {
@@ -298,7 +303,7 @@ export function detailPanel(item, ctx) {
         variant: 'primary',
         onClick: (event) => onDownload(item, event.currentTarget),
       }),
-      button('Send to Nemesis', { name: 'upload', onClick: () => onQueue([item]) }),
+      nemesisButton,
     );
   } else {
     actions.append(el('span', 'field__hint', 'Offline session: remote retrieval is disabled.'));
@@ -379,8 +384,9 @@ function iconButton(name, label, onClick) {
  * shows a status chip and has its Nemesis button disabled.
  */
 export function rowActions(item, ctx) {
-  const { status, onDownload, onQueue } = ctx;
+  const { status, onDownload, onSend } = ctx;
   const offline = !status.retrieval_enabled;
+  const noNemesis = status.nemesis_enabled === false;
   const state = collectionState(item);
   const cluster = [];
 
@@ -389,13 +395,16 @@ export function rowActions(item, ctx) {
     variant: 'primary',
     size: 'sm',
     onClick: () => {
-      if (!queue.disabled) onQueue([item]);
+      if (!queue.disabled) onSend([item]);
     },
   });
   queue.setAttribute('aria-label', `Send ${item.file_name} to Nemesis`);
   if (offline) {
     queue.disabled = true;
     queue.title = 'Remote retrieval is disabled in offline mode';
+  } else if (noNemesis) {
+    queue.disabled = true;
+    queue.title = 'Configure Nemesis URL, authentication, and project first';
   } else if (state) {
     queue.disabled = true;
     queue.title = state.key === 'downloaded' ? 'Already downloaded' : 'Already sent to Nemesis';
@@ -426,7 +435,7 @@ export function rowActions(item, ctx) {
 
 /* -- Percentage targets ---------------------------------------------------- */
 
-// The queue refuses more than 10,000 files, so the preflight refuses to
+// A single send action is capped at 10,000 files, so the preflight refuses to
 // describe a larger selection as if it were actionable.
 export const QUEUE_CEILING = 10000;
 const PAGE = 500;
@@ -565,47 +574,76 @@ export async function downloadRows(rows, onProgress) {
   return { total: rows.length, failed };
 }
 
+/** Fold one delivery response onto a row so the grid shows the new state. */
+function applyNemesisState(item, state) {
+  if (!item) return;
+  item.nemesis_status = String(state.status || '');
+  item.nemesis_updated_at_utc = String(state.updated_at || new Date().toISOString());
+  item.nemesis_response_id = String(state.response_id || '');
+  item.nemesis_error = String(state.error || '');
+}
+
 /**
- * Queue rows through the collection manifest path. Every collection goes
- * through here so it gets byte caps, a saved manifest, and retry; there is no
- * second, direct-send path.
+ * Send rows to the configured Nemesis server, one file at a time.
  *
- * A ranking run is a preference, not a gate. Explore shows files the selected
- * run never rated -- most often ones captured after rules last ran -- and those
- * still have exact paths, so the manifest resolves them from the inventory.
+ * Each file is retrieved from SMB and uploaded in the same request through the
+ * direct delivery path, which enforces the per-file size cap and keeps staged
+ * bytes in the persistent spool for retry. A file already delivered to the
+ * same destination comes back "uploaded" without a second transfer, so a
+ * repeat click is safe.
+ *
+ * There is no manifest in this path: the click is the send. A ranking run is
+ * not required either -- Explore shows files the selected run never rated, and
+ * those have exact paths, so they send like any other file.
+ *
+ * One denied path does not stop the rest of the selection; the returned
+ * summary counts what was sent, what failed, and what came back ambiguous.
  */
-export async function queueRows(rows, { rankingRun, rankingCategory, name, status }) {
+export async function sendToNemesis(rows, { status, confirmFirst = false, onProgress } = {}) {
   if (!rows.length) throw new Error('No files selected.');
   const chosen = rows.slice(0, QUEUE_CEILING);
-  const fileIds = chosen.map((row) => row.id);
-  const unrated = chosen.filter((row) => !row.ranking_run_id).length;
-  const cap = Number(status.nemesis_max_bytes) || 50 * 1024 ** 2;
-  const accepted = await confirm({
-    title: `Send ${fmt.count(fileIds.length)} files to Nemesis?`,
-    message: 'The manifest is saved before retrieval starts, so it can be re-run and retried from the Score screen.',
-    detail: [
-      `Per-file cap ${fmt.bytes(cap)}`,
-      `total cap ${fmt.bytes(cap * 20)}`,
-      rankingRun ? `source ranking ${rankingRun.slice(0, 8)}` : 'no rule ranking',
-      unrated ? `${fmt.count(unrated)} without a rule rating` : null,
-    ]
-      .filter(Boolean)
-      .join(' · '),
-    confirmLabel: 'Save manifest',
-  });
-  if (!accepted) return null;
-  const manifest = await post('/api/collection/create', {
-    run_id: rankingRun || null,
-    category: rankingCategory || null,
-    min_score: 0,
-    limit: QUEUE_CEILING,
-    file_ids: fileIds,
-    name: name || 'Explore selection',
-    max_file_size: cap,
-    max_total_bytes: cap * 20,
-  });
-  toast(`Saved manifest ${manifest.name} · ${fmt.count(manifest.expected_files)} files to send to Nemesis`);
-  return manifest;
+  const cap = Number(status && status.nemesis_max_bytes) || 50 * 1024 ** 2;
+  if (confirmFirst) {
+    const detail = [`per-file cap ${fmt.bytes(cap)}`];
+    if (chosen.length < rows.length) {
+      detail.push(`first ${fmt.count(chosen.length)} of ${fmt.count(rows.length)} selected`);
+    }
+    const accepted = await confirm({
+      title: `Send ${fmt.count(chosen.length)} file${chosen.length === 1 ? '' : 's'} to Nemesis?`,
+      message: 'Each file is retrieved from SMB and uploaded to the configured Nemesis server now.',
+      detail: detail.join(' · '),
+      confirmLabel: 'Send now',
+    });
+    if (!accepted) return null;
+  }
+  const summary = { total: chosen.length, uploaded: 0, failed: 0, unknown: 0 };
+  for (let index = 0; index < chosen.length; index += 1) {
+    const row = chosen[index];
+    const fileId = row.id || row.file_id;
+    onProgress?.(
+      `Sending ${index + 1} of ${chosen.length}: ${row.file_name || row.unc_path || fileId}`,
+      (index / chosen.length) * 100,
+    );
+    try {
+      applyNemesisState(row, await post('/api/nemesis/send', { file_id: fileId }));
+      if (row.nemesis_status === 'uploaded') summary.uploaded += 1;
+      else if (row.nemesis_status === 'unknown') summary.unknown += 1;
+      else summary.failed += 1;
+    } catch (error) {
+      summary.failed += 1;
+      applyNemesisState(row, { status: 'upload_failed', error: error.message });
+    }
+  }
+  onProgress?.(`${fmt.count(summary.uploaded)} sent`, 100);
+  return summary;
+}
+
+/** One line for a toast: what actually happened across the selection. */
+export function sendSummary(summary) {
+  const parts = [`${fmt.count(summary.uploaded)} sent to Nemesis`];
+  if (summary.failed) parts.push(`${fmt.count(summary.failed)} failed`);
+  if (summary.unknown) parts.push(`${fmt.count(summary.unknown)} with an unknown outcome`);
+  return parts.join(' · ');
 }
 
 /* -- Single-file download -------------------------------------------------- */
@@ -616,7 +654,8 @@ export async function queueRows(rows, { rankingRun, rankingCategory, name, statu
  * This is a plain browser download, not a collection: no queue, no manifest, no
  * caps. It is offered only where retrieval is enabled and the analyst is acting
  * on a single file whose size is on screen. Anything that acts on a set goes
- * through queueRows, so every multi-file transfer keeps its caps and retry.
+ * through downloadRows, so a multi-file transfer shows progress and reports
+ * how many failed.
  */
 export async function downloadOne(item) {
   const response = await api(`/api/files/${item.id}/download`);
@@ -699,9 +738,9 @@ export function percentageControl({ onApply }) {
  * The whole percentage flow: scope and percentage inputs, the byte preflight,
  * then an explicit destination. The dialog never commits on its own — the
  * preflight is shown first and the destination is always a second click,
- * because queueing hundreds of files to Nemesis is a real side effect.
+ * because sending hundreds of files to Nemesis is a real side effect.
  */
-export function percentageDialog({ params, sortKey, sortName, status, rankingRun, rankingCategory, onDone }) {
+export function percentageDialog({ params, sortKey, sortName, status, onDone }) {
   const report = el('div', 'preflight');
   const handle = openOverlay(
     dialogShell({
@@ -747,15 +786,23 @@ export function percentageDialog({ params, sortKey, sortName, status, rankingRun
         size: 'sm',
         variant: 'primary',
         onClick: async () => {
-          const manifest = await queueRows(target.rows, {
-            rankingRun,
-            rankingCategory,
-            name: `Top ${percent}% of the ${where}`,
-            status,
-          });
-          if (manifest) {
-            handle.close();
-            onDone?.();
+          nemesisButton.disabled = true;
+          try {
+            const summary = await sendToNemesis(target.rows, {
+              status,
+              onProgress: (message) => {
+                progress.textContent = message;
+              },
+            });
+            if (summary) {
+              toast(sendSummary(summary), summary.failed || summary.unknown ? 'error' : 'ok');
+              handle.close();
+              onDone?.();
+            }
+          } catch (error) {
+            progress.textContent = error.message;
+          } finally {
+            nemesisButton.disabled = false;
           }
         },
       });
@@ -765,6 +812,10 @@ export function percentageDialog({ params, sortKey, sortName, status, rankingRun
           control.disabled = true;
           control.title = 'Remote retrieval is disabled in offline mode';
         }
+      }
+      if (status.nemesis_enabled === false) {
+        nemesisButton.disabled = true;
+        nemesisButton.title = 'Configure Nemesis URL, authentication, and project first';
       }
       report.append(el('div', 'btn-row', downloadButton, nemesisButton), progress);
       if (offline) report.append(el('p', 'field__hint', 'Offline session: remote retrieval is disabled.'));

@@ -96,11 +96,14 @@ score, rather than a tinted
 background that would hurt the legibility of the path text.
 
 File actions offer **View file**, **Download**, and **Send to Nemesis**.
-Sending to Nemesis saves a [collection manifest](collection.md) with byte caps
-and retry; it is the only path for anything acting on more than one file. The
-selection does not need a rule rating: a file the selected ranking run never
-covered is queued as unrated, and the confirmation reports how many of the
-selection those are.
+Sending to Nemesis retrieves each file from SMB and uploads it to the configured
+server in one request, with the per-file size cap and the persistent retry spool
+described in [Nemesis delivery](nemesis.md). There is no manifest in this path:
+clicking send is the send. A selection is sent one file at a time, and the
+toast reports how many uploaded, failed, or came back ambiguous. The selection
+does not need a rule rating; a file the selected ranking run never covered sends
+like any other file. If Nemesis is not configured, the send buttons are disabled
+with a note to configure it.
 
 **Percentage actions** act on a share of a ranked set rather than a hand-picked
 selection. Choose the filtered set or the whole scan, a percentage, and a
@@ -235,7 +238,9 @@ Press `Ctrl+C` in the terminal that started Shrawler. Active ranking and
 assessment jobs are asked to cancel during shutdown; completed runs remain in
 their local databases.
 
-Collection manifests are shared with the CLI: select candidates, save and review
-a manifest, then collect or retry failed files. Offline sessions are read-only:
-they can review saved manifests, but creating or running one requires a
-connection.
+Collection manifests are shared with the CLI: on the Score page, select
+candidates, save and review a manifest, then collect or retry failed files. This
+is the advanced staging path with a total byte budget; the **Send to Nemesis**
+actions on Explore and the Rule ranking tab do not create a manifest. Offline
+sessions are read-only: they can review saved manifests, but creating or running
+one requires a connection.

@@ -11,10 +11,12 @@ WebUI with SMB credentials, select a file, and choose one of three actions:
 
 - **View file** opens a supported preview inside Shrawler.
 - **Download** saves the file through your browser.
-- **Send to Nemesis** saves a collection manifest that retrieves and
-  submits the file without a browser download.
+- **Send to Nemesis** retrieves the file and uploads it directly to the
+  configured server, without a browser download or a collection manifest.
 
-The expanded row and the candidate tables both link to the same file actions.
+The expanded row, the row actions, and the candidate tables all offer the same
+send. A selection is sent one file at a time through the direct delivery path,
+and the summary reports how many uploaded, failed, or came back ambiguous.
 These actions use the inventory's latest observation for that path; an older
 ranking remains a historical snapshot.
 

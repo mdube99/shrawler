@@ -32,8 +32,9 @@ import {
   pathLabel,
   pathTail,
   percentageDialog,
-  queueRows,
   rowActions,
+  sendSummary,
+  sendToNemesis,
   typeTag,
 } from './actions.js';
 import { AUTO, createFilters, NONE } from './explore-filters.js';
@@ -279,11 +280,13 @@ function renderSelectionBar() {
   $('selection-count').textContent = `${fmt.count(files.length)} selected`;
   $('selection-size').textContent = files.length ? fmt.bytes(bytes) : '';
   const retrievable = status.retrieval_enabled !== false && !busy;
+  const sendable = retrievable && status.nemesis_enabled !== false;
   $('download-selection').disabled = !retrievable;
-  $('queue-selection').disabled = !retrievable;
+  $('queue-selection').disabled = !sendable;
   const offlineTitle = status.retrieval_enabled === false ? 'Remote retrieval is disabled in offline mode' : '';
+  const nemesisTitle = status.nemesis_enabled === false ? 'Configure Nemesis URL, authentication, and project first' : '';
   $('download-selection').title = offlineTitle;
-  $('queue-selection').title = offlineTitle;
+  $('queue-selection').title = nemesisTitle || offlineTitle;
   const onPage = page.items.filter((item) => selection.has(item.id)).length;
   $('select-page').checked = !!page.items.length && onPage === page.items.length;
   $('select-page').indeterminate = onPage > 0 && onPage < page.items.length;
@@ -374,7 +377,8 @@ function actionContext() {
     status,
     describe,
     // One file the analyst can see the size of: a plain browser download.
-    // Sets of files go through the queue, which brings caps and retry.
+    // Sets of files go through downloadRows, which shows progress and counts
+    // failures.
     onDownload: async (item, trigger) => {
       if (trigger) {
         trigger.disabled = true;
@@ -393,17 +397,28 @@ function actionContext() {
         render();
       }
     },
-    onQueue: (items) => queue(items, 'Explore selection'),
+    onSend: (items) => send(items),
     onClose: () => toggleExpanded(null),
   };
 }
 
-async function queue(items, name) {
+async function send(items) {
+  busy = true;
+  renderSelectionBar();
   try {
-    await queueRows(items, { rankingRun: selectedRun(), rankingCategory: state.ranking_category, name, status });
-    render();
+    const summary = await sendToNemesis(items, {
+      status,
+      confirmFirst: items.length > 1,
+      onProgress: (message) => {
+        $('selection-size').textContent = message;
+      },
+    });
+    if (summary) toast(sendSummary(summary), summary.failed || summary.unknown ? 'error' : 'ok');
   } catch (error) {
     toast(error.message, 'error');
+  } finally {
+    busy = false;
+    render();
   }
 }
 
@@ -423,8 +438,6 @@ function openPercentageDialog() {
     sortKey: state.sort,
     sortName: sortLabel(state.sort),
     status,
-    rankingRun: run,
-    rankingCategory: state.ranking_category,
     onDone: render,
   });
 }
@@ -546,7 +559,7 @@ on($('download-selection'), 'click', async () => {
   render();
 });
 
-on($('queue-selection'), 'click', () => queue([...selection.values()], 'Explore selection'));
+on($('queue-selection'), 'click', () => send([...selection.values()]));
 on($('select-percent'), 'click', openPercentageDialog);
 
 on($('previous'), 'click', () => commit({ page: String(Math.max(1, Number(state.page) - 1)) }, { keepPage: true, push: true }));
