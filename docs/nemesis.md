@@ -29,6 +29,10 @@ shrawler nemesis send ./results/shrawler.db FILE_ID 'DOMAIN/user@server'
 # Retry a failed upload from its staged bytes; no SMB credentials needed.
 shrawler nemesis send ./results/shrawler.db FILE_ID
 
+# Upload another copy of a file that was already delivered successfully.
+# This re-retrieves the file and may create a duplicate object in Nemesis.
+shrawler nemesis send ./results/shrawler.db FILE_ID --resend
+
 # Inspect up to 1000 recent receipts without contacting SMB or Nemesis.
 shrawler nemesis list ./results/shrawler.db
 ```
@@ -37,15 +41,20 @@ Sending reads the selected remote file into a private `<stem>.nemesis/` spool,
 then uploads those bytes. It does not enumerate directories. The staged copy
 is removed after an acknowledged upload; failures retain it for retry, including
 across restarts. Receipts preserve the original filename, UNC path, observed
-timestamps, SHA-256, destination/project, byte count, attempts, and response ID.
-Nemesis receives the original filename rather than the spool's opaque filename.
+timestamps, SHA-256, destination/project, byte count, attempts, the latest
+response ID, and the response IDs from earlier deliberate resends. Nemesis
+receives the original filename rather than the spool's opaque filename.
 Credentials are not saved in receipts.
 
-Repeated sends for the same observed file and destination reuse the receipt or
-staged bytes. A new observation or destination is a new delivery. Existing
-browser downloads and collection-manifest evidence are separate from this spool;
-they are not automatically reused. Upload retries verify staged hashes and refuse
-missing or changed evidence instead of silently fetching replacement bytes.
+A repeat send for the same observed file and destination normally reuses the
+receipt or staged bytes, so a second click after a successful delivery is a safe
+no-op. To upload another copy anyway, pass `--resend` on the CLI or click
+**Send** again in the WebUI; both re-retrieve the file and deliberately create a
+second delivery, which may duplicate the object in Nemesis. A new observation or
+destination is a new delivery. Existing browser downloads and
+collection-manifest evidence are separate from this spool; they are not
+automatically reused. Upload retries verify staged hashes and refuse missing or
+changed evidence instead of silently fetching replacement bytes.
 
 An interrupted request or connection failure can leave the server's acceptance
 unknown. Shrawler retains the bytes and blocks automatic resubmission. Check

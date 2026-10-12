@@ -161,10 +161,291 @@
   margin-top: var(--space-2);
 }
 
-.filter-grid {
+/* -- Filter panel ---------------------------------------------------------- */
+
+/* A fixed size keeps the popover where it opened while lists grow and shrink. */
+.filter-panel {
+  width: min(640px, calc(100vw - 40px));
+}
+
+.filter-panel__body {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  grid-template-columns: 180px minmax(0, 1fr);
+  gap: var(--space-3);
+  height: min(420px, 60vh);
+}
+
+.filter-nav {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  overflow-y: auto;
+  padding-right: var(--space-2);
+  border-right: 1px solid var(--line);
+}
+
+.filter-nav__legend {
+  margin: var(--space-2) 0 2px;
+  color: var(--text-faint);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.filter-nav__legend:first-child {
+  margin-top: 0;
+}
+
+.filter-nav__item {
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+  min-height: 28px;
+  padding: 0 var(--space-2);
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-dim);
+  font: inherit;
+  font-size: 12px;
+  text-align: left;
+}
+
+.filter-nav__item:hover {
+  background: var(--surface-3);
+  color: var(--text);
+}
+
+.filter-nav__item[aria-selected="true"] {
+  background: var(--surface-4);
+  color: var(--text);
+}
+
+.filter-nav__label {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.filter-count {
+  padding: 0 5px;
+  border-radius: 999px;
+  background: var(--accent-wash);
+  color: var(--accent);
+  font: 600 10px var(--font-data);
+}
+
+.filter-count--exclude {
+  background: var(--danger-wash);
+  color: var(--danger);
+}
+
+.filter-pane {
+  display: flex;
+  flex-direction: column;
   gap: var(--space-2);
+  min-height: 0;
+}
+
+.filter-pane__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+}
+
+.filter-pane__title {
+  color: var(--text);
+  font-weight: 600;
+}
+
+.filter-pane__status:empty {
+  display: none;
+}
+
+.filter-pane__status {
+  margin: 0;
+  color: var(--text-faint);
+  font-size: 11px;
+}
+
+.facet-options {
+  flex: 1;
+  min-height: 0;
+  margin: 0;
+  padding: 0;
+  overflow-y: auto;
+  list-style: none;
+}
+
+.facet-option {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  border-radius: var(--radius-sm);
+}
+
+.facet-option:hover {
+  background: var(--surface-3);
+}
+
+.facet-option__main {
+  display: flex;
+  flex: 1;
+  align-items: center;
+  gap: var(--space-2);
+  min-width: 0;
+  min-height: 28px;
+  padding: 0 var(--space-2);
+  border: 0;
+  background: transparent;
+  color: var(--text-dim);
+  font: inherit;
+  font-size: 12px;
+  text-align: left;
+}
+
+.facet-option__mark {
+  display: grid;
+  flex: none;
+  place-items: center;
+  width: 14px;
+  height: 14px;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-sm);
+  font-size: 11px;
+  line-height: 1;
+}
+
+.facet-option__mark svg {
+  width: 10px;
+  height: 10px;
+}
+
+.facet-option__label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.facet-option__tag {
+  margin-left: auto;
+  color: var(--danger);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.facet-option--include .facet-option__main {
+  color: var(--text);
+}
+
+.facet-option--include .facet-option__mark {
+  border-color: var(--accent);
+  background: var(--accent);
+  color: var(--bg);
+}
+
+.facet-option--exclude {
+  background: var(--danger-wash);
+}
+
+.facet-option--exclude .facet-option__label {
+  color: var(--text);
+  text-decoration: line-through;
+  text-decoration-color: var(--danger);
+}
+
+.facet-option--exclude .facet-option__mark {
+  border-color: var(--danger);
+  color: var(--danger);
+}
+
+.facet-option__exclude {
+  display: grid;
+  flex: none;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-faint);
+}
+
+.facet-option__exclude svg {
+  width: 12px;
+  height: 12px;
+}
+
+.facet-option__exclude:hover,
+.facet-option__exclude[aria-pressed="true"] {
+  border-color: hsl(2 50% 40%);
+  background: var(--danger-wash);
+  color: var(--danger);
+}
+
+/* -- Quick filters (row detail) --------------------------------------------- */
+
+.quick-filters {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-1) var(--space-2);
+}
+
+.quick-filters .field__label {
+  margin-right: var(--space-1);
+}
+
+.quick-filter {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  min-height: 24px;
+  padding: 0 2px 0 8px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--surface-2);
+  color: var(--text-mute);
+  font-size: 11px;
+}
+
+.quick-filter__name b {
+  color: var(--text-dim);
+  font-weight: 500;
+}
+
+.quick-filter__btn {
+  display: grid;
+  place-items: center;
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  background: transparent;
+  color: var(--text-mute);
+}
+
+.quick-filter__btn svg {
+  width: 11px;
+  height: 11px;
+}
+
+.quick-filter__btn:hover {
+  background: var(--accent-wash);
+  color: var(--accent);
+}
+
+.quick-filter__btn--exclude:hover {
+  background: var(--danger-wash);
+  color: var(--danger);
 }
 
 /* -- Results chrome -------------------------------------------------------- */
@@ -257,55 +538,53 @@ body:has(.selection-bar:not([hidden])) .toast-region {
   border-radius: 0 0 var(--radius-md) var(--radius-md);
 }
 
-/* Fixed layout so the file column takes exactly the space the score cluster and
- * the actions leave over, instead of losing a width fight to every other
- * column's content. File/path gets whatever remains. */
-/* Proportional columns with a low floor: the whole table always fits the
- * viewport, and the file/path column takes the largest single share. A long
- * path truncates inside its cell rather than widening the grid. */
+/* Fixed widths where the content is fixed; the file path and the location share
+ * the flexible remainder rather than every column shrinking together. The shell
+ * scrolls below `min-width` instead of crushing headers and truncating values. */
 .explore-grid {
   table-layout: fixed;
-  min-width: 640px;
+  min-width: 820px;
 }
 
 .explore-grid .col-check {
-  width: 3.5%;
+  width: 36px;
 }
 
 .explore-grid .col-combined {
-  width: 7%;
+  width: 68px;
 }
 
 .explore-grid .col-rule {
-  width: 5%;
+  width: 56px;
 }
 
 .explore-grid .col-ai {
-  width: 5%;
+  width: 60px;
 }
 
+/* No width: File/path absorbs whatever the fixed columns and Location leave. */
 .explore-grid .col-file {
-  width: 34%;
+  width: auto;
 }
 
 .explore-grid .col-location {
-  width: 12%;
+  width: 13%;
 }
 
 .explore-grid .col-size {
-  width: 6.5%;
+  width: 76px;
 }
 
 .explore-grid .col-modified {
-  width: 8%;
+  width: 88px;
 }
 
 .explore-grid .col-actions {
-  width: 16%;
+  width: 156px;
 }
 
 .explore-grid .col-chevron {
-  width: 3%;
+  width: 32px;
 }
 
 /* Two-row header: a "Scores" group sits over the three engine columns. Both
@@ -485,44 +764,73 @@ body:has(.selection-bar:not([hidden])) .toast-region {
 }
 
 /* Row actions: Nemesis (primary) and Download. Both need the environment, so
- * both are disabled offline. Muted until hovered so a hundred rows don't read
- * as a toolbar, but always present. */
+ * both are disabled offline. The cell keeps the table-cell box; the flex row
+ * lives in an inner element so the row height and borders stay table-shaped. */
 .actions-cell {
-  display: flex;
-  align-items: center;
-  justify-content: flex-end;
-  gap: var(--space-2);
   padding-inline: var(--space-2) !important;
   white-space: nowrap;
 }
 
-.row-status {
-  display: inline-flex;
+.actions-inner {
+  display: flex;
   align-items: center;
-  height: 20px;
-  padding: 0 7px;
-  border: 1px solid var(--line-strong);
+  justify-content: flex-end;
+  gap: var(--space-3);
+}
+
+/* Status is a badge on the action itself, not a separate chip row. */
+.actions-inner .btn--primary,
+.row-action {
+  position: relative;
+}
+
+.row-badge {
+  position: absolute;
+  top: -5px;
+  right: -5px;
+  min-width: 14px;
+  height: 14px;
+  padding: 0 3px;
+  border: 1px solid;
   border-radius: 999px;
-  color: var(--text-mute);
-  font: 600 9px/1 var(--font-data);
-  white-space: nowrap;
+  background: var(--surface-1);
+  font: 600 10px/12px var(--font-data);
+  text-align: center;
 }
 
-.row-status--downloaded {
-  border-color: hsl(212 45% 44%);
-  color: hsl(212 60% 78%);
-  background: hsl(212 45% 50% / 0.14);
+/* Keep the Nemesis badge on the outer edge, away from the download button. */
+.actions-inner .btn--primary > .row-badge {
+  left: -5px;
+  right: auto;
 }
 
-.row-status--queued {
+.row-badge--sent {
+  border-color: hsl(146 36% 40%);
+  color: hsl(146 42% 76%);
+}
+
+.row-badge--queued {
   border-color: var(--accent-line);
   color: var(--accent-bright);
-  background: var(--accent-wash);
 }
 
-/* A row that already shows its state does not need the disabled action too. */
-.actions-cell:has(.row-status) .btn--primary {
-  display: none;
+.row-badge--failed {
+  border-color: hsl(2 55% 46%);
+  color: hsl(2 66% 76%);
+  background: var(--danger-wash);
+}
+
+/* A file already sent keeps the action but drops the solid weight, so the
+ * amber call to action only marks rows that have not been sent yet. */
+.btn--primary[data-state="sent"],
+.btn--primary[data-state="queued"] {
+  border-color: var(--accent-line);
+  background: transparent;
+  color: var(--accent-bright);
+}
+
+.row-action[data-state="downloaded"] {
+  color: hsl(212 60% 78%);
 }
 
 .row-action {
@@ -534,7 +842,7 @@ body:has(.selection-bar:not([hidden])) .toast-region {
   border: 1px solid transparent;
   border-radius: var(--radius-sm);
   background: transparent;
-  color: var(--text-mute);
+  color: var(--text-dim);
   vertical-align: middle;
   transition: background var(--ease), border-color var(--ease), color var(--ease);
 }
@@ -1236,10 +1544,40 @@ body:has(.selection-bar:not([hidden])) .toast-region {
   .popover {
     position: fixed;
     inset: auto 0 0 0;
+    /* openPopover() anchors with inline left/top; the sheet ignores both. */
+    left: 0 !important;
+    top: auto !important;
     width: 100%;
     min-width: 0;
     max-height: 72vh;
     border-radius: var(--radius-lg) var(--radius-lg) 0 0;
+  }
+
+  /* Fields become a scrolling strip above the value list. */
+  .filter-panel {
+    width: 100%;
+  }
+
+  .filter-panel__body {
+    grid-template-columns: 1fr;
+    grid-template-rows: auto minmax(0, 1fr);
+    height: 60vh;
+  }
+
+  .filter-nav {
+    flex-direction: row;
+    overflow-x: auto;
+    padding: 0 0 var(--space-2);
+    border-right: 0;
+    border-bottom: 1px solid var(--line);
+  }
+
+  .filter-nav__legend {
+    display: none;
+  }
+
+  .filter-nav__item {
+    flex: none;
   }
 
   .detail-panel {
@@ -1263,9 +1601,14 @@ body:has(.selection-bar:not([hidden])) .toast-region {
   }
 
   /* The primary action goes icon-only so the two row buttons keep fitting as
-   * the columns narrow; its aria-label still names the action. */
-  .actions-cell .btn--primary > span {
+   * the columns narrow; the badge stays visible and the aria-label still
+   * names the action. */
+  .actions-cell .btn--primary > span:not(.row-badge) {
     display: none;
+  }
+
+  .explore-grid .col-actions {
+    width: 96px;
   }
 }
 

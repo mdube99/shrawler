@@ -287,15 +287,39 @@ export function severity(score) {
 
 /* -- URL state ------------------------------------------------------------- */
 
-/** Read the query string, substituting defaults for absent or blank values. */
+// Facets that take several values. Each value repeats the parameter
+// (`host=a&host=b`, ORed) and an exclusion repeats it under the `not_` prefix
+// (`not_host=c`). A single `host=a` is still a valid link, so old bookmarks
+// keep their meaning. The server enforces the same contract.
+export const FACETS = ['host', 'share', 'extension', 'rule', 'triage', 'permission', 'collection', 'activity'];
+export const EXCLUDE_PREFIX = 'not_';
+export const FACET_PARAMS = [...FACETS, ...FACETS.map((key) => EXCLUDE_PREFIX + key)];
+
+/**
+ * Read the query string, substituting defaults for absent or blank values. A
+ * key whose default is an array reads every repeated value.
+ */
 export function readParams(defaults) {
   const search = new URLSearchParams(location.search);
   const state = {};
   for (const [key, fallback] of Object.entries(defaults)) {
+    if (Array.isArray(fallback)) {
+      const values = [...new Set(search.getAll(key).filter(Boolean))];
+      state[key] = values.length ? values : [...fallback];
+      continue;
+    }
     const raw = search.get(key);
     state[key] = raw === null || raw === '' ? fallback : raw;
   }
   return state;
+}
+
+/** Append one state value, repeating the key for arrays and skipping blanks. */
+function appendParam(search, key, value) {
+  for (const item of Array.isArray(value) ? value : [value]) {
+    const text = item === undefined || item === null ? '' : String(item);
+    if (text !== '') search.append(key, text);
+  }
 }
 
 /**
@@ -306,9 +330,8 @@ export function readParams(defaults) {
 export function writeParams(state, defaults, { replace = true } = {}) {
   const search = new URLSearchParams();
   for (const [key, value] of Object.entries(state)) {
-    const text = value === undefined || value === null ? '' : String(value);
-    if (text === '' || text === String(defaults[key] ?? '')) continue;
-    search.set(key, text);
+    if (!Array.isArray(value) && String(value ?? '') === String(defaults[key] ?? '')) continue;
+    appendParam(search, key, value);
   }
   const url = `${location.pathname}${search.size ? `?${search}` : ''}`;
   if (url === `${location.pathname}${location.search}`) return;
@@ -319,10 +342,7 @@ export function writeParams(state, defaults, { replace = true } = {}) {
 /** The server-side slice of the state: everything except pure client concerns. */
 export function serverParams(state, keys) {
   const params = new URLSearchParams();
-  for (const key of keys) {
-    const value = state[key];
-    if (value !== undefined && value !== null && value !== '') params.set(key, String(value));
-  }
+  for (const key of keys) appendParam(params, key, state[key]);
   return params;
 }
 

@@ -51,6 +51,31 @@ class DeliveryTests(unittest.TestCase):
         self.assertNotIn("user:secret", json.dumps(result))
 
     @patch("shrawler.nemesis.upload")
+    def test_resend_uploads_another_copy_and_keeps_prior_response_id(
+        self, submit: Mock
+    ) -> None:
+        submit.side_effect = [{"response_id": "first"}, {"response_id": "second"}]
+        first = self.store.send(self.record, self.config, self.retrieve, 10)
+        self.assertEqual(first["status"], "uploaded")
+        self.assertEqual(first["response_id"], "first")
+        second = self.store.send(self.record, self.config, self.retrieve, 10, resend=True)
+        self.assertEqual(second["status"], "uploaded")
+        self.assertEqual(second["response_id"], "second")
+        self.assertEqual(second["response_ids"], ["first"])
+        self.assertEqual(second["attempts"], 2)
+        self.assertEqual(self.retrieve.call_count, 2)
+        self.assertEqual(submit.call_count, 2)
+
+    @patch("shrawler.nemesis.upload")
+    def test_resend_without_staged_bytes_needs_smb(self, submit: Mock) -> None:
+        submit.return_value = {"response_id": "first"}
+        self.store.send(self.record, self.config, self.retrieve, 10)
+        with self.assertRaisesRegex(ValueError, "SMB retrieval"):
+            self.store.send(self.record, self.config, None, 10, resend=True)
+        self.retrieve.assert_called_once()
+        submit.assert_called_once()
+
+    @patch("shrawler.nemesis.upload")
     def test_failed_upload_retries_local_bytes_without_smb(self, submit):
         submit.side_effect = [ValueError("HTTP 503"), {"response_id": "ok"}]
         failed = self.store.send(self.record, self.config, self.retrieve, 10)

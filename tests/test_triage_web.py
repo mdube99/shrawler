@@ -55,6 +55,37 @@ class RankingHttpTests(unittest.TestCase):
         self.assertEqual(result["status"], "uploaded")
         pool.retrieve.assert_called_once()
 
+    def test_nemesis_resend_uploads_again(self) -> None:
+        from unittest.mock import Mock
+
+        self.server.state.nemesis = NemesisConfig("https://nemesis/api", "u:p", "test")
+        record = self.server.state.index.search("", "", "", "", 1, 1)["items"][0]
+        pool = Mock()
+        pool.retrieve.side_effect = lambda record, sink: sink(b"x" * record.size_bytes)
+        self.server.state.pool = pool
+        with patch(
+            "shrawler.nemesis.upload",
+            side_effect=[{"response_id": "first"}, {"response_id": "second"}],
+        ) as submit:
+            first = self.request("/api/nemesis/send", {"file_id": record["id"]})
+            second = self.request(
+                "/api/nemesis/send", {"file_id": record["id"], "resend": True}
+            )
+        self.assertEqual(first["status"], "uploaded")
+        self.assertEqual(second["status"], "uploaded")
+        self.assertEqual(second["response_id"], "second")
+        self.assertEqual(second["response_ids"], ["first"])
+        self.assertEqual(submit.call_count, 2)
+        self.assertEqual(pool.retrieve.call_count, 2)
+
+    def test_nemesis_rejects_malformed_resend_flag(self) -> None:
+        self.server.state.nemesis = NemesisConfig("https://nemesis/api", "u:p", "test")
+        record = self.server.state.index.search("", "", "", "", 1, 1)["items"][0]
+        with self.assertRaises(urllib.error.HTTPError):
+            self.request(
+                "/api/nemesis/send", {"file_id": record["id"], "resend": "yes"}
+            )
+
     def test_nemesis_rejects_unconfigured_and_untrusted_requests(self) -> None:
         for headers in ({}, {"X-Shrawler-Request": ""}):
             with self.assertRaises(urllib.error.HTTPError):

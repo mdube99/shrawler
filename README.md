@@ -244,6 +244,7 @@ Explore provides:
 
 - Paginated Table view for dense file review, with lazy-loading Tree view
 - Search by filename, path, host, share, or extension, plus a collapsed filter panel
+  where every field takes several values and any value can be included or excluded
 - Combined, Rule, and AI scores side by side, with severity on a row rail
 - Run selection in place of a filter: deselecting a run re-weights Combined
 - Every view state carried in the URL, so any table state is a shareable link

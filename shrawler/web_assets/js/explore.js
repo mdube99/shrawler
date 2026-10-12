@@ -10,6 +10,7 @@ import {
   clear,
   delegate,
   el,
+  FACET_PARAMS,
   fill,
   fmt,
   icon,
@@ -42,28 +43,14 @@ import { errorLine, toast } from './overlay.js';
 import { aiScore, combinedChip, combinedScore, describe, engineChip, ruleScore } from './scores.js';
 import { createTree } from './tree.js';
 
-const SERVER_KEYS = [
-  'q',
-  'host',
-  'share',
-  'extension',
-  'rule',
-  'triage',
-  'permission',
-  'collection',
-  'ranking_run',
-  'ranking_category',
-  'ranking_min',
-  'jev_run',
-  'sort',
-  'direction',
-  'activity',
-];
+const SERVER_KEYS = ['q', ...FACET_PARAMS, 'ranking_run', 'ranking_category', 'ranking_min', 'jev_run', 'sort', 'direction'];
 
 // Defaults double as the URL contract: a value equal to its default is dropped
-// from the query, which keeps shared links short.
+// from the query, which keeps shared links short. Facets default to an empty
+// list, which is what makes them read and write as repeated parameters.
 const DEFAULTS = {
   ...Object.fromEntries(SERVER_KEYS.map((key) => [key, ''])),
+  ...Object.fromEntries(FACET_PARAMS.map((key) => [key, []])),
   sort: 'combined',
   direction: 'desc',
   page: '1',
@@ -225,7 +212,7 @@ function rowFor(item, index) {
   dateCell.append(time);
 
   const actionsCell = el('td', 'actions-cell');
-  actionsCell.append(...rowActions(item, actionContext()));
+  actionsCell.append(el('div', 'actions-inner', ...rowActions(item, actionContext())));
 
   const chevronCell = el('td', 'chevron-cell');
   chevronCell.append(icon('chevron'));
@@ -399,6 +386,7 @@ function actionContext() {
     },
     onSend: (items) => send(items),
     onClose: () => toggleExpanded(null),
+    onFilter: (key, value, mode) => filters.apply(key, value, mode),
   };
 }
 
@@ -408,7 +396,7 @@ async function send(items) {
   try {
     const summary = await sendToNemesis(items, {
       status,
-      confirmFirst: items.length > 1,
+      confirmFirst: items.length > 1 || items.some((row) => row.nemesis_status === 'uploaded'),
       onProgress: (message) => {
         $('selection-size').textContent = message;
       },
@@ -621,6 +609,8 @@ async function boot() {
   json('/api/facets')
     .then((value) => {
       facets = value;
+      // An open filter panel is still showing "Loading values…".
+      filters.renderChips();
     })
     .catch(() => {
       /* Facets only populate the filter panel; the table stays usable. */

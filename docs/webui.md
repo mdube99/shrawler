@@ -54,8 +54,50 @@ Search sits above the grid with `/` to focus it. Filters live behind a single
 trigger that shows the active count (`Filters · 3`) and open as a popover, or a
 bottom sheet on narrow viewports. Host, share, file type, Snaffler rule, triage,
 share-root permission, collection state, transfer state, rank category, and
-minimum rule rating are all filterable. Active filters also appear as removable
-chips.
+minimum rule rating are all filterable.
+
+The filter panel lists the fields on the left and the selected field's values on
+the right. Type to narrow the values, then click one to **include** it or press
+**−** beside it to **exclude** it. Enter includes the top match and Shift+Enter
+excludes it. Each field shows `+n` / `−n` counts, and **Invert** swaps a field's
+included and excluded values. The panel stays open while you build a filter, and
+the table updates as you go.
+
+- Several included values in one field match any of them (host is `alpha` *or*
+  `bravo`).
+- An excluded value is always removed, whatever else matches.
+- Different fields combine with *and*.
+- Rule and triage includes must hold on the same Snaffler match. A rule or
+  triage exclusion removes a file if *any* of its matches carries the value.
+  Files with no matches are kept.
+
+Active filters appear as chips. Excluded chips are red, read `not`, strike the
+value through, and lead with a `−` sign. Click the sign to flip a chip between
+include and exclude, or `×` to remove it. **Clear filters** removes them all.
+An expanded row also has a **Filter by this file** band. Use **+** to show only
+that host, share, file type, or rule, or **−** to hide it. This drops noise such
+as a domain controller's `SYSVOL` in one click.
+
+Rank category and minimum rule rating stay single-value and need a ranking run.
+
+### Filter URL contract
+
+Filters are part of the shareable URL and use the same parameters as
+`/api/files`, `/api/tree`, and `/api/tree/branch`:
+
+| Parameter | Meaning |
+| --- | --- |
+| `host=a&host=b` | Include: host is `a` or `b`. A single `host=a` (the older link form) works as before. |
+| `not_host=c&not_host=d` | Exclude: host is neither `c` nor `d`. |
+
+The same pattern applies to `share`, `extension`, `rule`, `triage`,
+`permission`, `collection`, and `activity`. Blank values are ignored. Values for
+`permission`, `collection`, and `activity` must come from their fixed
+vocabularies, for include and exclude alike. An unknown value, or more than 50
+values for one parameter, returns `400` with code `invalid_query`. `q`,
+`ranking_run`, `ranking_category`, and `ranking_min` stay single-valued. When
+`/api/tree/branch` gets `level=shares`, it lists a host's shares and treats
+`share` as a filter, not as the share to open.
 
 **Engine run selection** is a dedicated control rather than one more filter.
 `Ranking` and `AI` each select a saved run or none, and Overall is their
@@ -79,8 +121,11 @@ Table view displays one paginated result set. Each row leads with the file name
 (with its type badge) over a path that is truncated from the middle on wide rows
 and shortened to its last two segments on narrow ones, so the file name always
 survives; location follows, then the score cluster. Each row carries two actions
-— **Nemesis** and **Download**; a file already downloaded or sent shows a status
-chip with its Nemesis button disabled. The expanded detail panel adds **View
+— **Nemesis** and **Download**. A file already downloaded or sent keeps both
+actions available; a small badge on the action records the history (a check for
+one send, a count for repeat sends, `!` for a failure) and the detail panel
+spells out `Downloaded 2×` or `Sent 2×`. A second send is a deliberate upload of
+another copy, not a deduplicated no-op. The expanded detail panel adds **View
 file** and the paths. A selection raises a sticky bar at the bottom of the
 viewport with the bulk actions. Select a file to open a detail panel beneath the
 row. The panel leads

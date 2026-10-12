@@ -385,6 +385,38 @@
   height: 11px;
 }
 
+/* Exclusions read as the opposite of a filter at a glance: danger tint, a
+   minus sign, the word "not", and a struck-through value. Colour is never the
+   only cue. */
+.filter-chip--exclude {
+  border-color: hsl(2 50% 40%);
+  background: var(--danger-wash);
+  color: var(--text);
+}
+
+.filter-chip--exclude b,
+.filter-chip__not {
+  color: var(--danger);
+}
+
+.filter-chip__not {
+  font-weight: 600;
+}
+
+.filter-chip--exclude .filter-chip__value {
+  text-decoration: line-through;
+  text-decoration-color: var(--danger);
+}
+
+.filter-chip button.filter-chip__sign {
+  margin-left: -5px;
+  color: var(--accent);
+}
+
+.filter-chip--exclude button.filter-chip__sign {
+  color: var(--danger);
+}
+
 /* -- File type tag --------------------------------------------------------- */
 
 .type-tag {

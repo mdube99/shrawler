@@ -10,6 +10,7 @@ import {
   checkbox,
   clear,
   el,
+  FACET_PARAMS,
   field,
   fill,
   fmt,
@@ -79,6 +80,12 @@ const NEMESIS = {
   failed: 'Failed',
 };
 
+/** "Sent 2×" is the one delivery-count spelling the row and panel share. */
+function nemesisLabel(status, deliveries) {
+  const label = NEMESIS[status] || status;
+  return deliveries > 1 ? `${label} ${deliveries}×` : label;
+}
+
 /** A collected file, as a chip. Used by the detail panel. */
 function downloadChip(item) {
   if (item.collection_status !== 'collected') return null;
@@ -92,20 +99,40 @@ function downloadChip(item) {
 function nemesisChip(item) {
   if (!item.nemesis_status) return null;
   const tone = item.nemesis_status === 'uploaded' ? 'sent' : ['failed', 'upload_failed', 'retrieval_failed'].includes(item.nemesis_status) ? 'failed' : 'pending';
-  const chip = el('span', `chip chip--${tone}`, `Nemesis ${NEMESIS[item.nemesis_status] || item.nemesis_status}`);
+  const deliveries = Number(item.nemesis_deliveries) || 0;
+  const chip = el('span', `chip chip--${tone}`, `Nemesis ${nemesisLabel(item.nemesis_status, deliveries)}`);
   chip.title = item.nemesis_error || chip.textContent;
   return chip;
 }
 
 /* -- Row vocabulary -------------------------------------------------------- */
 
-const QUEUED_STATES = new Set(['pending', 'staged', 'retrieving', 'uploading', 'uploaded']);
-
-/** Downloaded/sent state for the row's status chip. Null when neither. */
-function collectionState(item) {
-  if (item.collection_status === 'collected') return { key: 'downloaded', label: 'Downloaded' };
-  if (item.nemesis_status && QUEUED_STATES.has(item.nemesis_status)) return { key: 'queued', label: 'Sent', title: 'Sent to Nemesis' };
-  return null;
+/**
+ * Download and Nemesis state for the row's action badges. Each completed action
+ * keeps its own indicator so a row that has been downloaded, sent, or both
+ * still reads at a glance. The badges never disable the actions beside them.
+ */
+function collectionStates(item) {
+  const states = [];
+  if (item.collection_status === 'collected') {
+    const count = Number(item.download_count) || 0;
+    states.push({
+      key: 'downloaded',
+      label: count > 1 ? `Downloaded ${count}×` : 'Downloaded',
+      title: item.downloaded_at_utc ? `Downloaded ${fmt.date(item.downloaded_at_utc)}` : 'Downloaded',
+    });
+  }
+  if (item.nemesis_status) {
+    const deliveries = Number(item.nemesis_deliveries) || 0;
+    const failed = ['failed', 'upload_failed', 'retrieval_failed'].includes(item.nemesis_status);
+    states.push({
+      key: failed ? 'failed' : item.nemesis_status === 'uploaded' ? 'sent' : 'queued',
+      label: nemesisLabel(item.nemesis_status, deliveries),
+      title: item.nemesis_error || `Nemesis ${nemesisLabel(item.nemesis_status, deliveries)}`,
+      deliveries,
+    });
+  }
+  return states;
 }
 
 /**
@@ -246,7 +273,7 @@ function nemesisValue(item) {
  * describe a file identically.
  */
 export function detailPanel(item, ctx) {
-  const { status, describe, onDownload, onSend, onClose } = ctx;
+  const { status, describe, onDownload, onSend, onClose, onFilter } = ctx;
   const panel = el('div', 'detail-panel');
   panel.setAttribute('role', 'region');
   panel.setAttribute('aria-label', `Details for ${item.file_name}`);
@@ -291,7 +318,12 @@ export function detailPanel(item, ctx) {
       },
     });
     if (!previewable) previewButton.setAttribute('aria-disabled', 'true');
-    const nemesisButton = button('Send to Nemesis', { name: 'upload', onClick: () => onSend([item]) });
+    const sent = item.nemesis_status === 'uploaded';
+    const nemesisButton = button(sent ? 'Send again' : 'Send to Nemesis', {
+      name: 'upload',
+      onClick: () => onSend([item]),
+    });
+    if (sent) nemesisButton.title = 'Upload another copy to Nemesis';
     if (status.nemesis_enabled === false) {
       nemesisButton.disabled = true;
       nemesisButton.title = 'Configure Nemesis URL, authentication, and project first';
@@ -315,6 +347,7 @@ export function detailPanel(item, ctx) {
     actions,
     kvList([kv('UNC path', pathLine(item.unc_path, 'Copy UNC path')), kv('Remote path', pathLine(item.remote_path, 'Copy remote path'))]),
   );
+  if (onFilter) primary.append(quickFilters(item, onFilter));
 
   const assessment = section(
     'assessment',
@@ -341,6 +374,39 @@ export function detailPanel(item, ctx) {
 
   fill(panel, head, primary, assessment, collection, technical);
   return panel;
+}
+
+/**
+ * "Only" and "Hide" for each facet value this file carries. Narrowing from a
+ * row the analyst is already looking at is the quickest way to drop noise
+ * (a DC's SYSVOL, a chatty rule) without opening the filter panel.
+ */
+function quickFilters(item, onFilter) {
+  const rules = [...new Set((item.rule_matches || []).map((match) => match.rule_name).filter(Boolean))];
+  const facets = [
+    ['host', 'Host', item.host, item.host],
+    ['share', 'Share', item.share, item.share],
+    ['extension', 'Type', item.extension, typeLabel(item.extension)],
+    ...rules.map((rule) => ['rule', 'Rule', rule, rule]),
+  ].filter(([, , value]) => value);
+  const group = el('div', 'quick-filters');
+  group.setAttribute('role', 'group');
+  group.setAttribute('aria-label', 'Filter results by this file');
+  group.append(el('span', 'field__label', 'Filter by this file'));
+  for (const [key, noun, value, label] of facets) {
+    const only = el('button', 'quick-filter__btn', icon('plus'));
+    only.type = 'button';
+    only.title = `Show only ${noun.toLowerCase()} ${label}`;
+    only.setAttribute('aria-label', only.title);
+    on(only, 'click', () => onFilter(key, value, 'only'));
+    const hide = el('button', 'quick-filter__btn quick-filter__btn--exclude', icon('minus'));
+    hide.type = 'button';
+    hide.title = `Hide ${noun.toLowerCase()} ${label}`;
+    hide.setAttribute('aria-label', hide.title);
+    on(hide, 'click', () => onFilter(key, value, 'exclude'));
+    group.append(el('span', 'quick-filter', el('span', 'quick-filter__name', el('span', undefined, `${noun} `), el('b', undefined, label)), only, hide));
+  }
+  return group;
 }
 
 async function copyText(value, button) {
@@ -380,15 +446,20 @@ function iconButton(name, label, onClick) {
 
 /**
  * The row's two actions: Nemesis (primary) and Download. Both reach the
- * environment, so both are disabled offline. A file already downloaded or sent
- * shows a status chip and has its Nemesis button disabled.
+ * environment, so both are disabled offline. Prior downloads and sends are
+ * shown as small badges on the buttons themselves, so the actions stay
+ * available without a separate status chip taking table width.
  */
 export function rowActions(item, ctx) {
   const { status, onDownload, onSend } = ctx;
   const offline = !status.retrieval_enabled;
   const noNemesis = status.nemesis_enabled === false;
-  const state = collectionState(item);
-  const cluster = [];
+  const states = collectionStates(item);
+  const downloaded = states.find((state) => state.key === 'downloaded');
+  const nemesis = states.find((state) => state.key !== 'downloaded');
+  const repeat = item.nemesis_status === 'uploaded';
+  const inFlight = ['pending', 'staged', 'retrieving', 'uploading'].includes(item.nemesis_status);
+  const ambiguous = item.nemesis_status === 'unknown';
 
   const queue = button('Nemesis', {
     name: 'upload',
@@ -398,18 +469,29 @@ export function rowActions(item, ctx) {
       if (!queue.disabled) onSend([item]);
     },
   });
-  queue.setAttribute('aria-label', `Send ${item.file_name} to Nemesis`);
+  queue.setAttribute('aria-label', `${repeat ? 'Send again' : 'Send'} ${item.file_name} to Nemesis`);
   if (offline) {
     queue.disabled = true;
     queue.title = 'Remote retrieval is disabled in offline mode';
   } else if (noNemesis) {
     queue.disabled = true;
     queue.title = 'Configure Nemesis URL, authentication, and project first';
-  } else if (state) {
+  } else if (inFlight) {
     queue.disabled = true;
-    queue.title = state.key === 'downloaded' ? 'Already downloaded' : 'Already sent to Nemesis';
+    queue.title = 'A Nemesis transfer is already running for this file';
+  } else if (ambiguous) {
+    queue.disabled = true;
+    queue.title = 'Previous upload outcome is unknown; check Nemesis, then use the CLI --retry-unknown flag';
   } else {
-    queue.title = 'Send to Nemesis';
+    queue.title = repeat ? 'Send another copy to Nemesis' : 'Send to Nemesis';
+  }
+  if (nemesis) {
+    const badge = nemesis.key === 'failed' ? '!' : nemesis.deliveries > 1 ? String(nemesis.deliveries) : '✓';
+    queue.dataset.state = nemesis.key;
+    queue.append(el('span', `row-badge row-badge--${nemesis.key}`, badge));
+    const history = nemesis.deliveries > 1 ? ` · ${nemesis.deliveries} deliveries` : nemesis.deliveries === 1 ? ' · sent before' : '';
+    queue.title = `${nemesis.title}${history} · ${queue.title}`;
+    queue.setAttribute('aria-label', `${queue.getAttribute('aria-label')} (${nemesis.label.toLowerCase()})`);
   }
 
   const download = iconButton('download', `Download ${item.file_name}`, async () => {
@@ -423,14 +505,13 @@ export function rowActions(item, ctx) {
     download.disabled = true;
     download.title = 'Remote retrieval is disabled in offline mode';
   }
-
-  if (state) {
-    const chip = el('span', `row-status row-status--${state.key}`, state.label);
-    chip.title = state.title || state.label;
-    cluster.push(chip);
+  if (downloaded) {
+    download.dataset.state = 'downloaded';
+    download.setAttribute('aria-label', `Download ${item.file_name} again (${downloaded.label.toLowerCase()})`);
+    download.title = `${downloaded.title} · download again`;
   }
-  cluster.push(queue, download);
-  return cluster;
+
+  return [queue, download];
 }
 
 /* -- Percentage targets ---------------------------------------------------- */
@@ -450,34 +531,10 @@ const PAGE = 500;
  */
 export async function resolveTarget({ params, scope, percent, sortKey, signal }) {
   const query = new URLSearchParams(
-    serverParams(params, [
-      'q',
-      'host',
-      'share',
-      'extension',
-      'rule',
-      'triage',
-      'permission',
-      'collection',
-      'ranking_run',
-      'ranking_category',
-      'ranking_min',
-      'jev_run',
-      'activity',
-    ]),
+    serverParams(params, ['q', ...FACET_PARAMS, 'ranking_run', 'ranking_category', 'ranking_min', 'jev_run']),
   );
   if (scope === 'scan') {
-    for (const key of [
-      'q',
-      'host',
-      'share',
-      'extension',
-      'rule',
-      'triage',
-      'permission',
-      'collection',
-      'activity',
-    ]) {
+    for (const key of ['q', ...FACET_PARAMS]) {
       query.delete(key);
     }
   }
@@ -512,13 +569,15 @@ export function preflight(rows, status) {
   let bytes = 0;
   let overCap = 0;
   let biggest = 0;
+  let repeats = 0;
   for (const row of rows) {
     const size = Number(row.size_bytes) || 0;
     bytes += size;
     biggest = Math.max(biggest, size);
     if (size > cap) overCap += 1;
+    if (row.nemesis_status === 'uploaded') repeats += 1;
   }
-  return { count: rows.length, bytes, cap, overCap, biggest };
+  return { count: rows.length, bytes, cap, overCap, biggest, repeats };
 }
 
 /**
@@ -535,6 +594,9 @@ export function preflightLines(target, plan) {
     lines.push(
       `${fmt.count(plan.overCap)} file${plan.overCap === 1 ? '' : 's'} exceed the per-file cap and will be skipped`,
     );
+  }
+  if (plan.repeats) {
+    lines.push(`${fmt.count(plan.repeats)} already sent and will be uploaded again`);
   }
   if (target.overCeiling) {
     lines.push(
@@ -578,6 +640,8 @@ export async function downloadRows(rows, onProgress) {
 function applyNemesisState(item, state) {
   if (!item) return;
   item.nemesis_status = String(state.status || '');
+  const prior = Array.isArray(state.response_ids) ? state.response_ids.length : 0;
+  item.nemesis_deliveries = (state.response_id ? 1 : 0) + prior;
   item.nemesis_updated_at_utc = String(state.updated_at || new Date().toISOString());
   item.nemesis_response_id = String(state.response_id || '');
   item.nemesis_error = String(state.error || '');
@@ -589,8 +653,9 @@ function applyNemesisState(item, state) {
  * Each file is retrieved from SMB and uploaded in the same request through the
  * direct delivery path, which enforces the per-file size cap and keeps staged
  * bytes in the persistent spool for retry. A file already delivered to the
- * same destination comes back "uploaded" without a second transfer, so a
- * repeat click is safe.
+ * same destination is sent again on purpose: the request carries `resend`,
+ * which makes the server treat the click as an explicit second upload rather
+ * than a deduplicated no-op.
  *
  * There is no manifest in this path: the click is the send. A ranking run is
  * not required either -- Explore shows files the selected run never rated, and
@@ -608,6 +673,10 @@ export async function sendToNemesis(rows, { status, confirmFirst = false, onProg
     if (chosen.length < rows.length) {
       detail.push(`first ${fmt.count(chosen.length)} of ${fmt.count(rows.length)} selected`);
     }
+    const repeats = chosen.filter((row) => row.nemesis_status === 'uploaded').length;
+    if (repeats) {
+      detail.push(`${fmt.count(repeats)} already sent and will be uploaded again`);
+    }
     const accepted = await confirm({
       title: `Send ${fmt.count(chosen.length)} file${chosen.length === 1 ? '' : 's'} to Nemesis?`,
       message: 'Each file is retrieved from SMB and uploaded to the configured Nemesis server now.',
@@ -620,12 +689,18 @@ export async function sendToNemesis(rows, { status, confirmFirst = false, onProg
   for (let index = 0; index < chosen.length; index += 1) {
     const row = chosen[index];
     const fileId = row.id || row.file_id;
+    // Keep the successful-delivery count when the browser call fails; the
+    // server never got to speak, so the row should not forget its history.
+    const delivered = Number(row.nemesis_deliveries) || 0;
     onProgress?.(
       `Sending ${index + 1} of ${chosen.length}: ${row.file_name || row.unc_path || fileId}`,
       (index / chosen.length) * 100,
     );
     try {
-      applyNemesisState(row, await post('/api/nemesis/send', { file_id: fileId }));
+      // A file that already has an accepted delivery is sent again on purpose:
+      // the server treats this as an explicit second upload, not a dedupe hit.
+      const resend = row.nemesis_status === 'uploaded';
+      applyNemesisState(row, await post('/api/nemesis/send', { file_id: fileId, resend }));
       if (row.nemesis_status === 'uploaded') summary.uploaded += 1;
       else if (row.nemesis_status === 'unknown') {
         summary.unknown += 1;
@@ -638,6 +713,7 @@ export async function sendToNemesis(rows, { status, confirmFirst = false, onProg
       summary.failed += 1;
       summary.errors.push(error.message);
       applyNemesisState(row, { status: 'upload_failed', error: error.message });
+      row.nemesis_deliveries = delivered;
     }
   }
   onProgress?.(`${fmt.count(summary.uploaded)} sent`, 100);

@@ -18,7 +18,18 @@ import urllib.parse
 from dataclasses import asdict, dataclass, field
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Tuple, cast
+from typing import (
+    Any,
+    Callable,
+    Dict,
+    List,
+    Mapping,
+    Optional,
+    Sequence,
+    Tuple,
+    Union,
+    cast,
+)
 
 from .collection import CollectionBusyError, CollectionQueue, smb_retriever
 from .nemesis import DeliveryStore, NemesisConfig
@@ -113,6 +124,103 @@ ASSET_TYPES = {
 # Below this size the gzip header costs more than it saves.
 GZIP_FLOOR = 512
 
+# Facets that accept repeated include values (``host=a&host=b``) and repeated
+# exclusions under a ``not_`` prefix (``not_host=c``). Values within a facet
+# are ORed; facets, and includes against excludes, are ANDed.
+FILTER_FACETS = (
+    "host",
+    "share",
+    "extension",
+    "rule",
+    "triage",
+    "permission",
+    "collection",
+    "activity",
+)
+EXCLUDE_PREFIX = "not_"
+# Bounds one request's IN-lists well under SQLite's oldest 999-variable limit.
+MAX_FACET_VALUES = 50
+PERMISSION_PATHS = {
+    "read": "$.permissions.read",
+    "write": "$.permissions.write",
+    "add_file": "$.permissions.write_rights.add_file",
+    "add_subdirectory": "$.permissions.write_rights.add_subdirectory",
+    "write_dac": "$.permissions.write_rights.write_dac",
+    "write_owner": "$.permissions.write_rights.write_owner",
+}
+COLLECTION_VALUES = ("collected", "not_collected")
+ACTIVITY_VALUES = (
+    "downloaded",
+    "not_downloaded",
+    "nemesis_sent",
+    "not_nemesis_sent",
+    "nemesis_failed",
+)
+_FIXED_VOCABULARIES: Dict[str, Tuple[str, ...]] = {
+    "permission": tuple(PERMISSION_PATHS),
+    "collection": COLLECTION_VALUES,
+    "activity": ACTIVITY_VALUES,
+}
+
+# A facet argument is a single value (the original scalar API) or a list.
+FacetValue = Union[str, Sequence[str]]
+
+
+def _facet_values(value: Optional[FacetValue]) -> Tuple[str, ...]:
+    """Normalize a scalar or list facet argument to unique non-empty values."""
+    if not value:
+        return ()
+    items = (value,) if isinstance(value, str) else tuple(value)
+    return tuple(dict.fromkeys(item for item in items if item))
+
+
+@dataclass(frozen=True)
+class FacetFilters:
+    """Include and exclude values per facet, validated once for both indexes."""
+
+    include: Dict[str, Tuple[str, ...]]
+    exclude: Dict[str, Tuple[str, ...]]
+
+    @classmethod
+    def build(
+        cls,
+        host: Optional[FacetValue] = None,
+        share: Optional[FacetValue] = None,
+        extension: Optional[FacetValue] = None,
+        rule: Optional[FacetValue] = None,
+        triage: Optional[FacetValue] = None,
+        permission: Optional[FacetValue] = None,
+        collection: Optional[FacetValue] = None,
+        activity: Optional[FacetValue] = None,
+        exclude: Optional[Mapping[str, FacetValue]] = None,
+    ) -> "FacetFilters":
+        include = {
+            "host": _facet_values(host),
+            "share": _facet_values(share),
+            "extension": _facet_values(extension),
+            "rule": _facet_values(rule),
+            "triage": _facet_values(triage),
+            "permission": _facet_values(permission),
+            "collection": _facet_values(collection),
+            "activity": _facet_values(activity),
+        }
+        unknown = set(exclude or {}) - set(FILTER_FACETS)
+        if unknown:
+            raise ValueError("Unknown exclude filter: " + ", ".join(sorted(unknown)))
+        excluded = {
+            key: _facet_values((exclude or {}).get(key)) for key in FILTER_FACETS
+        }
+        for key, allowed in _FIXED_VOCABULARIES.items():
+            if any(value not in allowed for value in include[key] + excluded[key]):
+                raise ValueError(f"Invalid {key} filter")
+        return cls(include, excluded)
+
+    def key(self) -> Tuple[Tuple[str, Tuple[str, ...], Tuple[str, ...]], ...]:
+        """Hashable identity for result caches."""
+        return tuple(
+            (key, self.include[key], self.exclude[key]) for key in FILTER_FACETS
+        )
+
 
 def jev_catalog(database: Path) -> List[Dict[str, Any]]:
     """Assessment runs recorded beside an inventory, newest first."""
@@ -165,6 +273,7 @@ class FileRecord:
     downloaded_at_utc: str = ""
     download_count: int = 0
     nemesis_status: str = ""
+    nemesis_deliveries: int = 0
     nemesis_updated_at_utc: str = ""
     nemesis_response_id: str = ""
     nemesis_error: str = ""
@@ -344,6 +453,7 @@ class FileIndex:
             ),
             "download_count": download_count,
             "nemesis_status": str(nemesis.get("status") or ""),
+            "nemesis_deliveries": int(nemesis.get("deliveries") or 0),
             "nemesis_updated_at_utc": str(nemesis.get("updated_at") or ""),
             "nemesis_response_id": str(nemesis.get("response_id") or ""),
             "nemesis_error": str(nemesis.get("last_error") or ""),
@@ -419,46 +529,85 @@ class FileIndex:
     def _matching(
         self,
         q: str,
-        host: str,
-        share: str,
-        extension: str,
-        rule: str = "",
-        triage: str = "",
-        permission: str = "",
-        collection: str = "",
+        host: FacetValue,
+        share: FacetValue,
+        extension: FacetValue,
+        rule: FacetValue = "",
+        triage: FacetValue = "",
+        permission: FacetValue = "",
+        collection: FacetValue = "",
         ranking_run: str = "",
         ranking_category: str = "",
         ranking_min: int = 0,
-        activity: str = "",
+        activity: FacetValue = "",
+        exclude: Optional[Mapping[str, FacetValue]] = None,
     ) -> List[FileRecord]:
+        filters = FacetFilters.build(
+            host,
+            share,
+            extension,
+            rule,
+            triage,
+            permission,
+            collection,
+            activity,
+            exclude,
+        )
         terms = q.casefold().split()
         return [
             record
             for record in self.records
-            if (not host or record.host == host)
-            and (not share or record.share == share)
-            and (not extension or record.extension == extension)
-            and all(term in record.search_text for term in terms)
-            and (
-                not (rule or triage)
-                or any(
-                    (not rule or match.get("rule_name") == rule)
-                    and (not triage or match.get("triage") == triage)
-                    for match in record.rule_matches
-                )
-            )
-            and (
-                not permission
-                or (
-                    record.permissions
-                    if permission in {"read", "write"}
-                    else record.permissions.get("write_rights", {})
-                ).get(permission)
-                is True
-            )
-            and (not collection or record.collection_status == collection)
-            and self._activity_match(record, activity)
+            if all(term in record.search_text for term in terms)
+            and self._facets_match(record, filters)
         ]
+
+    @classmethod
+    def _facets_match(cls, record: FileRecord, filters: FacetFilters) -> bool:
+        include, exclude = filters.include, filters.exclude
+
+        def keep(values: Tuple[str, ...], blocked: Tuple[str, ...], value: str) -> bool:
+            return (not values or value in values) and value not in blocked
+
+        if not (
+            keep(include["host"], exclude["host"], record.host)
+            and keep(include["share"], exclude["share"], record.share)
+            and keep(include["extension"], exclude["extension"], record.extension)
+        ):
+            return False
+        rules, triages = include["rule"], include["triage"]
+        # Rule and triage includes must hold on the same match, as before.
+        if (rules or triages) and not any(
+            (not rules or match.get("rule_name") in rules)
+            and (not triages or match.get("triage") in triages)
+            for match in record.rule_matches
+        ):
+            return False
+        if any(
+            match.get("rule_name") in exclude["rule"]
+            or match.get("triage") in exclude["triage"]
+            for match in record.rule_matches
+        ):
+            return False
+
+        def permitted(name: str) -> bool:
+            rights = (
+                record.permissions
+                if name in {"read", "write"}
+                else record.permissions.get("write_rights", {})
+            )
+            return rights.get(name) is True
+
+        checks: Tuple[Tuple[str, Callable[[str], bool]], ...] = (
+            ("permission", permitted),
+            ("collection", lambda value: record.collection_status == value),
+            ("activity", lambda value: cls._activity_match(record, value)),
+        )
+        for key, test in checks:
+            if include[key] and not any(test(value) for value in include[key]):
+                return False
+            if any(test(value) for value in exclude[key]):
+                return False
+        return True
 
     @staticmethod
     def _activity_match(record: FileRecord, activity: str) -> bool:
@@ -484,26 +633,36 @@ class FileIndex:
     def search(
         self,
         q: str,
-        host: str,
-        share: str,
-        extension: str,
+        host: FacetValue,
+        share: FacetValue,
+        extension: FacetValue,
         page: int,
         per_page: int,
-        rule: str = "",
-        triage: str = "",
-        permission: str = "",
-        collection: str = "",
+        rule: FacetValue = "",
+        triage: FacetValue = "",
+        permission: FacetValue = "",
+        collection: FacetValue = "",
         ranking_run: str = "",
         ranking_category: str = "",
         ranking_min: int = 0,
         sort: str = "path",
         direction: str = "asc",
         include_total: bool = True,
-        activity: str = "",
+        activity: FacetValue = "",
         jev_run: str = "",
+        exclude: Optional[Mapping[str, FacetValue]] = None,
     ) -> Dict[str, Any]:
         matches = self._matching(
-            q, host, share, extension, rule, triage, permission, collection, activity=activity
+            q,
+            host,
+            share,
+            extension,
+            rule,
+            triage,
+            permission,
+            collection,
+            activity=activity,
+            exclude=exclude,
         )
         sort_keys: Dict[str, Callable[[FileRecord], Any]] = {
             "path": lambda row: (
@@ -546,20 +705,21 @@ class FileIndex:
     def tree(
         self,
         q: str,
-        host: str,
-        share: str,
-        extension: str,
-        rule: str = "",
-        triage: str = "",
-        permission: str = "",
-        collection: str = "",
+        host: FacetValue,
+        share: FacetValue,
+        extension: FacetValue,
+        rule: FacetValue = "",
+        triage: FacetValue = "",
+        permission: FacetValue = "",
+        collection: FacetValue = "",
         ranking_run: str = "",
         ranking_category: str = "",
         ranking_min: int = 0,
         sort: str = "path",
         direction: str = "asc",
-        activity: str = "",
+        activity: FacetValue = "",
         jev_run: str = "",
+        exclude: Optional[Mapping[str, FacetValue]] = None,
     ) -> Dict[str, Any]:
         """Build a complete host/share/folder hierarchy for matching records.
 
@@ -568,7 +728,16 @@ class FileIndex:
         resolve it against.
         """
         matches = self._matching(
-            q, host, share, extension, rule, triage, permission, collection, activity=activity
+            q,
+            host,
+            share,
+            extension,
+            rule,
+            triage,
+            permission,
+            collection,
+            activity=activity,
+            exclude=exclude,
         )
         hosts: Dict[str, Dict[str, Any]] = {}
 
@@ -952,10 +1121,14 @@ class DatabaseIndex:
         now = utc_now()
 
         def update(payload: Dict[str, Any]) -> None:
+            response_id = str(state.get("response_id") or "")
+            prior = state.get("response_ids") or []
             payload["nemesis"] = {
                 "status": state.get("status"),
                 "attempts": state.get("attempts"),
-                "response_id": state.get("response_id"),
+                "response_id": response_id,
+                "response_ids": list(prior),
+                "deliveries": (1 if response_id else 0) + len(prior),
                 "last_error": state.get("error") or state.get("last_error"),
                 "updated_at": state.get("updated_at") or now,
             }
@@ -1016,6 +1189,9 @@ class DatabaseIndex:
                         nemesis = detail.get("nemesis") or {}
                         if nemesis:
                             record.nemesis_status = str(nemesis.get("status") or "")
+                            record.nemesis_deliveries = int(
+                                nemesis.get("deliveries") or 0
+                            )
                             record.nemesis_updated_at_utc = str(
                                 nemesis.get("updated_at") or ""
                             )
@@ -1029,105 +1205,131 @@ class DatabaseIndex:
     def _where(
         cls,
         q: str,
-        host: str,
-        share: str,
-        extension: str,
-        rule: str = "",
-        triage: str = "",
-        permission: str = "",
-        collection: str = "",
+        host: FacetValue,
+        share: FacetValue,
+        extension: FacetValue,
+        rule: FacetValue = "",
+        triage: FacetValue = "",
+        permission: FacetValue = "",
+        collection: FacetValue = "",
         ranking_run: str = "",
         ranking_category: str = "",
         ranking_min: int = 0,
-        activity: str = "",
+        activity: FacetValue = "",
+        exclude: Optional[Mapping[str, FacetValue]] = None,
     ) -> Tuple[str, List[Any]]:
+        filters = FacetFilters.build(
+            host,
+            share,
+            extension,
+            rule,
+            triage,
+            permission,
+            collection,
+            activity,
+            exclude,
+        )
+        include, excluded = filters.include, filters.exclude
         clauses: List[str] = []
         values: List[Any] = []
-        for column, value in (
-            ("host", host),
-            ("share", share),
-            ("extension", extension),
-        ):
-            if value:
-                clauses.append(f"files.{column}=?")
-                values.append(value)
+
+        def placeholders(items: Tuple[str, ...]) -> str:
+            return ",".join("?" for _ in items)
+
+        for column in ("host", "share", "extension"):
+            if include[column]:
+                clauses.append(f"files.{column} IN ({placeholders(include[column])})")
+                values.extend(include[column])
+            if excluded[column]:
+                clauses.append(
+                    f"files.{column} NOT IN ({placeholders(excluded[column])})"
+                )
+                values.extend(excluded[column])
         for term in q.casefold().split():
             clauses.append("files.search_text LIKE ? ESCAPE '\\'")
             escaped = term.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
             values.append(f"%{escaped}%")
-        if rule or triage:
-            match_conditions: List[str] = []
-            for key, value in (("rule_name", rule), ("triage", triage)):
-                if value:
-                    match_conditions.append(
-                        f"json_extract(evidence.payload_json, '$.{key}')=?"
-                    )
-                    values.append(value)
-            clauses.append(
-                "EXISTS (SELECT 1 FROM files AS matched_file "
-                + cls._evidence_join("snaffler_matches")
-                + " WHERE matched_file.id=files.id AND "
-                + " AND ".join(match_conditions)
-                + ")"
-            )
-        if permission:
-            permission_paths = {
-                "read": "$.permissions.read",
-                "write": "$.permissions.write",
-                "add_file": "$.permissions.write_rights.add_file",
-                "add_subdirectory": "$.permissions.write_rights.add_subdirectory",
-                "write_dac": "$.permissions.write_rights.write_dac",
-                "write_owner": "$.permissions.write_rights.write_owner",
-            }
-            if permission not in permission_paths:
-                raise ValueError("Invalid permission filter")
-            clauses.append(
-                f"""EXISTS (SELECT 1 FROM scan_files sf
+        matches = (
+            "SELECT 1 FROM files AS matched_file "
+            + cls._evidence_join("snaffler_matches")
+            + " WHERE matched_file.id=files.id AND "
+        )
+        evidence_keys = (("rule", "rule_name"), ("triage", "triage"))
+        # Rule and triage includes must hold on the same Snaffler match.
+        match_conditions: List[str] = []
+        for facet, key in evidence_keys:
+            if include[facet]:
+                match_conditions.append(
+                    f"json_extract(evidence.payload_json, '$.{key}') "
+                    f"IN ({placeholders(include[facet])})"
+                )
+                values.extend(include[facet])
+        if match_conditions:
+            clauses.append("EXISTS (" + matches + " AND ".join(match_conditions) + ")")
+        # An exclusion drops a file if any of its matches carries the value;
+        # files without matches have nothing to exclude and are kept.
+        for facet, key in evidence_keys:
+            if excluded[facet]:
+                clauses.append(
+                    "NOT EXISTS ("
+                    + matches
+                    + f"json_extract(evidence.payload_json, '$.{key}') "
+                    + f"IN ({placeholders(excluded[facet])}))"
+                )
+                values.extend(excluded[facet])
+        for names, prefix in (
+            (include["permission"], ""),
+            (excluded["permission"], "NOT "),
+        ):
+            if names:
+                clauses.append(
+                    f"""{prefix}EXISTS (SELECT 1 FROM scan_files sf
                     JOIN shares sh ON sh.id=sf.share_id
                     WHERE sf.file_id=files.id AND sf.rowid={cls._latest_observation()}
-                    AND json_extract(sh.payload_json, ?)=1)"""
-            )
-            values.append(permission_paths[permission])
-        if collection:
-            if collection not in {"collected", "not_collected"}:
-                raise ValueError("Invalid collection filter")
-            prefix = "NOT " if collection == "not_collected" else ""
-            clauses.append(
-                prefix
-                + "EXISTS (SELECT 1 FROM files AS matched_file "
-                + cls._evidence_join("downloads")
-                + " WHERE matched_file.id=files.id AND "
-                "COALESCE(json_extract(evidence.payload_json, '$.download_count'), 1) > 0)"
-            )
-        if activity:
-            is_download = (
-                "COALESCE(json_extract(evidence.payload_json, "
-                "'$.download_count'), 1) > 0"
-            )
-            activity_clauses = {
-                "downloaded": "EXISTS (SELECT 1 FROM files AS matched_file "
-                + cls._evidence_join("downloads")
-                + f" WHERE matched_file.id=files.id AND {is_download})",
-                "not_downloaded": "NOT EXISTS (SELECT 1 FROM files AS matched_file "
-                + cls._evidence_join("downloads")
-                + f" WHERE matched_file.id=files.id AND {is_download})",
-                "nemesis_sent": "EXISTS (SELECT 1 FROM files AS matched_file "
-                + cls._evidence_join("downloads")
-                + " WHERE matched_file.id=files.id AND "
-                "json_extract(evidence.payload_json, '$.nemesis.status')='uploaded')",
-                "not_nemesis_sent": "NOT EXISTS (SELECT 1 FROM files AS matched_file "
-                + cls._evidence_join("downloads")
-                + " WHERE matched_file.id=files.id AND "
-                "json_extract(evidence.payload_json, '$.nemesis.status')='uploaded')",
-                "nemesis_failed": "EXISTS (SELECT 1 FROM files AS matched_file "
-                + cls._evidence_join("downloads")
-                + " WHERE matched_file.id=files.id AND "
-                "json_extract(evidence.payload_json, '$.nemesis.status') IN "
+                    AND ("""
+                    + " OR ".join("json_extract(sh.payload_json, ?)=1" for _ in names)
+                    + "))"
+                )
+                values.extend(PERMISSION_PATHS[name] for name in names)
+        downloads = (
+            "EXISTS (SELECT 1 FROM files AS matched_file "
+            + cls._evidence_join("downloads")
+            + " WHERE matched_file.id=files.id AND "
+        )
+        is_download = (
+            "COALESCE(json_extract(evidence.payload_json, '$.download_count'), 1) > 0)"
+        )
+        is_uploaded = (
+            "json_extract(evidence.payload_json, '$.nemesis.status')='uploaded')"
+        )
+        # Every predicate below is an internal constant keyed by a validated
+        # vocabulary value; none of them interpolates request input.
+        predicates: Dict[str, Dict[str, str]] = {
+            "collection": {
+                "collected": downloads + is_download,
+                "not_collected": "NOT " + downloads + is_download,
+            },
+            "activity": {
+                "downloaded": downloads + is_download,
+                "not_downloaded": "NOT " + downloads + is_download,
+                "nemesis_sent": downloads + is_uploaded,
+                "not_nemesis_sent": "NOT " + downloads + is_uploaded,
+                "nemesis_failed": downloads
+                + "json_extract(evidence.payload_json, '$.nemesis.status') IN "
                 "('upload_failed','retrieval_failed','failed','unknown'))",
-            }
-            if activity not in activity_clauses:
-                raise ValueError("Invalid activity filter")
-            clauses.append(activity_clauses[activity])
+            },
+        }
+        for facet, table in predicates.items():
+            if include[facet]:
+                clauses.append(
+                    "(" + " OR ".join(table[value] for value in include[facet]) + ")"
+                )
+            if excluded[facet]:
+                clauses.append(
+                    "NOT ("
+                    + " OR ".join(table[value] for value in excluded[facet])
+                    + ")"
+                )
         if ranking_run and ranking_min > 0:
             clauses.append("ranking_score >= ?")
             values.append(ranking_min)
@@ -1325,23 +1527,24 @@ class DatabaseIndex:
     def search(
         self,
         q: str,
-        host: str,
-        share: str,
-        extension: str,
+        host: FacetValue,
+        share: FacetValue,
+        extension: FacetValue,
         page: int,
         per_page: int,
-        rule: str = "",
-        triage: str = "",
-        permission: str = "",
-        collection: str = "",
+        rule: FacetValue = "",
+        triage: FacetValue = "",
+        permission: FacetValue = "",
+        collection: FacetValue = "",
         ranking_run: str = "",
         ranking_category: str = "",
         ranking_min: int = 0,
         sort: str = "path",
         direction: str = "asc",
         include_total: bool = True,
-        activity: str = "",
+        activity: FacetValue = "",
         jev_run: str = "",
+        exclude: Optional[Mapping[str, FacetValue]] = None,
     ) -> Dict[str, Any]:
         where, where_values = self._where(
             q,
@@ -1356,6 +1559,7 @@ class DatabaseIndex:
             ranking_category,
             ranking_min,
             activity,
+            exclude,
         )
         joins, join_values, ranking_score = self._ranking_join(
             ranking_run, ranking_category
@@ -1527,8 +1731,22 @@ class DatabaseIndex:
             ).fetchone()
             revision = int(revision_row[0]) if revision_row else 0
             total_key = (
-                revision, q, host, share, extension, rule, triage, permission,
-                collection, ranking_run, ranking_category, ranking_min, activity,
+                revision,
+                q,
+                FacetFilters.build(
+                    host,
+                    share,
+                    extension,
+                    rule,
+                    triage,
+                    permission,
+                    collection,
+                    activity,
+                    exclude,
+                ).key(),
+                ranking_run,
+                ranking_category,
+                ranking_min,
                 jev_run_id,
             )
             total = self._total_cache.get(total_key) if include_total else None
@@ -1580,20 +1798,21 @@ class DatabaseIndex:
     def tree(
         self,
         q: str,
-        host: str,
-        share: str,
-        extension: str,
-        rule: str = "",
-        triage: str = "",
-        permission: str = "",
-        collection: str = "",
+        host: FacetValue,
+        share: FacetValue,
+        extension: FacetValue,
+        rule: FacetValue = "",
+        triage: FacetValue = "",
+        permission: FacetValue = "",
+        collection: FacetValue = "",
         ranking_run: str = "",
         ranking_category: str = "",
         ranking_min: int = 0,
         sort: str = "path",
         direction: str = "asc",
-        activity: str = "",
+        activity: FacetValue = "",
         jev_run: str = "",
+        exclude: Optional[Mapping[str, FacetValue]] = None,
     ) -> Dict[str, Any]:
         """Return root host nodes; descendants are loaded on expansion.
 
@@ -1616,6 +1835,7 @@ class DatabaseIndex:
             ranking_category,
             ranking_min,
             activity,
+            exclude,
         )
         joins, join_values, ranking_score = self._ranking_join(
             ranking_run, ranking_category
@@ -1661,25 +1881,40 @@ class DatabaseIndex:
     def tree_branch(
         self,
         q: str,
-        host: str,
-        share: str,
-        extension: str,
+        host: FacetValue,
+        share: FacetValue,
+        extension: FacetValue,
         parent: str,
-        rule: str = "",
-        triage: str = "",
-        permission: str = "",
-        collection: str = "",
+        rule: FacetValue = "",
+        triage: FacetValue = "",
+        permission: FacetValue = "",
+        collection: FacetValue = "",
         ranking_run: str = "",
         ranking_category: str = "",
         ranking_min: int = 0,
         sort: str = "path",
         direction: str = "asc",
-        activity: str = "",
+        activity: FacetValue = "",
         jev_run: str = "",
+        exclude: Optional[Mapping[str, FacetValue]] = None,
+        level: str = "",
     ) -> Dict[str, Any]:
-        """Return immediate children for one host, share, or folder."""
-        if not host:
+        """Return immediate children for one host, share, or folder.
+
+        ``host`` names the branch and must be a single value. ``share`` names
+        the share to walk; with ``level="shares"`` it is only a filter, so a
+        host can be expanded while the share facet stays applied.
+        """
+        hosts = _facet_values(host)
+        if len(hosts) != 1:
             raise ValueError("tree branch requires a host")
+        if level not in {"", "shares"}:
+            raise ValueError("Invalid tree branch level")
+        shares = _facet_values(share)
+        list_shares = level == "shares" or not shares
+        if not list_shares and len(shares) != 1:
+            raise ValueError("tree branch requires a single share")
+        host = hosts[0]
         where, where_values = self._where(
             q,
             host,
@@ -1693,6 +1928,7 @@ class DatabaseIndex:
             ranking_category,
             ranking_min,
             activity,
+            exclude,
         )
         joins, join_values, ranking_score = self._ranking_join(
             ranking_run, ranking_category
@@ -1736,7 +1972,7 @@ class DatabaseIndex:
         base_values = join_values + where_values
         if ranking_run and ranking_min > 0:
             where = where.replace("ranking_score >= ?", f"{ranking_score} >= ?")
-        if not share:
+        if list_shares:
             aggregate_joins = joins
             aggregate_values = base_values
             if ranking_run and ranking_min == 0 and not ranking_category:
@@ -1833,7 +2069,7 @@ class DatabaseIndex:
                     {
                         "name": name,
                         "host": host,
-                        "share": share,
+                        "share": shares[0],
                         "path": prefix.rstrip("/") + "/" + name,
                         "file_count": 0,
                         "size_bytes": 0,
@@ -2261,8 +2497,29 @@ class WebHandler(BaseHTTPRequestHandler):
             return
         if parsed.path in {"/api/files", "/api/tree", "/api/tree/branch"}:
             query = urllib.parse.parse_qs(parsed.query, keep_blank_values=True)
-            if any(len(value[0]) > 512 for value in query.values() if value):
+            if any(len(item) > 512 for value in query.values() for item in value):
                 self._error(400, "Query value is too long", "invalid_query")
+                return
+            # Facets repeat (``host=a&host=b``) and negate under ``not_``;
+            # every other parameter keeps its single-value contract.
+            facet_args = {
+                key: _facet_values(query.get(key, [])) for key in FILTER_FACETS
+            }
+            exclude = {
+                key: _facet_values(query.get(EXCLUDE_PREFIX + key, []))
+                for key in FILTER_FACETS
+            }
+            if any(
+                len(values) > MAX_FACET_VALUES
+                for values in (*facet_args.values(), *exclude.values())
+            ):
+                self._error(400, "Too many filter values", "invalid_query")
+                return
+            try:
+                FacetFilters.build(**facet_args, exclude=exclude)
+            except ValueError as exc:
+                code = "activity" if "activity" in str(exc) else "evidence"
+                self._error(400, f"Invalid {code} filter", "invalid_query")
                 return
             filters = tuple(
                 query.get(key, [""])[0]
@@ -2283,27 +2540,16 @@ class WebHandler(BaseHTTPRequestHandler):
                     "activity",
                 )
             )
-            if filters[6] not in {
-                "",
-                "read",
-                "write",
-                "add_file",
-                "add_subdirectory",
-                "write_dac",
-                "write_owner",
-            } or filters[7] not in {"", "collected", "not_collected"}:
-                self._error(400, "Invalid evidence filter", "invalid_query")
-                return
-            if filters[13] not in {
-                "",
-                "downloaded",
-                "not_downloaded",
-                "nemesis_sent",
-                "not_nemesis_sent",
-                "nemesis_failed",
-            }:
-                self._error(400, "Invalid activity filter", "invalid_query")
-                return
+            facet_filters = (
+                filters[0],
+                facet_args["host"],
+                facet_args["share"],
+                facet_args["extension"],
+                facet_args["rule"],
+                facet_args["triage"],
+                facet_args["permission"],
+                facet_args["collection"],
+            )
             if filters[11] not in {
                 "",
                 "path",
@@ -2353,12 +2599,14 @@ class WebHandler(BaseHTTPRequestHandler):
                 try:
                     self._json(
                         state.index.tree_branch(
-                            *filters[:4],
+                            *facet_filters[:4],
                             query.get("parent", [""])[0],
-                            *filters[4:8],
+                            *facet_filters[4:8],
                             *ranking_args,
-                            activity=filters[13],
+                            activity=facet_args["activity"],
                             jev_run=query.get("jev_run", [""])[0],
+                            exclude=exclude,
+                            level=query.get("level", [""])[0],
                         )
                     )
                 except (AttributeError, ValueError) as exc:
@@ -2367,24 +2615,26 @@ class WebHandler(BaseHTTPRequestHandler):
             if parsed.path == "/api/tree":
                 self._json(
                     state.index.tree(
-                        *filters[:8],
+                        *facet_filters,
                         *ranking_args,
-                        activity=filters[13],
+                        activity=facet_args["activity"],
                         jev_run=query.get("jev_run", [""])[0],
+                        exclude=exclude,
                     )
                 )
                 return
             try:
                 self._json(
                     state.index.search(
-                        *filters[:4],
+                        *facet_filters[:4],
                         int(query.get("page", ["1"])[0]),
                         int(query.get("per_page", [str(state.index.page_size)])[0]),
-                        *filters[4:8],
+                        *facet_filters[4:8],
                         *ranking_args,
-                        activity=filters[13],
+                        activity=facet_args["activity"],
                         include_total=query.get("include_total", ["0"])[0] == "1",
                         jev_run=query.get("jev_run", [""])[0],
+                        exclude=exclude,
                     )
                 )
             except (ValueError, OverflowError):
@@ -2651,10 +2901,13 @@ class WebHandler(BaseHTTPRequestHandler):
                     raise ValueError(
                         "Configure Nemesis URL, authentication, and project first"
                     )
-                if set(payload) != {"file_id"} or not isinstance(
-                    payload["file_id"], str
+                if set(payload) - {"file_id", "resend"} or not isinstance(
+                    payload.get("file_id"), str
                 ):
-                    raise ValueError("Provide a file_id only")
+                    raise ValueError("Provide a file_id and optional resend")
+                resend = payload.get("resend", False)
+                if not isinstance(resend, bool):
+                    raise ValueError("resend must be a boolean")
                 record = state.index.get(payload["file_id"])
                 if record is None:
                     raise ValueError("Unknown file ID")
@@ -2664,6 +2917,7 @@ class WebHandler(BaseHTTPRequestHandler):
                         state.nemesis,
                         state.pool.retrieve if state.pool else None,
                         state.nemesis_max,
+                        resend=resend,
                     )
                 try:
                     state.index.record_nemesis(record, result)

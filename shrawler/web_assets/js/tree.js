@@ -43,8 +43,12 @@ export function createTree({ root, loadingNode, params, selection, onSelect, sco
 
   function branchQuery(type, node) {
     const query = new URLSearchParams(params());
-    if (type === 'host') query.set('host', node.name);
-    else {
+    if (type === 'host') {
+      query.set('host', node.name);
+      // The share filter stays applied, so the server needs telling that this
+      // asks for the host's shares rather than the contents of one share.
+      query.set('level', 'shares');
+    } else {
       query.set('host', node.host);
       query.set('share', node.share || node.name);
       if (type === 'folder') query.set('parent', node.path);

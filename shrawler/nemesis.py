@@ -139,6 +139,7 @@ class DeliveryStore:
         retrieve: Optional[Callable[[Any, Callable[[bytes], None]], None]],
         limit: int,
         retry_unknown: bool = False,
+        resend: bool = False,
     ) -> Dict[str, Any]:
         config.validate()
         if limit < 1:
@@ -191,7 +192,8 @@ class DeliveryStore:
                     )
                     db.commit()
 
-                if state["status"] == "uploaded":
+                uploaded = state["status"] == "uploaded"
+                if uploaded and not resend:
                     path.unlink(missing_ok=True)
                     return state
                 if state["status"] in {"uploading", "unknown"} and not retry_unknown:
@@ -199,7 +201,17 @@ class DeliveryStore:
                     raise ValueError(
                         "Previous upload has an unknown outcome; check Nemesis, then use CLI --retry-unknown if another submission is needed"
                     )
-                if not state.get("sha256"):
+                # An explicit resend is a deliberate second delivery: forget the
+                # accepted bytes and retrieve the observed file again. The prior
+                # response ID is kept in the receipt so history is not lost.
+                if uploaded and resend:
+                    prior = state.get("response_id")
+                    if prior:
+                        history = state.setdefault("response_ids", [])
+                        if prior not in history:
+                            history.append(prior)
+                    state["response_id"] = ""
+                if not state.get("sha256") or (uploaded and resend):
                     if retrieve is None:
                         raise ValueError(
                             "This file requires SMB retrieval; start with credentials"
@@ -307,6 +319,11 @@ def main(argv: Any = None) -> int:
         action="store_true",
         help="resubmit after checking an ambiguous upload outcome; may duplicate delivery",
     )
+    send.add_argument(
+        "--resend",
+        action="store_true",
+        help="upload again even if this observed file was already delivered; may duplicate delivery",
+    )
     add_smb_auth_arguments(send)
     add_arguments(send)
     args = parser.parse_args(argv)
@@ -336,7 +353,12 @@ def main(argv: Any = None) -> int:
                 )
             )
         result = DeliveryStore(args.database).send(
-            record, config, retrieve, args.max_file_size, args.retry_unknown
+            record,
+            config,
+            retrieve,
+            args.max_file_size,
+            args.retry_unknown,
+            args.resend,
         )
         print(json.dumps(result, indent=2, ensure_ascii=True))
         return 0 if result["status"] == "uploaded" else 1
