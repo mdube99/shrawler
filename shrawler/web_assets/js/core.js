@@ -291,7 +291,9 @@ export function severity(score) {
     return { band: 'none', label: 'No score' };
   }
   const value = Number(score);
-  const match = BANDS.find(([floor]) => value >= floor);
+  // Rule scores are unbounded and a rule can push a file below zero; clamp to
+  // the lowest band instead of falling off the end of the ramp.
+  const match = BANDS.find(([floor]) => value >= floor) || BANDS[BANDS.length - 1];
   return { band: match[1], label: match[2] };
 }
 
