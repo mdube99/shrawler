@@ -70,8 +70,8 @@ const SORTS = {
   file: 'File',
   location: 'Location',
   combined: 'Overall',
-  priority: 'Rule Rating',
-  jev: 'AI Rating',
+  priority: 'Rules',
+  jev: 'AI',
   size: 'Size',
   modified: 'Modified',
 };
