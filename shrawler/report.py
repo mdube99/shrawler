@@ -76,7 +76,13 @@ def _upload_file(
                 "error": f"HTTP {response.status_code}",
             }
         try:
-            response_id = response.json().get("id")
+            body = response.json()
+            # Nemesis /files returns object_id, not id.
+            response_id = (
+                (body.get("object_id") or body.get("id"))
+                if isinstance(body, dict)
+                else None
+            )
         except (json.JSONDecodeError, AttributeError):
             response_id = None
         return {"success": True, "response_id": response_id, "error": None}

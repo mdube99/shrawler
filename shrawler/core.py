@@ -1084,9 +1084,12 @@ class Shrawler(SnafflerEngineMixin):
                     # Try to extract response ID if present
                     try:
                         response_data = response.json()
-                        if "id" in response_data:
-                            upload_result["response_id"] = response_data["id"]
-                    except (json.JSONDecodeError, KeyError) as e:
+                        if isinstance(response_data, dict):
+                            # Nemesis /files returns object_id, not id.
+                            upload_result["response_id"] = response_data.get(
+                                "object_id"
+                            ) or response_data.get("id")
+                    except (json.JSONDecodeError, AttributeError) as e:
                         logging.debug(
                             f"Failed to parse Nemesis response for {nemesis_path}: {e}"
                         )

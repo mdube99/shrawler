@@ -286,6 +286,29 @@ class ReliabilityTests(unittest.TestCase):
             self.assertEqual(state["attempts"], 2)
             self.assertEqual(state["response_id"], "file-123")
 
+    def test_nemesis_upload_records_object_id_from_response(self):
+        with tempfile.TemporaryDirectory() as workspace:
+            crawler = _build_shrawler(
+                output_dir=workspace,
+                nemesis_url="https://nemesis/api",
+                nemesis_auth="user:pass",
+                nemesis_project="test",
+            )
+            local = Path(workspace) / "file.txt"
+            local.write_text("payload")
+            response = mock.Mock()
+            response.status_code = 200
+            response.json.return_value = {
+                "object_id": "obj-123",
+                "submission_id": "sub-1",
+            }
+            with mock.patch("shrawler.core.requests.post", return_value=response):
+                result = crawler.submit_to_nemesis(
+                    str(local), r"\\host\DATA\file.txt", 0, "host"
+                )
+            self.assertTrue(result["success"])
+            self.assertEqual(result["response_id"], "obj-123")
+
     def test_balanced_profile_defaults(self):
         crawler = _build_shrawler(
             workers=4,

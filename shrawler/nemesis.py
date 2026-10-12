@@ -107,11 +107,9 @@ def upload(config: NemesisConfig, path: Path, record: Dict[str, Any]) -> Dict[st
             body = response.json()
         except ValueError:
             body = {}
-        return {
-            "response_id": cast(Dict[str, Any], body).get("id")
-            if isinstance(body, dict)
-            else None
-        }
+        # Nemesis returns object_id (and submission_id) for /files, not id.
+        result = cast(Dict[str, Any], body) if isinstance(body, dict) else {}
+        return {"response_id": result.get("object_id") or result.get("id")}
     finally:
         response.close()
 

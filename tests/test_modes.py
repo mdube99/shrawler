@@ -98,6 +98,25 @@ class OperatingModeTests(unittest.TestCase):
         self.assertEqual(auth.domain, "DOMAIN")
         self.assertEqual(auth.target_host, "dc")
 
+    def test_report_upload_reads_object_id_from_nemesis_response(self):
+        with tempfile.TemporaryDirectory() as workspace:
+            path = Path(workspace) / "file.txt"
+            path.write_text("payload")
+            response = mock.Mock()
+            response.status_code = 200
+            response.json.return_value = {"object_id": "obj-123"}
+            entry = {
+                "host": "host",
+                "unc_path": r"\\host\DATA\file.txt",
+                "mtime_epoch": 0,
+            }
+            with mock.patch("shrawler.report.requests.post", return_value=response):
+                result = report._upload_file(
+                    entry, path, "https://nemesis/api", "user:pass", "test"
+                )
+            self.assertTrue(result["success"])
+            self.assertEqual(result["response_id"], "obj-123")
+
     def test_report_retries_failed_upload_and_updates_results(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

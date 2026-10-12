@@ -616,7 +616,7 @@ export async function sendToNemesis(rows, { status, confirmFirst = false, onProg
     });
     if (!accepted) return null;
   }
-  const summary = { total: chosen.length, uploaded: 0, failed: 0, unknown: 0 };
+  const summary = { total: chosen.length, uploaded: 0, failed: 0, unknown: 0, errors: [] };
   for (let index = 0; index < chosen.length; index += 1) {
     const row = chosen[index];
     const fileId = row.id || row.file_id;
@@ -627,10 +627,16 @@ export async function sendToNemesis(rows, { status, confirmFirst = false, onProg
     try {
       applyNemesisState(row, await post('/api/nemesis/send', { file_id: fileId }));
       if (row.nemesis_status === 'uploaded') summary.uploaded += 1;
-      else if (row.nemesis_status === 'unknown') summary.unknown += 1;
-      else summary.failed += 1;
+      else if (row.nemesis_status === 'unknown') {
+        summary.unknown += 1;
+        if (row.nemesis_error) summary.errors.push(row.nemesis_error);
+      } else {
+        summary.failed += 1;
+        if (row.nemesis_error) summary.errors.push(row.nemesis_error);
+      }
     } catch (error) {
       summary.failed += 1;
+      summary.errors.push(error.message);
       applyNemesisState(row, { status: 'upload_failed', error: error.message });
     }
   }
@@ -643,6 +649,7 @@ export function sendSummary(summary) {
   const parts = [`${fmt.count(summary.uploaded)} sent to Nemesis`];
   if (summary.failed) parts.push(`${fmt.count(summary.failed)} failed`);
   if (summary.unknown) parts.push(`${fmt.count(summary.unknown)} with an unknown outcome`);
+  if (summary.errors?.length) parts.push(summary.errors[0]);
   return parts.join(' · ');
 }
 

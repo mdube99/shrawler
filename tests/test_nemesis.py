@@ -161,6 +161,18 @@ class DeliveryTests(unittest.TestCase):
         submit.assert_not_called()
 
     @patch("shrawler.nemesis.requests.post")
+    def test_transport_prefers_object_id_from_nemesis(self, post):
+        post.return_value.status_code = 200
+        post.return_value.json.return_value = {
+            "object_id": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+            "submission_id": "11111111-2222-3333-4444-555555555555",
+        }
+        path = Path(self.temp.name) / "random.bin"
+        path.write_bytes(b"hello")
+        result = upload(self.config, path, self.record.public())
+        self.assertEqual(result["response_id"], "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee")
+
+    @patch("shrawler.nemesis.requests.post")
     def test_transport_preserves_original_filename_and_metadata(self, post):
         post.return_value.status_code = 201
         post.return_value.json.return_value = {"id": "123"}

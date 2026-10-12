@@ -2704,9 +2704,19 @@ class WebHandler(BaseHTTPRequestHandler):
             else:
                 self._error(404, "Unknown ranking endpoint", "not_found")
         except (TriageBusyError, CollectionBusyError, JevBusyError) as exc:
+            logging.warning(
+                "POST %s rejected: %s",
+                escape_terminal(self.path),
+                escape_terminal(str(exc)),
+            )
             self._error(409, str(exc), "job_running")
         except (ValueError, OSError, sqlite3.Error, TypeError, KeyError) as exc:
             self.close_connection = True
+            logging.warning(
+                "POST %s rejected: %s",
+                escape_terminal(self.path),
+                escape_terminal(str(exc)),
+            )
             self._error(400, str(exc), "invalid_request")
 
 
