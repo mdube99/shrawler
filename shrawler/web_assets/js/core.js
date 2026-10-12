@@ -448,7 +448,9 @@ export function renderShellStatus(shell, status) {
   shell.text.textContent = `${fmt.count(status.file_count)} files · ${fmt.count(status.host_count)} ${Number(status.host_count) === 1 ? 'host' : 'hosts'}${mode}`;
   shell.status.dataset.tone = 'ready';
   const jobs = status.jobs || {};
-  const parts = [jobLabel(jobs.rule, 'Ranking'), jobLabel(jobs.ai, 'AI')].filter(Boolean);
+  const ruleJob = jobs.rule;
+  const ruleName = ruleJob && ruleJob.preview ? 'Rule preview' : 'Ranking';
+  const parts = [jobLabel(ruleJob, ruleName), jobLabel(jobs.ai, 'AI')].filter(Boolean);
   if (shell.job) {
     shell.job.hidden = parts.length === 0;
     shell.job.textContent = parts.join(' · ');
