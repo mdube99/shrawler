@@ -248,6 +248,24 @@ samp {
   color: var(--danger);
 }
 
+/* Active background job. Links to Score; hidden whenever nothing is running so
+ * it never becomes another channel the eye learns to ignore. */
+.header-job {
+  padding: 2px 7px;
+  border: 1px solid var(--accent);
+  border-radius: 999px;
+  background: var(--accent-wash);
+  color: var(--accent-bright);
+  font-weight: 600;
+  text-decoration: none;
+  white-space: nowrap;
+}
+
+.header-job:hover {
+  background: var(--accent);
+  color: var(--bg);
+}
+
 /* -- Workspace ------------------------------------------------------------- */
 
 .workspace {

@@ -13,7 +13,7 @@
 // Deselecting the rule run re-weights Combined instead of filtering rows away,
 // which is why there is one control row instead of five separate selects.
 
-import { button, clear, el, EXCLUDE_PREFIX, FACET_PARAMS, FACETS, fill, fmt, icon, on, option, writeParams } from './core.js';
+import { button, clear, el, EXCLUDE_PREFIX, FACET_PARAMS, FACETS, fill, fmt, href, icon, on, option, writeParams } from './core.js';
 import { activityLabel, permissionName } from './actions.js';
 import { openPopover } from './overlay.js';
 
@@ -463,10 +463,11 @@ export function createFilters({ root, state, defaults, runs, facets, commit }) {
     const namedRule = completed.some((run) => run.id === state.ranking_run);
     if (!namedRule && state.ranking_run === AUTO) {
       // The URL did not name a run, so adopt the newest saved one: Combined then
-      // means something on arrival. With no runs yet, stay on "none" without
-      // writing it, so creating a ranking later selects it automatically.
-      state.ranking_run = completed.length ? completed[0].id : '';
-      if (state.ranking_run) write();
+      // means something on arrival. With no runs yet, stay on AUTO so creating a
+      // ranking later selects it automatically instead of pinning the URL to
+      // "none" on the first unrelated interaction.
+      state.ranking_run = completed.length ? completed[0].id : AUTO;
+      if (state.ranking_run !== AUTO) write();
     } else if (!namedRule) {
       // The URL said "none", or named a run that is gone. Fall back to nothing
       // rather than quietly ranking by a different run than the link asked for.
@@ -502,10 +503,10 @@ export function createFilters({ root, state, defaults, runs, facets, commit }) {
     const mix = composition();
     if (!runs.ranking.length && !runs.jev.length) {
       // Nothing to select yet, so point at the screen that can create a run.
-      const link = el('a', 'link', 'Run a scan on the Score screen');
-      link.href = '/score';
+      const link = el('a', 'link', 'Run a rule ranking');
+      link.href = href('/score');
       clear(root.note);
-      root.note.append('Overall unavailable · ', link);
+      root.note.append('No scores yet · ', link);
     } else {
       root.note.textContent = mix.note;
     }
@@ -543,7 +544,9 @@ export function createFilters({ root, state, defaults, runs, facets, commit }) {
 
   /** Persist the current selection, spelling "nothing selected" as NONE. */
   function write() {
-    writeParams({ ...state, ranking_run: asParam(state.ranking_run) }, defaults);
+    // AUTO means the URL never named a run; omitting it keeps a later ranking
+    // selectable instead of pinning "none" into the link.
+    writeParams({ ...state, ranking_run: state.ranking_run === AUTO ? '' : asParam(state.ranking_run) }, defaults);
   }
 
   on(root.toggle, 'click', toggle);

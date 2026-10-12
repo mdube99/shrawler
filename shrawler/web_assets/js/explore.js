@@ -118,11 +118,17 @@ const selectedRun = () => (state.ranking_run === AUTO || state.ranking_run === N
 const selectedAiRun = () => (state.jev_run === NONE ? '' : state.jev_run);
 const query = () => serverParams({ ...state, ranking_run: selectedRun(), jev_run: selectedAiRun() }, SERVER_KEYS);
 
+/** The URL spelling of a run selection: AUTO is omitted, empty is `none`. */
+function rankingParam() {
+  if (state.ranking_run === AUTO) return '';
+  return state.ranking_run || NONE;
+}
+
 /** Every interaction writes the URL first, then refetches if the contract moved. */
 function commit(patch, { keepPage = false, push = false } = {}) {
   Object.assign(state, patch);
   if (!keepPage && !('page' in patch)) state.page = '1';
-  writeParams({ ...state, ranking_run: state.ranking_run || NONE }, DEFAULTS, { replace: !push });
+  writeParams({ ...state, ranking_run: rankingParam() }, DEFAULTS, { replace: !push });
   reload();
 }
 
@@ -536,7 +542,7 @@ function reload() {
   if (!filters.columnAvailable(state.sort)) {
     state.sort = 'modified';
     state.direction = 'desc';
-    writeParams({ ...state, ranking_run: state.ranking_run || NONE }, DEFAULTS, { replace: true });
+    writeParams({ ...state, ranking_run: rankingParam() }, DEFAULTS, { replace: true });
   }
   filters.renderRuns();
   filters.renderChips();
@@ -658,6 +664,11 @@ async function pollStatus() {
     // not a count of new captures — it is a count of hidden files.
     const fresh = lastRevision !== null && Number(latest.revision) > lastRevision;
     status = latest;
+    // Refresh the run catalogs too. The banner would otherwise sit there while
+    // reload() rebuilt the selects from the stale lists, so the new run never
+    // appeared and the banner never went away.
+    runs.ranking = latest.ranking_runs || [];
+    runs.jev = latest.jev_runs || [];
     renderShellStatus(shell, latest);
     $('pending-updates').hidden = !(changed || fresh);
     $('pending-label').textContent = changed ? 'New rankings available' : 'New captures available';

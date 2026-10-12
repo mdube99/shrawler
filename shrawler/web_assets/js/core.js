@@ -8,6 +8,15 @@ const fragment = new URLSearchParams(location.hash.slice(1));
 export const token = fragment.get('token') || '';
 if (fragment.has('token')) history.replaceState(null, '', location.pathname + location.search);
 
+/**
+ * Build an in-app href that keeps the bearer token in the fragment. The token
+ * lives only in memory, so every hand-built link has to re-attach it or the
+ * destination loads and then fails every API call.
+ */
+export function href(path) {
+  return token ? `${path}#token=${encodeURIComponent(token)}` : path;
+}
+
 /* -- DOM ------------------------------------------------------------------- */
 
 /**
@@ -384,7 +393,7 @@ export function mountShell(current) {
   const inner = el('div', 'app-header__inner');
 
   const brand = el('a', 'brand');
-  brand.href = '/';
+  brand.href = href('/');
   brand.setAttribute('aria-label', 'Shrawler file inventory');
   const mark = el('span', 'brand__mark');
   mark.append(icon('network'));
@@ -392,10 +401,10 @@ export function mountShell(current) {
 
   const nav = el('nav', 'screen-nav');
   nav.setAttribute('aria-label', 'Screen');
-  for (const [href, label] of [['/', 'Explore'], ['/score', 'Score']]) {
+  for (const [linkPath, label] of [['/', 'Explore'], ['/score', 'Score']]) {
     const link = el('a', undefined, label);
-    link.href = href + (token ? `#token=${encodeURIComponent(token)}` : '');
-    if (href === current) link.setAttribute('aria-current', 'page');
+    link.href = href(linkPath);
+    if (linkPath === current) link.setAttribute('aria-current', 'page');
     nav.append(link);
   }
 
@@ -407,14 +416,30 @@ export function mountShell(current) {
   status.setAttribute('aria-live', 'polite');
   status.dataset.tone = 'pending';
   const text = el('span', 'header-status__text', 'Connecting…');
+  const job = el('a', 'header-job');
+  job.href = href('/score');
+  job.hidden = true;
+  job.setAttribute('aria-label', 'Open scoring progress');
   const note = el('span', 'header-status__note');
   note.hidden = true;
-  status.append(el('span', 'header-status__dot'), text, note);
+  status.append(el('span', 'header-status__dot'), text, job, note);
 
   inner.append(brand, nav, status);
   header.append(inner);
   document.body.prepend(header);
-  return { status, text, note };
+  return { status, text, job, note };
+}
+
+/** Compact one-line label for an active background job, or '' when idle. */
+function jobLabel(job, name) {
+  if (!job || job.status !== 'running') return '';
+  const processed = Number(job.processed || 0);
+  const total = Number(job.total || 0);
+  if (total > 0) {
+    const percent = Math.floor(Math.min(1, processed / total) * 100);
+    return `${name} ${percent}%`;
+  }
+  return `${name}…`;
 }
 
 /** Render one line of live inventory state into the shared status region. */
@@ -422,6 +447,12 @@ export function renderShellStatus(shell, status) {
   const mode = status.retrieval_enabled === undefined ? '' : ` · ${status.retrieval_enabled ? 'Live' : 'Offline'}`;
   shell.text.textContent = `${fmt.count(status.file_count)} files · ${fmt.count(status.host_count)} ${Number(status.host_count) === 1 ? 'host' : 'hosts'}${mode}`;
   shell.status.dataset.tone = 'ready';
+  const jobs = status.jobs || {};
+  const parts = [jobLabel(jobs.rule, 'Ranking'), jobLabel(jobs.ai, 'AI')].filter(Boolean);
+  if (shell.job) {
+    shell.job.hidden = parts.length === 0;
+    shell.job.textContent = parts.join(' · ');
+  }
   const optimization = status.index_optimization || {};
   const busy = !['idle', 'completed'].includes(optimization.status);
   shell.note.hidden = !busy;

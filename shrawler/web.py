@@ -2202,6 +2202,33 @@ class WebState:
     )
 
 
+# Only the fields a status pill needs. The full job payload (rule preview
+# candidates, run results) stays on /api/triage/job and /api/assessment/job.
+JOB_SUMMARY_KEYS = (
+    "id",
+    "status",
+    "phase",
+    "processed",
+    "total",
+    "started_at",
+    "updated_at",
+    "finished_at",
+    "preview",
+    "assessment_run_id",
+)
+
+
+def _job_summary(service: Any) -> Optional[Dict[str, Any]]:
+    if service is None:
+        return None
+    job = service.status()
+    if not job:
+        return None
+    summary = {key: job.get(key) for key in JOB_SUMMARY_KEYS if key in job}
+    summary["active"] = job.get("status") == "running"
+    return summary
+
+
 @dataclass(frozen=True)
 class WebConfig:
     database_path: Path
@@ -2491,6 +2518,10 @@ class WebHandler(BaseHTTPRequestHandler):
                     "nemesis_enabled": state.nemesis is not None,
                     "nemesis_max_bytes": state.nemesis_max,
                     "index_optimization": dict(state.index_status),
+                    "jobs": {
+                        "rule": _job_summary(state.triage),
+                        "ai": _job_summary(state.jev),
+                    },
                 }
             )
             self._json(status)
