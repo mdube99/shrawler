@@ -13,3 +13,7 @@ shrawler_results.json
 *.nemesis/
 
 .openchamber/
+
+# SQLite runtime sidecars; rebuilt on every open
+*.db-wal
+*.db-shm
