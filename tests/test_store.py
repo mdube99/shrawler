@@ -4,7 +4,12 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from shrawler.store import SCHEMA_VERSION, ScanStore, WorkspaceBusyError
+from shrawler.store import (
+    SCHEMA_VERSION,
+    ScanStore,
+    WorkspaceBusyError,
+    migrate_inventory,
+)
 from shrawler.web import DatabaseIndex
 
 
@@ -200,6 +205,64 @@ class ScanStoreTests(unittest.TestCase):
                 )
             finally:
                 store.close()
+
+    def test_v3_inventory_derives_path_columns(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "shrawler.db"
+            connection = sqlite3.connect(path)
+            connection.executescript(
+                """
+                CREATE TABLE files (
+                    id INTEGER PRIMARY KEY,
+                    public_id TEXT NOT NULL UNIQUE,
+                    host TEXT NOT NULL,
+                    share TEXT NOT NULL,
+                    remote_path TEXT NOT NULL,
+                    parent_path TEXT NOT NULL,
+                    unc_path TEXT NOT NULL,
+                    file_name TEXT NOT NULL,
+                    extension TEXT NOT NULL,
+                    size_bytes INTEGER NOT NULL,
+                    readable_size TEXT NOT NULL,
+                    mtime_utc TEXT NOT NULL,
+                    scan_timestamp_utc TEXT NOT NULL,
+                    search_text TEXT NOT NULL,
+                    UNIQUE(host, share, remote_path)
+                );
+                PRAGMA user_version=3;
+                """
+            )
+            connection.execute(
+                "INSERT INTO files(public_id,host,share,remote_path,parent_path,"
+                "unc_path,file_name,extension,size_bytes,readable_size,mtime_utc,"
+                "scan_timestamp_utc,search_text) "
+                "VALUES ('abc','server','DATA','/reports/secret.txt','/reports',"
+                "'stale','secret.txt','.txt',10,'10B','x','y','stale')"
+            )
+            connection.commit()
+            connection.close()
+
+            self.assertTrue(migrate_inventory(path))
+            connection = sqlite3.connect(path)
+            try:
+                self.assertEqual(
+                    connection.execute("PRAGMA user_version").fetchone()[0],
+                    SCHEMA_VERSION,
+                )
+                hidden = {
+                    row[1]: row[6]
+                    for row in connection.execute("PRAGMA table_xinfo(files)")
+                }
+                for column in ("file_name", "parent_path", "unc_path"):
+                    self.assertIn(hidden[column], (2, 3), column)
+                self.assertEqual(
+                    connection.execute(
+                        "SELECT file_name,parent_path,unc_path FROM files"
+                    ).fetchone(),
+                    ("secret.txt", "/reports", "\\\\server\\DATA\\reports/secret.txt"),
+                )
+            finally:
+                connection.close()
 
 
 if __name__ == "__main__":

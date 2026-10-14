@@ -63,23 +63,29 @@ reads through SQLite WAL mode.
 
 ## Storage footprint
 
-The inventory stores each discovered file once. `files.search_text` and
-`files.readable_size` are virtual generated columns, so they cost no pages, and
+The inventory stores each discovered file once. `files.search_text`,
+`files.readable_size`, `files.file_name`, `files.parent_path` and
+`files.unc_path` are virtual generated columns, so they cost no pages, and
 `scan_files` keeps only the per-scan observation (size, readable size, mtime,
 scan timestamp) plus its scan/share/file keys instead of a second copy of the
 whole payload. Ranking and the WebUI rebuild that payload from the inventory.
 The review database keeps only family membership, joining the inventory for
 file details. Per-directory listings and the optional Jev audit documents are
-zlib-compressed per row.
+compressed per row, the Jev columns against small shared dictionaries.
+
+Catalog query indexes are created after the bulk load so their B-tree leaves
+are packed, and they tie-break on `public_id` instead of repeating the path or
+the file name, which keeps them narrow. The WebUI sort columns were narrowed
+to match.
 
 Measured on a 100,000-file synthetic inventory (20,000 directories, long
-paths): a fresh inventory fell from 191 MiB to 125 MiB (-35%), and a schema-1
-inventory shrank to 116 MiB (-39%, plus an ~8 MiB FTS index that the WebUI
-rebuilds on demand) after the in-place migration and its one-time `VACUUM`. A
-2,322-file Jev assessment database fell from 9.65 MiB to 6.48 MiB (-33%). The
-remaining inventory size is dominated by the WebUI sort indexes and the FTS5
-substring index.
+paths): a fresh inventory fell from 191 MiB to **103 MiB** (-46%), and a
+schema-1 inventory shrinks to roughly the same after the in-place migration and
+its one-time `VACUUM`. A 2,322-file Jev assessment database fell from 9.65 MiB
+to **5.75 MiB** (-40%). The remaining inventory size is dominated by the FTS5
+substring index and the path and parent-path indexes, which the UI needs to
+page and browse.
 
-Opening a schema-1 database migrates it in place; a scan, the WebUI, ranking,
+Opening an older database migrates it in place; a scan, the WebUI, ranking,
 review, or coverage can trigger the migration. Back up an inventory before the
 first open with a newer build if it is irreplaceable.
