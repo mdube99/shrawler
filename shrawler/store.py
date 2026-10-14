@@ -18,7 +18,7 @@ from .coverage import DirectoryCoverage
 from .output import safe_csv_row
 from .search_index import ensure as ensure_search_index, supported as search_supported
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 # Web-initiated retrievals share the downloads table but are not scan-time
 # downloads, so scan summaries and JSON/CSV exports exclude them.
@@ -56,9 +56,9 @@ def _files_ddl(table: str) -> str:
         host TEXT NOT NULL,
         share TEXT NOT NULL,
         remote_path TEXT NOT NULL,
-        parent_path TEXT NOT NULL,
-        unc_path TEXT NOT NULL,
-        file_name TEXT NOT NULL,
+        file_name TEXT GENERATED ALWAYS AS (
+            replace(remote_path, rtrim(remote_path, replace(remote_path, '/', '')), '')
+        ) VIRTUAL,
         extension TEXT NOT NULL,
         size_bytes INTEGER NOT NULL,
         readable_size TEXT GENERATED ALWAYS AS (
@@ -72,6 +72,16 @@ def _files_ddl(table: str) -> str:
                 ELSE
                     rtrim(rtrim(printf('%.2f', size_bytes / 1073741824.0), '0'), '.') || 'GB'
             END
+        ) VIRTUAL,
+        parent_path TEXT GENERATED ALWAYS AS (
+            CASE
+                WHEN rtrim(rtrim(remote_path, replace(remote_path, '/', '')), '/') = ''
+                    THEN '/'
+                ELSE rtrim(rtrim(remote_path, replace(remote_path, '/', '')), '/')
+            END
+        ) VIRTUAL,
+        unc_path TEXT GENERATED ALWAYS AS (
+            '\\\\' || host || '\\' || share || '\\' || ltrim(remote_path, '/')
         ) VIRTUAL,
         mtime_utc TEXT NOT NULL,
         scan_timestamp_utc TEXT NOT NULL,
@@ -267,8 +277,12 @@ class ScanStore:
             )
         if version == 1:
             self._migrate_v1_to_v2()
+            version = SCHEMA_VERSION
         elif version == 2:
             self._migrate_v2_to_v3()
+            version = 3
+        if version == 3:
+            self._migrate_v3_to_v4()
         self.connection.executescript(_files_ddl("files"))
         self.connection.executescript(
             """
@@ -380,8 +394,64 @@ class ScanStore:
         with self._lock:
             for name in _FILES_INDEXES_V2:
                 self.connection.execute(f"DROP INDEX IF EXISTS {name}")
-            self.connection.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
+            self.connection.execute("PRAGMA user_version=3")
             self.connection.commit()
+
+    def _migrate_v3_to_v4(self) -> None:
+        """Derive file_name, parent_path and unc_path from remote_path.
+
+        Rebuilds the catalog table so those columns become VIRTUAL generated
+        columns instead of three more stored copies of the path. Row ids are
+        preserved because ``scan_files`` references them. The same rebuild is
+        skipped when the columns are already generated (for example after the
+        v1 to v2 rebuild, which already writes the current shape).
+        """
+        connection = self.connection
+        hidden = {
+            str(row[1]): int(row[6])
+            for row in connection.execute("PRAGMA table_xinfo(files)")
+        }
+        if hidden.get("file_name", 0) in (2, 3):
+            connection.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
+            connection.commit()
+            return
+        with self._lock:
+            previous = connection.isolation_level
+            connection.isolation_level = None
+            connection.execute("PRAGMA foreign_keys=OFF")
+            try:
+                connection.execute("BEGIN IMMEDIATE")
+                for trigger in (
+                    "files_search_insert",
+                    "files_search_delete",
+                    "files_search_update",
+                ):
+                    connection.execute(f"DROP TRIGGER IF EXISTS {trigger}")
+                connection.execute("DROP TABLE IF EXISTS files_search")
+                connection.execute("DROP TABLE IF EXISTS files_v4")
+                connection.execute(_files_ddl("files_v4"))
+                connection.execute(
+                    "INSERT INTO files_v4(id,public_id,host,share,remote_path,"
+                    "extension,size_bytes,mtime_utc,scan_timestamp_utc) "
+                    "SELECT id,public_id,host,share,remote_path,extension,"
+                    "size_bytes,mtime_utc,scan_timestamp_utc FROM files"
+                )
+                connection.execute("DROP TABLE files")
+                connection.execute("ALTER TABLE files_v4 RENAME TO files")
+                for statement in _FILES_INDEXES:
+                    connection.execute(statement)
+                connection.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
+                connection.execute("COMMIT")
+            except BaseException:
+                connection.execute("ROLLBACK")
+                raise
+            finally:
+                connection.execute("PRAGMA foreign_keys=ON")
+                connection.isolation_level = previous
+            try:
+                connection.execute("VACUUM")
+            except sqlite3.Error:
+                pass
 
     def _migrate_v1_to_v2(self) -> None:
         """Rebuild the inventory around non-duplicated file metadata.
@@ -409,11 +479,9 @@ class ScanStore:
             connection.execute(_files_ddl("files_v2"))
             connection.execute(
                 "INSERT INTO files_v2(id,public_id,host,share,remote_path,"
-                "parent_path,unc_path,file_name,extension,size_bytes,mtime_utc,"
-                "scan_timestamp_utc) "
-                "SELECT id,public_id,host,share,remote_path,parent_path,unc_path,"
-                "file_name,extension,size_bytes,mtime_utc,scan_timestamp_utc "
-                "FROM files"
+                "extension,size_bytes,mtime_utc,scan_timestamp_utc) "
+                "SELECT id,public_id,host,share,remote_path,extension,"
+                "size_bytes,mtime_utc,scan_timestamp_utc FROM files"
             )
             connection.execute("DROP TABLE files")
             connection.execute("ALTER TABLE files_v2 RENAME TO files")
@@ -612,18 +680,17 @@ class ScanStore:
 
     def add_file(self, host: str, share: str, payload: Dict[str, Any]) -> bool:
         remote = str(payload["remote_path"])
-        name = str(payload["file_name"])
-        extension = Path(name).suffix.lower()
-        normalized = "/" + remote.replace("\\", "/").lstrip("/")
-        parent = normalized.rsplit("/", 1)[0] or "/"
+        # file_name, parent_path and unc_path are derived from remote_path by the
+        # table, so only the extension is computed here: Path.suffix semantics
+        # (dotfiles, .tar.gz) cannot be reproduced by a generated expression.
+        extension = Path(str(payload["file_name"])).suffix.lower()
         with self._lock:
             row = self.connection.execute(
                 """INSERT INTO files
-                   (public_id, host, share, remote_path, parent_path, unc_path,
-                    file_name, extension, size_bytes, mtime_utc, scan_timestamp_utc)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                   (public_id, host, share, remote_path, extension, size_bytes,
+                    mtime_utc, scan_timestamp_utc)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                    ON CONFLICT(host, share, remote_path) DO UPDATE SET
-                    unc_path=excluded.unc_path, file_name=excluded.file_name,
                     extension=excluded.extension, size_bytes=excluded.size_bytes,
                     mtime_utc=excluded.mtime_utc,
                     scan_timestamp_utc=excluded.scan_timestamp_utc
@@ -633,9 +700,6 @@ class ScanStore:
                     host,
                     share,
                     remote,
-                    parent,
-                    payload["unc_path"],
-                    name,
                     extension,
                     int(payload.get("size_bytes") or 0),
                     str(payload.get("mtime_utc") or ""),
@@ -1106,7 +1170,7 @@ def migrate_inventory(path: Path) -> bool:
     connection = sqlite3.connect(database, timeout=5)
     try:
         version = int(connection.execute("PRAGMA user_version").fetchone()[0])
-        if version not in (1, 2):
+        if version not in (1, 2, 3):
             return False
         if (
             connection.execute(
@@ -1119,9 +1183,14 @@ def migrate_inventory(path: Path) -> bool:
         store.connection = connection
         store._lock = threading.RLock()
         if version == 1:
+            # The v1 rebuild already writes the current table shape.
             store._migrate_v1_to_v2()
-        else:
+        elif version == 2:
             store._migrate_v2_to_v3()
+            store._migrate_v3_to_v4()
+            store.build_file_indexes()
+        else:
+            store._migrate_v3_to_v4()
             store.build_file_indexes()
         return True
     finally:

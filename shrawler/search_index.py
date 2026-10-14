@@ -51,11 +51,11 @@ def ensure(connection: sqlite3.Connection) -> None:
                 "VALUES ('delete', old.id, old.search_text); END"
             )
             # search_text is a generated column, so the update trigger must watch
-            # the source columns: SQLite does not report generated columns in
-            # UPDATE OF and would otherwise never refresh the index.
+            # the stored source columns: SQLite does not report generated columns
+            # in UPDATE OF and would otherwise never refresh the index.
             connection.execute(
                 "CREATE TRIGGER files_search_update AFTER UPDATE OF "
-                "host, share, remote_path, unc_path, file_name, extension ON files BEGIN "
+                "host, share, remote_path, extension ON files BEGIN "
                 "INSERT INTO files_search(files_search, rowid, search_text) "
                 "VALUES ('delete', old.id, old.search_text); "
                 "INSERT INTO files_search(rowid, search_text) VALUES (new.id, new.search_text); END"

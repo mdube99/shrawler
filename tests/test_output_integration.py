@@ -22,7 +22,7 @@ def test_store_csv_escapes_formulas_without_changing_json(tmp_path: Path):
             "host": "server",
             "share_name": "DATA",
             "remote_path": "/=1+1.txt",
-            "unc_path": r"\\server\DATA\=1+1.txt",
+            "unc_path": "\\\\server\\DATA\\=1+1.txt",
             "file_name": "=1+1.txt",
             "size_bytes": 10,
             "readable_size": "10B",

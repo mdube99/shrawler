@@ -29,7 +29,7 @@ class ScanStoreTests(unittest.TestCase):
                 "host": "server",
                 "share_name": "DATA",
                 "remote_path": "/reports/secret.txt",
-                "unc_path": r"\\server\DATA\reports\secret.txt",
+                "unc_path": "\\\\server\\DATA\\reports/secret.txt",
                 "file_name": "secret.txt",
                 "size_bytes": 10,
                 "readable_size": "10B",
