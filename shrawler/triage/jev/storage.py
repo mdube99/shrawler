@@ -29,7 +29,7 @@ from typing import Any, Dict, Iterable, Iterator, List, Optional, Sequence, Tupl
 from . import codec
 from .config import canonical
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 6
 
 # A run lease heartbeats at this interval; another process may reclaim the run
 # once the heartbeat is older than LEASE_TTL_SECONDS.
@@ -91,14 +91,8 @@ CREATE INDEX IF NOT EXISTS directory_contexts_group
 FILES_DDL = """
 CREATE TABLE IF NOT EXISTS assessment_files (
  run_id TEXT NOT NULL,
- file_id TEXT NOT NULL,
+ file_id INTEGER NOT NULL,
  directory_id INTEGER NOT NULL,
- file_name TEXT NOT NULL,
- remote_path TEXT NOT NULL,
- unc_path TEXT NOT NULL,
- size_bytes INTEGER NOT NULL,
- mtime_utc TEXT,
- extension TEXT NOT NULL,
  feature_json TEXT NOT NULL,
  feature_hash TEXT NOT NULL,
  priority INTEGER NOT NULL DEFAULT 0,
@@ -170,7 +164,7 @@ BATCH_MEMBERS_DDL = """
 CREATE TABLE IF NOT EXISTS batch_members (
  run_id TEXT NOT NULL,
  batch_id TEXT NOT NULL,
- file_id TEXT NOT NULL,
+ file_id INTEGER NOT NULL,
  ordinal INTEGER NOT NULL,
  PRIMARY KEY(batch_id, file_id)
 );
@@ -192,7 +186,7 @@ CREATE TABLE IF NOT EXISTS decision_results (
  run_id TEXT NOT NULL,
  batch_id TEXT NOT NULL,
  request_id TEXT NOT NULL,
- file_id TEXT NOT NULL,
+ file_id INTEGER NOT NULL,
  choice TEXT NOT NULL,
  distribution_json TEXT,
  deployment_revision TEXT NOT NULL,
@@ -213,7 +207,7 @@ LABELS_DDL = """
 CREATE TABLE IF NOT EXISTS assessment_labels (
  id INTEGER PRIMARY KEY,
  run_id TEXT NOT NULL,
- file_id TEXT NOT NULL,
+ file_id INTEGER NOT NULL,
  label TEXT NOT NULL,
  source TEXT NOT NULL,
  note TEXT NOT NULL DEFAULT '',
@@ -242,7 +236,10 @@ SCHEMA = (
 # commit mid-transaction, defeating atomicity). Each constant is run one
 # statement at a time below.
 def _execute_statements(connection: sqlite3.Connection, script: str) -> None:
-    for statement in script.split(";"):
+    # Strip line comments first: a comment containing a semicolon would
+    # otherwise split the following statement.
+    lines = [line.split("--", 1)[0] for line in script.splitlines()]
+    for statement in "\n".join(lines).split(";"):
         if statement.strip():
             connection.execute(statement)
 
@@ -304,7 +301,7 @@ class JevStore:
         self.connection.execute("PRAGMA busy_timeout=5000")
         self.connection.execute("PRAGMA foreign_keys=ON")
         version = self.connection.execute("PRAGMA user_version").fetchone()[0]
-        if version not in (0, 1, 2, 3, SCHEMA_VERSION):
+        if version not in (0, 1, 2, 3, 4, 5, SCHEMA_VERSION):
             raise JevStoreError(
                 f"no migration path from assessment database version {version}"
             )
@@ -316,9 +313,21 @@ class JevStore:
             version = 3
         if version == 3:
             self._migrate_v3_to_v4()
+            version = 4
+        if version == 4:
+            self._migrate_v4_to_v5()
+            version = 5
+        if version == 5:
+            self._migrate_v5_to_v6()
         self.connection.executescript(SCHEMA)
         self.connection.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
         self.connection.commit()
+        # The ledger no longer copies file names, sizes or paths; planning and
+        # views join the catalog, so attach it when it exists.
+        if self.database.is_file():
+            self.connection.execute(
+                "ATTACH DATABASE ? AS inventory", (str(self.database),)
+            )
         try:
             self.path.chmod(0o600)
         except OSError:
@@ -425,6 +434,101 @@ class JevStore:
             raise
         finally:
             connection.isolation_level = previous
+        self._vacuum()
+
+    def _migrate_v4_to_v5(self) -> None:
+        """Rewrite the ledger file keys from public tokens to catalog integers.
+
+        Rebuilds the three key-bearing tables so the columns have INTEGER
+        affinity, resolving ``public_id`` through the inventory. A file that is
+        gone from the inventory keeps its ledger row under key 0 rather than
+        being dropped.
+        """
+        connection = self.connection
+        previous = connection.isolation_level
+        connection.isolation_level = None
+        attached = False
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            for index in (
+                "assessment_files_pending",
+                "assessment_files_batch",
+                "assessment_files_batch_status",
+                "batch_members_file",
+                "decision_results_file",
+                "decision_results_batch",
+            ):
+                connection.execute(f"DROP INDEX IF EXISTS {index}")
+            connection.execute("ALTER TABLE assessment_files RENAME TO af_old")
+            connection.execute("ALTER TABLE batch_members RENAME TO bm_old")
+            connection.execute("ALTER TABLE decision_results RENAME TO dr_old")
+            _execute_statements(connection, FILES_DDL)
+            _execute_statements(connection, BATCH_MEMBERS_DDL)
+            _execute_statements(connection, RESULTS_DDL)
+            connection.execute(
+                "ATTACH DATABASE ? AS inventory", (str(self.database),)
+            )
+            attached = True
+            connection.execute(
+                "INSERT INTO assessment_files"
+                "(run_id,file_id,directory_id,feature_json,feature_hash,"
+                "priority,status,batch_id,result_id,attempts,error,updated_at) "
+                "SELECT a.run_id,COALESCE(i.id,0),a.directory_id,a.feature_json,"
+                "a.feature_hash,a.priority,a.status,a.batch_id,a.result_id,"
+                "a.attempts,a.error,a.updated_at "
+                "FROM af_old a LEFT JOIN inventory.files i ON i.public_id=a.file_id"
+            )
+            connection.execute(
+                "INSERT INTO batch_members(run_id,batch_id,file_id,ordinal) "
+                "SELECT m.run_id,m.batch_id,COALESCE(i.id,0),m.ordinal "
+                "FROM bm_old m LEFT JOIN inventory.files i ON i.public_id=m.file_id"
+            )
+            connection.execute(
+                "INSERT INTO decision_results"
+                "(id,run_id,batch_id,request_id,file_id,choice,distribution_json,"
+                "deployment_revision,model,adapter_version,rubric_version,"
+                "context_hash,source,created_at) "
+                "SELECT d.id,d.run_id,d.batch_id,d.request_id,COALESCE(i.id,0),"
+                "d.choice,d.distribution_json,d.deployment_revision,d.model,"
+                "d.adapter_version,d.rubric_version,d.context_hash,d.source,"
+                "d.created_at FROM dr_old d "
+                "LEFT JOIN inventory.files i ON i.public_id=d.file_id"
+            )
+            connection.execute("DROP TABLE af_old")
+            connection.execute("DROP TABLE bm_old")
+            connection.execute("DROP TABLE dr_old")
+            connection.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
+            connection.execute("COMMIT")
+        except BaseException:
+            connection.execute("ROLLBACK")
+            raise
+        finally:
+            connection.isolation_level = previous
+            if attached:
+                try:
+                    connection.execute("DETACH DATABASE inventory")
+                except sqlite3.Error:
+                    pass
+        self._vacuum()
+
+    def _migrate_v5_to_v6(self) -> None:
+        """Drop the catalog copies from the ledger; readers join the catalog."""
+        for column in (
+            "file_name",
+            "remote_path",
+            "unc_path",
+            "size_bytes",
+            "mtime_utc",
+            "extension",
+        ):
+            try:
+                self.connection.execute(
+                    f"ALTER TABLE assessment_files DROP COLUMN {column}"
+                )
+            except sqlite3.OperationalError:
+                pass
+        self.connection.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
+        self.connection.commit()
         self._vacuum()
 
     def _recompress_columns(self, kinds: Any = None) -> None:
@@ -600,16 +704,17 @@ class JevStore:
     def insert_files(self, rows: List[Tuple[Any, ...]]) -> None:
         if not rows:
             return
+        # Row order: run_id, file_id, directory_id, feature_json, feature_hash,
+        # priority, status, updated_at. Path/name/size live in the catalog now.
         rows = [
-            (*row[:9], codec.encode(row[9], codec.KIND_FEATURE), *row[10:])
+            (*row[:3], codec.encode(row[3], codec.KIND_FEATURE), *row[4:])
             for row in rows
         ]
         run_id = str(rows[0][0])
         self.connection.executemany(
             "INSERT OR REPLACE INTO assessment_files(run_id,file_id,directory_id,"
-            "file_name,remote_path,unc_path,size_bytes,mtime_utc,extension,"
             "feature_json,feature_hash,priority,status,updated_at) "
-            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            "VALUES (?,?,?,?,?,?,?,?)",
             rows,
         )
         # Staging writes a fresh run, so every row is new; maintain durable
@@ -617,7 +722,7 @@ class JevStore:
         # key would be a new run ID and is therefore not a collision.
         adjustments: Dict[str, int] = {}
         for row in rows:
-            status = str(row[12])
+            status = str(row[6])
             adjustments[status] = adjustments.get(status, 0) + 1
         for status, delta in adjustments.items():
             self.connection.execute(
@@ -931,7 +1036,7 @@ class JevStore:
                             run_id,
                             batch_id,
                             request_id,
-                            str(answer["file_id"]),
+                            int(answer["file_id"]),
                             str(answer["choice"]),
                             codec.encode(
                                 canonical(answer["distribution"]),

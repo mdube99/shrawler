@@ -44,7 +44,7 @@ from .smb import SMBAuth, close_smb, connect_smb
 from .store import SCHEMA_VERSION, migrate_inventory
 from .triage.jev.config import PRIORITY_NAMES, JevConfig, priority_score
 from .triage.jev.service import JevBusyError, JevService
-from .triage.jev.storage import assessment_path
+from .triage.jev.storage import JevStore, assessment_path
 from .triage.review import ReviewStore
 from .triage.scoring import (
     DEFAULT_SCORING,
@@ -56,6 +56,7 @@ from .triage.scoring import (
 from .triage.service import PreviewGoneError, TriageBusyError, TriageService
 from .triage.storage import (
     WEB_SORT_INDEXES,
+    _ensure_result_schema,
     catalog as triage_catalog,
     explain as triage_explain,
     list_results as triage_list,
@@ -837,6 +838,13 @@ class DatabaseIndex:
         # A reader may be the first process to touch a pre-normalization
         # inventory; migrate it before the schema check rejects it.
         migrate_inventory(self.path)
+        # The ranking and assessment files are keyed by catalog integer ids in
+        # the current schema; migrate them once at startup rather than on every
+        # query.
+        _ensure_result_schema(triage_result_path(self.path), self.path)
+        jev_path = assessment_path(self.path)
+        if jev_path.is_file():
+            JevStore(self.path).close()
         self.page_size = min(max(page_size, 1), 500)
         self.scoring = scoring or ScoringConfig()
         self.skipped = 0
@@ -1465,14 +1473,14 @@ class DatabaseIndex:
             return "", [], "0"
         joins = (
             " LEFT JOIN triage.triage_files ranking"
-            " ON ranking.file_id=files.public_id AND ranking.run_id=?"
+            " ON ranking.file_id=files.id AND ranking.run_id=?"
         )
         values: List[Any] = [run_id]
         score = "COALESCE(ranking.priority, 0)"
         if category:
             joins += (
                 " LEFT JOIN triage.triage_categories ranking_category"
-                " ON ranking_category.file_id=files.public_id"
+                " ON ranking_category.file_id=files.id"
                 " AND ranking_category.run_id=ranking.run_id"
                 " AND ranking_category.category=?"
             )
@@ -1582,7 +1590,7 @@ class DatabaseIndex:
             # and pagination unless the run is constrained here.
             jev_join = (
                 " LEFT JOIN jev.assessment_files jev_file"
-                " ON jev_file.file_id=files.public_id AND jev_file.run_id=?"
+                " ON jev_file.file_id=files.id AND jev_file.run_id=?"
                 " LEFT JOIN jev.decision_results jev_result"
                 " ON jev_result.id=jev_file.result_id"
                 " AND jev_result.run_id=jev_file.run_id"
@@ -1632,13 +1640,13 @@ class DatabaseIndex:
                     "JOIN triage.triage_files ranking"
                     " ON ranking.run_id=ranking_category.run_id"
                     " AND ranking.file_id=ranking_category.file_id "
-                    "JOIN files ON files.public_id=ranking.file_id"
+                    "JOIN files ON files.id=ranking.file_id"
                 )
                 values = [ranking_run, ranking_category, *where_values]
             else:
                 ranking_source = (
                     "triage.triage_files ranking "
-                    "JOIN files ON files.public_id=ranking.file_id"
+                    "JOIN files ON files.id=ranking.file_id"
                 )
                 values = [ranking_run, *where_values]
             where = (
@@ -1723,7 +1731,7 @@ class DatabaseIndex:
                     # bounded inventory lookups as the outer loop.
                     ranking_source = (
                         "files CROSS JOIN triage.triage_files ranking"
-                        " ON ranking.file_id=files.public_id"
+                        " ON ranking.file_id=files.id"
                     )
                     if ranking_category:
                         ranking_source += (
@@ -1951,7 +1959,7 @@ class DatabaseIndex:
             # multiplied across every run that has touched them.
             jev_join = (
                 " LEFT JOIN jev.assessment_files jev_file"
-                " ON jev_file.file_id=files.public_id AND jev_file.run_id=?"
+                " ON jev_file.file_id=files.id AND jev_file.run_id=?"
                 " LEFT JOIN jev.decision_results jev_result"
                 " ON jev_result.id=jev_file.result_id"
                 " AND jev_result.run_id=jev_file.run_id"

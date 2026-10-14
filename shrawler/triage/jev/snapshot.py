@@ -190,20 +190,14 @@ def stage(
             # Exact sibling-marker evidence is preserved for every directory,
             # independent of which rules are active.
             marker_rows.append(
-                (directory_value, name.casefold(), str(metadata["file_id"]))
+                (directory_value, name.casefold(), int(metadata["file_key"]))
             )
             feature_json = canonical(metadata)
             file_rows.append(
                 (
                     run_id,
-                    str(metadata["file_id"]),
+                    int(metadata["file_key"]),
                     directory_value,
-                    name,
-                    str(metadata["remote_path"]),
-                    str(metadata["unc_path"]),
-                    int(metadata["size_bytes"]),
-                    metadata.get("mtime_utc"),
-                    extension,
                     feature_json,
                     hashlib.sha256(feature_json.encode()).hexdigest(),
                     0,

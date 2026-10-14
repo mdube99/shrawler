@@ -66,8 +66,10 @@ def list_assessed(
     rows = list(
         store.connection.execute(
             "SELECT r.choice, r.distribution_json, r.deployment_revision, r.model, "
-            "f.file_id, f.file_name, f.unc_path, f.extension, f.size_bytes, f.mtime_utc "
+            "i.public_id AS file_id, i.file_name, i.unc_path, i.extension, "
+            "i.size_bytes, i.mtime_utc "
             "FROM assessment_files f JOIN decision_results r ON r.id=f.result_id "
+            "JOIN inventory.files i ON i.id=f.file_id "
             "WHERE f.run_id=? AND f.status='assessed'" + clause + " "
             "ORDER BY " + _PRIORITY_ORDER + " LIMIT ? OFFSET ?",
             (*values, limit, offset),
@@ -93,8 +95,10 @@ def highlight_missed(
     rows = list(
         store.connection.execute(
             "SELECT r.choice, r.distribution_json, r.deployment_revision, r.model, "
-            "f.file_id, f.file_name, f.unc_path, f.extension, f.size_bytes, f.mtime_utc "
+            "i.public_id AS file_id, i.file_name, i.unc_path, i.extension, "
+            "i.size_bytes, i.mtime_utc "
             "FROM assessment_files f JOIN decision_results r ON r.id=f.result_id "
+            "JOIN inventory.files i ON i.id=f.file_id "
             "WHERE f.run_id=? AND f.status='assessed' AND f.priority=0 "
             "AND CAST(r.choice AS INTEGER) >= ? "
             "ORDER BY " + _PRIORITY_ORDER + " LIMIT ? OFFSET ?",

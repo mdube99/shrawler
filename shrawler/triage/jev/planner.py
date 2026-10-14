@@ -431,7 +431,7 @@ def _pending_candidates(
     ``(priority DESC, directory_id, file_id)`` so it stays stable, streams
     without materializing the directory, and needs no sort buffer.
     """
-    last: Optional[Tuple[int, int, str]] = None
+    last: Optional[Tuple[int, int, int]] = None
     while True:
         if cancelled and cancelled():
             raise KeyboardInterrupt
@@ -439,22 +439,23 @@ def _pending_candidates(
         values: List[Any] = [run_id]
         if last is not None:
             clause = (
-                " AND (priority<? OR (priority=? AND (directory_id>? OR "
-                "(directory_id=? AND file_id>?))))"
+                " AND (f.priority<? OR (f.priority=? AND (f.directory_id>? OR "
+                "(f.directory_id=? AND f.file_id>?))))"
             )
             values.extend([last[0], last[0], last[1], last[1], last[2]])
         values.append(STREAM_CHUNK)
         rows = store.connection.execute(
-            "SELECT file_id,file_name,size_bytes,directory_id,priority "
-            "FROM assessment_files WHERE run_id=? AND status='pending'" + clause +
-            " ORDER BY priority DESC,directory_id,file_id LIMIT ?",
+            "SELECT f.file_id,i.file_name,i.size_bytes,f.directory_id,f.priority "
+            "FROM assessment_files f JOIN inventory.files i ON i.id=f.file_id "
+            "WHERE f.run_id=? AND f.status='pending'" + clause +
+            " ORDER BY f.priority DESC,f.directory_id,f.file_id LIMIT ?",
             values,
         ).fetchall()
         if not rows:
             return
         for row in rows:
             yield {
-                "file_id": str(row["file_id"]),
+                "file_id": int(row["file_id"]),
                 "file_name": str(row["file_name"]),
                 "size_bytes": int(row["size_bytes"]),
                 "directory_id": int(row["directory_id"]),
@@ -463,7 +464,7 @@ def _pending_candidates(
         last = (
             int(last_row["priority"]),
             int(last_row["directory_id"]),
-            str(last_row["file_id"]),
+            int(last_row["file_id"]),
         )
 
 
@@ -794,14 +795,15 @@ def plan_directory(
     context = {**context, "directory_id": directory_id}
     context_hash = str(directory["context_hash"])
     rows = store.connection.execute(
-        "SELECT file_id,file_name,size_bytes,directory_id "
-        "FROM assessment_files WHERE run_id=? AND directory_id=? AND status='pending' "
-        "ORDER BY file_id",
+        "SELECT f.file_id,i.file_name,i.size_bytes,f.directory_id "
+        "FROM assessment_files f JOIN inventory.files i ON i.id=f.file_id "
+        "WHERE f.run_id=? AND f.directory_id=? AND f.status='pending' "
+        "ORDER BY f.file_id",
         (run_id, directory_id),
     ).fetchall()
     candidates = [
         {
-            "file_id": str(row["file_id"]),
+            "file_id": int(row["file_id"]),
             "file_name": str(row["file_name"]),
             "size_bytes": int(row["size_bytes"]),
             "directory_id": int(row["directory_id"]),
@@ -864,14 +866,16 @@ def split_input_error_batch(
     """
     batch_id = str(batch["id"])
     rows = store.connection.execute(
-        "SELECT f.file_id,f.file_name,f.size_bytes,f.directory_id "
-        "FROM batch_members m JOIN assessment_files f ON f.run_id=m.run_id "
-        "AND f.file_id=m.file_id WHERE m.batch_id=? ORDER BY m.ordinal",
+        "SELECT f.file_id,i.file_name,i.size_bytes,f.directory_id "
+        "FROM batch_members m "
+        "JOIN assessment_files f ON f.run_id=m.run_id AND f.file_id=m.file_id "
+        "JOIN inventory.files i ON i.id=f.file_id "
+        "WHERE m.batch_id=? ORDER BY m.ordinal",
         (batch_id,),
     ).fetchall()
     members = [
         {
-            "file_id": str(row["file_id"]),
+            "file_id": int(row["file_id"]),
             "file_name": str(row["file_name"]),
             "size_bytes": int(row["size_bytes"]),
             "directory_id": int(row["directory_id"]),

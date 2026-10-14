@@ -13,11 +13,11 @@ from ..output import escape_terminal
 from ..store import migrate_inventory
 from .storage import connect_readonly, observations, select_scan, utc_now
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS family_members (
- scan_id TEXT NOT NULL, family_id TEXT NOT NULL, file_id TEXT NOT NULL,
+ scan_id TEXT NOT NULL, family_id TEXT NOT NULL, file_id INTEGER NOT NULL,
  PRIMARY KEY(scan_id,file_id)
 );
 CREATE INDEX IF NOT EXISTS family_members_group ON family_members(scan_id,family_id,file_id);
@@ -50,28 +50,38 @@ class ReviewStore:
         migrate_inventory(self.database)
         with closing(self.connect()) as db, db:
             db.executescript(SCHEMA)
-            columns = {
-                str(row[1]) for row in db.execute("PRAGMA table_info(family_members)")
+            declared = {
+                str(row[1]): str(row[2]).upper()
+                for row in db.execute("PRAGMA table_info(family_members)")
             }
-            if "metadata_json" in columns:
-                # Version 1 copied the whole observation into the review file.
-                # Keep the family membership and rebuild the rest from the
-                # inventory at read time.
-                db.execute("ALTER TABLE family_members RENAME TO family_members_v1")
+            # A v1 database stored the whole observation; a v2 database still
+            # keyed on the public token. Both rebuild to the integer key,
+            # resolving it through the inventory.
+            if declared.get("file_id") not in (None, "INTEGER"):
+                db.execute("ALTER TABLE family_members RENAME TO family_members_old")
                 db.execute("DROP INDEX IF EXISTS family_members_group")
-                db.executescript(
+                db.execute(
                     "CREATE TABLE family_members ("
                     " scan_id TEXT NOT NULL, family_id TEXT NOT NULL,"
-                    " file_id TEXT NOT NULL, PRIMARY KEY(scan_id,file_id));"
-                    "CREATE INDEX family_members_group"
-                    " ON family_members(scan_id,family_id,file_id)"
+                    " file_id INTEGER NOT NULL, PRIMARY KEY(scan_id,file_id))"
                 )
                 db.execute(
-                    "INSERT OR IGNORE INTO family_members"
-                    "(scan_id,family_id,file_id) "
-                    "SELECT scan_id,family_id,file_id FROM family_members_v1"
+                    "ATTACH DATABASE ? AS inventory", (str(self.database),)
                 )
-                db.execute("DROP TABLE family_members_v1")
+                try:
+                    db.execute(
+                        "INSERT OR IGNORE INTO family_members"
+                        "(scan_id,family_id,file_id) "
+                        "SELECT fm.scan_id,fm.family_id,i.id FROM family_members_old fm "
+                        "JOIN inventory.files i ON i.public_id=fm.file_id"
+                    )
+                finally:
+                    db.execute("DETACH DATABASE inventory")
+                db.execute("DROP TABLE family_members_old")
+                db.execute(
+                    "CREATE INDEX IF NOT EXISTS family_members_group"
+                    " ON family_members(scan_id,family_id,file_id)"
+                )
             db.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
         self.path.chmod(0o600)
 
@@ -94,7 +104,7 @@ class ReviewStore:
                     (
                         scan["id"],
                         family_key(item),
-                        item["file_id"],
+                        item["file_key"],
                     )
                 )
                 count += 1
@@ -135,7 +145,7 @@ class ReviewStore:
                               COALESCE(sf.scan_timestamp_utc,i.scan_timestamp_utc) AS scan_timestamp_utc,
                               i.public_id AS file_id
                        FROM family_members fm
-                       JOIN inventory.files i ON i.public_id=fm.file_id
+                       JOIN inventory.files i ON i.id=fm.file_id
                        LEFT JOIN inventory.scan_files sf
                          ON sf.scan_id=fm.scan_id AND sf.file_id=i.id
                        WHERE fm.scan_id=? AND fm.family_id=?
@@ -167,7 +177,7 @@ class ReviewStore:
                 MIN(i.unc_path) AS representative,
                 SUM(COALESCE(sf.size_bytes,i.size_bytes)) AS expected_bytes
                 FROM family_members fm
-                JOIN inventory.files i ON i.public_id=fm.file_id
+                JOIN inventory.files i ON i.id=fm.file_id
                 LEFT JOIN inventory.scan_files sf
                   ON sf.scan_id=fm.scan_id AND sf.file_id=i.id
                 WHERE fm.scan_id=? GROUP BY fm.family_id
@@ -197,13 +207,22 @@ class ReviewStore:
             raise ValueError("Review note must be at most 4000 characters")
         column = "file_id" if scope == "file" else "family_id"
         with closing(self.connect()) as db, db:
-            if (
-                db.execute(
-                    "SELECT 1 FROM family_members WHERE " + column + "=? LIMIT 1",
-                    (target,),
-                ).fetchone()
-                is None
-            ):
+            db.execute("ATTACH DATABASE ? AS inventory", (str(self.database),))
+            try:
+                if scope == "file":
+                    found = db.execute(
+                        "SELECT 1 FROM family_members fm JOIN inventory.files i"
+                        " ON i.id=fm.file_id WHERE i.public_id=? LIMIT 1",
+                        (target,),
+                    ).fetchone()
+                else:
+                    found = db.execute(
+                        "SELECT 1 FROM family_members WHERE " + column + "=? LIMIT 1",
+                        (target,),
+                    ).fetchone()
+            finally:
+                db.execute("DETACH DATABASE inventory")
+            if found is None:
                 raise ValueError("Unknown review target; build families first")
             cursor = db.execute(
                 "INSERT INTO review_events(scope,target,disposition,note,created_at) VALUES (?,?,?,?,?)",

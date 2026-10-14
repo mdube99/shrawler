@@ -73,6 +73,12 @@ The review database keeps only family membership, joining the inventory for
 file details. Per-directory listings and the optional Jev audit documents are
 compressed per row, the Jev columns against small shared dictionaries.
 
+Every derived database keys its files by the catalog's integer id rather than
+the 22-character public token; the token is mapped back only in the API. The
+Jev ledger no longer copies file names, paths, sizes or timestamps either. The
+catalog keeps the public token because analyst decisions are recorded against
+it.
+
 Catalog query indexes are created after the bulk load so their B-tree leaves
 are packed, and they tie-break on `public_id` instead of repeating the path or
 the file name, which keeps them narrow. The WebUI sort columns were narrowed
@@ -81,10 +87,12 @@ to match.
 Measured on a 100,000-file synthetic inventory (20,000 directories, long
 paths): a fresh inventory fell from 191 MiB to **103 MiB** (-46%), and a
 schema-1 inventory shrinks to roughly the same after the in-place migration and
-its one-time `VACUUM`. A 2,322-file Jev assessment database fell from 9.65 MiB
-to **5.75 MiB** (-40%). The remaining inventory size is dominated by the FTS5
-substring index and the path and parent-path indexes, which the UI needs to
-page and browse.
+its one-time `VACUUM`. On the same fixture the ranking database fell from 137
+to **118 MiB** and the review database from 26 to **20 MiB**; those figures are
+diluted by a synthetic `result_json` and the relative win is larger on real
+runs. A 2,322-file Jev assessment database fell from 9.65 MiB to **4.86 MiB**
+(-50%). The remaining inventory size is dominated by the FTS5 substring index
+and the path and parent-path indexes, which the UI needs to page and browse.
 
 Opening an older database migrates it in place; a scan, the WebUI, ranking,
 review, or coverage can trigger the migration. Back up an inventory before the

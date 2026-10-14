@@ -443,6 +443,18 @@ class StoreMigrationTests(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         database = Path(self.tmp.name) / "shrawler.db"
+        # The v5 key migration resolves the public tokens through the
+        # inventory, so the fixture needs a minimal catalog.
+        inventory = sqlite3.connect(database)
+        inventory.execute(
+            "CREATE TABLE files (id INTEGER PRIMARY KEY, public_id TEXT NOT NULL UNIQUE)"
+        )
+        inventory.executemany(
+            "INSERT INTO files(id,public_id) VALUES (?,?)",
+            [(1, "F1"), (2, "F2")],
+        )
+        inventory.commit()
+        inventory.close()
         connection = sqlite3.connect(database.with_name("shrawler.jev.db"))
         connection.executescript(self.V1)
         connection.execute(
@@ -514,11 +526,11 @@ class StoreMigrationTests(unittest.TestCase):
     def test_counters_stay_reconciled_through_transitions(self) -> None:
         database = self.build_v1()
         with JevStore(database) as store:
-            store.set_file_status("run1", ["F2"], "planned", batch_id="b2")
+            store.set_file_status("run1", [2], "planned", batch_id="b2")
             self.assertEqual(store.status_counts("run1").get("planned"), 1)
             self.assertEqual(store.status_counts("run1").get("pending", 0), 0)
             self.assertTrue(store.verify_status_counts("run1"))
-            store.set_file_status("run1", ["F2"], "assessed")
+            store.set_file_status("run1", [2], "assessed")
             self.assertEqual(store.status_counts("run1").get("assessed"), 2)
             self.assertTrue(store.verify_status_counts("run1"))
 

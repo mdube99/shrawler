@@ -184,8 +184,11 @@ class BindingKeyTests(BaseCase):
                     # The key appears in both the candidate line and the question.
                     self.assertIn(f"  {key} |", payload["state"])
                     self.assertIn(key, payload["questions"][key]["instructions"])
-                    # A question key is a binding key, never a raw file ID.
-                    self.assertNotIn(file_id, payload["state"])
+                    # The question key is a derived binding key, not the raw
+                    # file ID. The file ID is now a short integer, so a
+                    # substring check against the prompt would be meaningless.
+                    self.assertNotEqual(key, file_id)
+                    self.assertIn(key, payload["questions"])
 
     def test_a_retied_batch_reproduces_the_same_request(self) -> None:
         # A batch that is dropped and replanned must render the identical
@@ -311,7 +314,8 @@ class PriorityOrderTests(BaseCase):
             run_id = runner.prepare(scan_id)["run_id"]
             for name, priority in {"f0.txt": 1, "f1.txt": 3, "f2.txt": 0, "f3.txt": 2}.items():
                 store.connection.execute(
-                    "UPDATE assessment_files SET priority=? WHERE run_id=? AND file_name=?",
+                    "UPDATE assessment_files SET priority=? WHERE run_id=? "
+                    "AND file_id=(SELECT id FROM inventory.files WHERE file_name=?)",
                     (priority, run_id, name),
                 )
             store.connection.commit()

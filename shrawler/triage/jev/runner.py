@@ -76,7 +76,9 @@ class WorkItem:
     keys: Dict[str, str] = field(default_factory=dict)
 
     def key_for(self, file_id: str) -> str:
-        return self.keys.get(file_id, file_id)
+        # Keys are stringified for the request; members may be integer catalog
+        # ids, so normalise the lookup and the fallback.
+        return self.keys.get(str(file_id), str(file_id))
 
 
 @dataclass
@@ -618,7 +620,7 @@ class JevRunner:
         retrying: List[str] = []
         attempts = self.store.attempts_for(run_id, list(file_ids))
         for file_id in file_ids:
-            count = attempts.get(file_id, 0)
+            count = attempts.get(str(file_id), 0)
             (retrying if count <= self.config.retries else exhausted).append(file_id)
         return exhausted, retrying
 
@@ -632,7 +634,7 @@ class JevRunner:
             for result in self.store.results_for_batch(cached_run, cached_batch)
         }
         members = self.store.batch_members(batch_id)
-        answers = [file_id for file_id in members if file_id in cached_results]
+        answers = [file_id for file_id in members if str(file_id) in cached_results]
         if not answers:
             return False
         hashes = self.store.batch_directory_hashes(batch_id)
@@ -642,7 +644,7 @@ class JevRunner:
         }
         payload_answers: List[Dict[str, Any]] = []
         for file_id in answers:
-            result = cached_results[file_id]
+            result = cached_results[str(file_id)]
             payload_answers.append(
                 {
                     "file_id": file_id,
@@ -654,10 +656,12 @@ class JevRunner:
                     "model": str(result["model"]),
                     "adapter_version": str(result["adapter_version"]),
                     "rubric_version": str(result["rubric_version"]),
-                    "context_hash": hashes.get(directories.get(file_id, -1), ""),
+                    "context_hash": hashes.get(directories.get(str(file_id), -1), ""),
                 }
             )
-        missing = [file_id for file_id in members if file_id not in cached_results]
+        missing = [
+            file_id for file_id in members if str(file_id) not in cached_results
+        ]
         exhausted, retrying = self._split_by_attempts(run_id, missing)
         batch_status = "completed" if not missing else "partial"
         self.store.complete_batch(

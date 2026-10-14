@@ -319,6 +319,62 @@ class StorageTests(unittest.TestCase):
         self.assertEqual(detail["rules_hash"], rules.digest)
         self.assertTrue(detail["rule_diagnostics"][0]["matched"])
 
+    def test_v4_result_keys_migrate_to_catalog_integers(self):
+        scan_id = self.scan([metadata()])
+        with sqlite3.connect(self.database) as source:
+            row_id, public_id = source.execute(
+                "SELECT id, public_id FROM files"
+            ).fetchone()
+        path = result_path(self.database)
+        connection = sqlite3.connect(path)
+        connection.executescript(
+            """
+            CREATE TABLE triage_runs (
+             id TEXT PRIMARY KEY, source_path TEXT NOT NULL, scan_id TEXT NOT NULL,
+             started_at TEXT NOT NULL, finished_at TEXT, status TEXT NOT NULL,
+             engine_version TEXT NOT NULL, rules_hash TEXT NOT NULL,
+             rules_json TEXT NOT NULL, scan_json TEXT NOT NULL,
+             inventory_hash TEXT, file_count INTEGER NOT NULL DEFAULT 0, error TEXT);
+            CREATE TABLE triage_files (
+             run_id TEXT NOT NULL, file_id TEXT NOT NULL, priority INTEGER NOT NULL,
+             metadata_json TEXT NOT NULL, result_json TEXT NOT NULL,
+             PRIMARY KEY(run_id, file_id));
+            CREATE TABLE triage_categories (
+             run_id TEXT NOT NULL, file_id TEXT NOT NULL, category TEXT NOT NULL,
+             score INTEGER NOT NULL, PRIMARY KEY(run_id, file_id, category));
+            PRAGMA user_version=4;
+            """
+        )
+        connection.execute(
+            "INSERT INTO triage_runs(id,source_path,scan_id,started_at,status,"
+            "engine_version,rules_hash,rules_json,scan_json,file_count) "
+            "VALUES ('run1',?,?,'2026-01-01T00:00:00+00:00','completed','5','h',"
+            "?,'{}',1)",
+            (str(self.database), scan_id, json.dumps({"version": 1, "rules": []})),
+        )
+        connection.execute(
+            "INSERT INTO triage_files VALUES ('run1',?,30,'',?)",
+            (public_id, json.dumps({"priority": 30, "signals": []})),
+        )
+        connection.commit()
+        connection.close()
+
+        listing = list_results(self.database, "run1")
+        self.assertEqual(listing["items"][0]["file_id"], public_id)
+        connection = sqlite3.connect(path)
+        try:
+            self.assertEqual(
+                connection.execute("PRAGMA user_version").fetchone()[0], 5
+            )
+            self.assertEqual(
+                connection.execute(
+                    "SELECT file_id FROM triage_files WHERE run_id='run1'"
+                ).fetchone()[0],
+                row_id,
+            )
+        finally:
+            connection.close()
+
     def test_category_order_and_prior_runs_remain_available(self):
         self.scan([metadata(), metadata("/vault.kdbx"), metadata("/notes.txt")])
         first = rank(self.database, load())
