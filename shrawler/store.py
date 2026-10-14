@@ -18,7 +18,7 @@ from .coverage import DirectoryCoverage
 from .output import safe_csv_row
 from .search_index import ensure as ensure_search_index, supported as search_supported
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 # Web-initiated retrievals share the downloads table but are not scan-time
 # downloads, so scan summaries and JSON/CSV exports exclude them.
@@ -84,22 +84,31 @@ def _files_ddl(table: str) -> str:
     """
 
 
+# Catalog query indexes. Every index carries an integer rowid or the short
+# ``public_id`` token as its tie-break rather than a second copy of the path or
+# the file name, which is where most of the index bytes used to go.
 _FILES_INDEXES = (
-    "CREATE INDEX IF NOT EXISTS files_host_idx ON files(host COLLATE NOCASE)",
     "CREATE INDEX IF NOT EXISTS files_share_idx ON files(share COLLATE NOCASE)",
-    "CREATE INDEX IF NOT EXISTS files_ext_idx ON files(extension, id)",
     "CREATE INDEX IF NOT EXISTS files_parent_idx ON files(host, share, parent_path, id)",
     "CREATE INDEX IF NOT EXISTS files_path_sort_idx ON files(host COLLATE NOCASE, "
-    "share COLLATE NOCASE, remote_path COLLATE NOCASE, file_name COLLATE NOCASE, "
-    "public_id)",
+    "share COLLATE NOCASE, remote_path COLLATE NOCASE, public_id)",
     "CREATE INDEX IF NOT EXISTS files_name_sort_idx ON files(file_name COLLATE NOCASE, "
-    "remote_path COLLATE NOCASE, public_id)",
+    "public_id)",
     "CREATE INDEX IF NOT EXISTS files_type_sort_idx ON files(extension COLLATE NOCASE, "
-    "file_name COLLATE NOCASE, public_id)",
-    "CREATE INDEX IF NOT EXISTS files_size_sort_idx ON files(size_bytes, "
-    "file_name COLLATE NOCASE, public_id)",
-    "CREATE INDEX IF NOT EXISTS files_modified_sort_idx ON files(mtime_utc, "
-    "file_name COLLATE NOCASE, public_id)",
+    "public_id)",
+    "CREATE INDEX IF NOT EXISTS files_size_sort_idx ON files(size_bytes, public_id)",
+    "CREATE INDEX IF NOT EXISTS files_modified_sort_idx ON files(mtime_utc, public_id)",
+)
+
+# Indexes replaced by the narrower set above. Dropped by the v2 to v3 migration.
+_FILES_INDEXES_V2 = (
+    "files_host_idx",
+    "files_ext_idx",
+    "files_path_sort_idx",
+    "files_name_sort_idx",
+    "files_type_sort_idx",
+    "files_size_sort_idx",
+    "files_modified_sort_idx",
 )
 
 
@@ -258,6 +267,8 @@ class ScanStore:
             )
         if version == 1:
             self._migrate_v1_to_v2()
+        elif version == 2:
+            self._migrate_v2_to_v3()
         self.connection.executescript(_files_ddl("files"))
         self.connection.executescript(
             """
@@ -330,17 +341,47 @@ class ScanStore:
             CREATE INDEX IF NOT EXISTS downloads_lookup_idx ON downloads(scan_id, share_id, remote_path_key);
             """
         )
-        for statement in _FILES_INDEXES:
-            self.connection.execute(statement)
         self.connection.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
         self.connection.commit()
-        # New inventories stay indexed as they grow. Existing large inventories
-        # are backfilled by the WebUI's background maintenance worker.
+        # A fresh inventory has no rows yet: build_file_indexes() creates the
+        # query indexes after the bulk load so their leaves are packed. A
+        # reopened inventory already holds rows, so pack any missing index now.
+        if self.connection.execute("SELECT 1 FROM files LIMIT 1").fetchone():
+            self.build_file_indexes()
+        # New inventories stay substring-indexed as they grow. Existing large
+        # inventories are backfilled by the WebUI's background worker.
         if (
             not self.connection.execute("SELECT 1 FROM files LIMIT 1").fetchone()
             and search_supported()
         ):
             ensure_search_index(self.connection)
+
+    def build_file_indexes(self) -> None:
+        """Create the catalog query indexes once the bulk load has finished.
+
+        Creating them on an empty table and then inserting rows in discovery
+        order leaves the B-tree leaves roughly 30% empty. Building them after
+        the rows exist lets SQLite sort and write packed leaves, which is worth
+        tens of MiB on a multi-million-row inventory. ``IF NOT EXISTS`` makes
+        this a cheap no-op when the indexes are already present.
+        """
+        with self._lock:
+            for statement in _FILES_INDEXES:
+                self.connection.execute(statement)
+            self.connection.commit()
+
+    def _migrate_v2_to_v3(self) -> None:
+        """Replace the wide catalog indexes with the narrow set.
+
+        The old sort indexes repeated remote_path or file_name as a tie-break,
+        which roughly doubled their size. Dropping them here lets
+        ``build_file_indexes`` recreate the narrow definitions packed.
+        """
+        with self._lock:
+            for name in _FILES_INDEXES_V2:
+                self.connection.execute(f"DROP INDEX IF EXISTS {name}")
+            self.connection.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
+            self.connection.commit()
 
     def _migrate_v1_to_v2(self) -> None:
         """Rebuild the inventory around non-duplicated file metadata.
@@ -745,6 +786,8 @@ class ScanStore:
                 ),
             )
             self._touch(force=True)
+        # The bulk load is done; pack the catalog query indexes now.
+        self.build_file_indexes()
 
     def _hosts(self) -> List[sqlite3.Row]:
         return list(
@@ -1063,7 +1106,7 @@ def migrate_inventory(path: Path) -> bool:
     connection = sqlite3.connect(database, timeout=5)
     try:
         version = int(connection.execute("PRAGMA user_version").fetchone()[0])
-        if version != 1:
+        if version not in (1, 2):
             return False
         if (
             connection.execute(
@@ -1074,7 +1117,12 @@ def migrate_inventory(path: Path) -> bool:
             return False
         store = ScanStore.__new__(ScanStore)
         store.connection = connection
-        store._migrate_v1_to_v2()
+        store._lock = threading.RLock()
+        if version == 1:
+            store._migrate_v1_to_v2()
+        else:
+            store._migrate_v2_to_v3()
+            store.build_file_indexes()
         return True
     finally:
         connection.close()

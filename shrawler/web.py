@@ -850,11 +850,11 @@ class DatabaseIndex:
             connection.execute("SELECT 1 FROM files LIMIT 1").fetchone()
 
     SORT_INDEXES = (
-        ("path", "files_path_sort_idx", "CREATE INDEX IF NOT EXISTS files_path_sort_idx ON files(host COLLATE NOCASE, share COLLATE NOCASE, remote_path COLLATE NOCASE, file_name COLLATE NOCASE, public_id)"),
-        ("filename", "files_name_sort_idx", "CREATE INDEX IF NOT EXISTS files_name_sort_idx ON files(file_name COLLATE NOCASE, remote_path COLLATE NOCASE, public_id)"),
-        ("file type", "files_type_sort_idx", "CREATE INDEX IF NOT EXISTS files_type_sort_idx ON files(extension COLLATE NOCASE, file_name COLLATE NOCASE, public_id)"),
-        ("size", "files_size_sort_idx", "CREATE INDEX IF NOT EXISTS files_size_sort_idx ON files(size_bytes, file_name COLLATE NOCASE, public_id)"),
-        ("modified date", "files_modified_sort_idx", "CREATE INDEX IF NOT EXISTS files_modified_sort_idx ON files(mtime_utc, file_name COLLATE NOCASE, public_id)"),
+        ("path", "files_path_sort_idx", "CREATE INDEX IF NOT EXISTS files_path_sort_idx ON files(host COLLATE NOCASE, share COLLATE NOCASE, remote_path COLLATE NOCASE, public_id)"),
+        ("filename", "files_name_sort_idx", "CREATE INDEX IF NOT EXISTS files_name_sort_idx ON files(file_name COLLATE NOCASE, public_id)"),
+        ("file type", "files_type_sort_idx", "CREATE INDEX IF NOT EXISTS files_type_sort_idx ON files(extension COLLATE NOCASE, public_id)"),
+        ("size", "files_size_sort_idx", "CREATE INDEX IF NOT EXISTS files_size_sort_idx ON files(size_bytes, public_id)"),
+        ("modified date", "files_modified_sort_idx", "CREATE INDEX IF NOT EXISTS files_modified_sort_idx ON files(mtime_utc, public_id)"),
     )
 
     def missing_sort_indexes(self) -> List[Tuple[str, str]]:
@@ -1651,15 +1651,12 @@ class DatabaseIndex:
                 "files.host COLLATE NOCASE",
                 "files.share COLLATE NOCASE",
                 "files.remote_path COLLATE NOCASE",
-                "files.file_name COLLATE NOCASE",
             ],
             "type": [
                 "files.extension COLLATE NOCASE",
-                "files.file_name COLLATE NOCASE",
             ],
             "file": [
                 "files.file_name COLLATE NOCASE",
-                "files.remote_path COLLATE NOCASE",
             ],
             "location": [
                 "files.host COLLATE NOCASE",
@@ -1667,8 +1664,8 @@ class DatabaseIndex:
                 "files.remote_path COLLATE NOCASE",
             ],
             "priority": [ranking_score],
-            "size": ["files.size_bytes", "files.file_name COLLATE NOCASE"],
-            "modified": ["files.mtime_utc", "files.file_name COLLATE NOCASE"],
+            "size": ["files.size_bytes"],
+            "modified": ["files.mtime_utc"],
         }
         if jev_order:
             sort_columns["jev"] = [jev_order]

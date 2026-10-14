@@ -29,7 +29,7 @@ from typing import Any, Dict, Iterable, Iterator, List, Optional, Sequence, Tupl
 from . import codec
 from .config import canonical
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 # A run lease heartbeats at this interval; another process may reclaim the run
 # once the heartbeat is older than LEASE_TTL_SECONDS.
@@ -304,7 +304,7 @@ class JevStore:
         self.connection.execute("PRAGMA busy_timeout=5000")
         self.connection.execute("PRAGMA foreign_keys=ON")
         version = self.connection.execute("PRAGMA user_version").fetchone()[0]
-        if version not in (0, 1, 2, SCHEMA_VERSION):
+        if version not in (0, 1, 2, 3, SCHEMA_VERSION):
             raise JevStoreError(
                 f"no migration path from assessment database version {version}"
             )
@@ -313,6 +313,9 @@ class JevStore:
             version = 2
         if version == 2:
             self._migrate_v2_to_v3()
+            version = 3
+        if version == 3:
+            self._migrate_v3_to_v4()
         self.connection.executescript(SCHEMA)
         self.connection.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
         self.connection.commit()
@@ -391,28 +394,30 @@ class JevStore:
             connection.isolation_level = previous
 
     def _migrate_v2_to_v3(self) -> None:
-        """Pack the large JSON audit columns and reclaim the freed pages."""
+        """Pack the large JSON audit columns with plain per-row zlib."""
         connection = self.connection
         previous = connection.isolation_level
         connection.isolation_level = None
         try:
             connection.execute("BEGIN IMMEDIATE")
-            for table, columns in (
-                ("request_batches", ("payload_json", "state_json", "question_json")),
-                ("assessment_files", ("feature_json",)),
-                ("directory_contexts", ("context_json",)),
-                ("decision_results", ("distribution_json",)),
-            ):
-                for column in columns:
-                    rows = connection.execute(
-                        f"SELECT rowid,{column} FROM {table} "
-                        f"WHERE {column} IS NOT NULL AND typeof({column})='text'"
-                    ).fetchall()
-                    for rowid, value in rows:
-                        connection.execute(
-                            f"UPDATE {table} SET {column}=? WHERE rowid=?",
-                            (codec.encode(value), rowid),
-                        )
+            self._recompress_columns()
+            connection.execute("PRAGMA user_version=3")
+            connection.execute("COMMIT")
+        except BaseException:
+            connection.execute("ROLLBACK")
+            raise
+        finally:
+            connection.isolation_level = previous
+        self._vacuum()
+
+    def _migrate_v3_to_v4(self) -> None:
+        """Re-encode the audit columns against the shared dictionaries."""
+        connection = self.connection
+        previous = connection.isolation_level
+        connection.isolation_level = None
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            self._recompress_columns(codec.KINDS)
             connection.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
             connection.execute("COMMIT")
         except BaseException:
@@ -420,8 +425,28 @@ class JevStore:
             raise
         finally:
             connection.isolation_level = previous
+        self._vacuum()
+
+    def _recompress_columns(self, kinds: Any = None) -> None:
+        """Re-encode every packed JSON column in place.
+
+        ``kinds`` is the per-column codec kind mapping; ``None`` writes the
+        plain-zlib format used before the shared dictionaries existed.
+        """
+        columns = kinds or dict.fromkeys(codec.KINDS)
+        for (table, column), kind in columns.items():
+            rows = self.connection.execute(
+                f"SELECT rowid,{column} FROM {table} WHERE {column} IS NOT NULL"
+            ).fetchall()
+            for rowid, value in rows:
+                self.connection.execute(
+                    f"UPDATE {table} SET {column}=? WHERE rowid=?",
+                    (codec.encode(codec.decode(value), kind), rowid),
+                )
+
+    def _vacuum(self) -> None:
         try:
-            connection.execute("VACUUM")
+            self.connection.execute("VACUUM")
         except sqlite3.Error:
             pass
 
@@ -544,7 +569,10 @@ class JevStore:
     # -- directory contexts ----------------------------------------------
 
     def insert_contexts(self, run_id: str, rows: List[Tuple[Any, ...]]) -> None:
-        packed = [(*row[:5], codec.encode(row[5]), *row[6:]) for row in rows]
+        packed = [
+            (*row[:5], codec.encode(row[5], codec.KIND_CONTEXT), *row[6:])
+            for row in rows
+        ]
         self.connection.executemany(
             "INSERT OR REPLACE INTO directory_contexts(run_id,directory_id,host,"
             "share,parent,context_json,context_hash,observed_files,context_tokens,"
@@ -572,7 +600,10 @@ class JevStore:
     def insert_files(self, rows: List[Tuple[Any, ...]]) -> None:
         if not rows:
             return
-        rows = [(*row[:9], codec.encode(row[9]), *row[10:]) for row in rows]
+        rows = [
+            (*row[:9], codec.encode(row[9], codec.KIND_FEATURE), *row[10:])
+            for row in rows
+        ]
         run_id = str(rows[0][0])
         self.connection.executemany(
             "INSERT OR REPLACE INTO assessment_files(run_id,file_id,directory_id,"
@@ -777,11 +808,11 @@ class JevStore:
                     primary_directory_id,
                     request_id,
                     ordinal,
-                    codec.encode(payload_json),
+                    codec.encode(payload_json, codec.KIND_PAYLOAD),
                     payload_hash,
                     input_tokens,
-                    codec.encode(state),
-                    codec.encode(canonical(questions)),
+                    codec.encode(state, codec.KIND_STATE),
+                    codec.encode(canonical(questions), codec.KIND_QUESTION),
                     "planned",
                     utc_now(),
                     cache_key,
@@ -902,7 +933,10 @@ class JevStore:
                             request_id,
                             str(answer["file_id"]),
                             str(answer["choice"]),
-                            codec.encode(canonical(answer["distribution"]))
+                            codec.encode(
+                                canonical(answer["distribution"]),
+                                codec.KIND_DISTRIBUTION,
+                            )
                             if answer.get("distribution") is not None
                             else None,
                             str(answer["deployment_revision"]),

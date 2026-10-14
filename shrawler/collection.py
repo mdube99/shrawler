@@ -5,10 +5,11 @@ import json
 import os
 import sqlite3
 import uuid
+import zlib
 from contextlib import closing, contextmanager
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, Callable, Dict, Generator, List, Optional
+from typing import Any, Callable, Dict, Generator, List, Optional, Tuple
 
 from .smb import SMBAuth
 from .triage.storage import (
@@ -24,6 +25,23 @@ class CollectionBusyError(ValueError):
 
 
 class CollectionQueue:
+    # Manifest payloads are zlib-compressed JSON: one collection can hold up to
+    # 10,000 items, and the document is rewritten after every retrieval, so the
+    # smaller representation also cuts write amplification during a run.
+    CODEC_ZLIB = 1
+
+    @staticmethod
+    def _pack(payload: str) -> Tuple[int, bytes]:
+        return CollectionQueue.CODEC_ZLIB, zlib.compress(
+            payload.encode("utf-8"), 6
+        )
+
+    @staticmethod
+    def _unpack(codec: Any, payload: Any) -> str:
+        if codec == CollectionQueue.CODEC_ZLIB:
+            return zlib.decompress(bytes(payload)).decode("utf-8")
+        return str(payload)
+
     def __init__(self, database: Path) -> None:
         self.database = Path(database).resolve()
         self.path = self.database.with_name(self.database.stem + ".collection.db")
@@ -32,6 +50,13 @@ class CollectionQueue:
             db.execute(
                 "CREATE TABLE IF NOT EXISTS manifests (id TEXT PRIMARY KEY, payload TEXT NOT NULL)"
             )
+            columns = {
+                str(row[1]) for row in db.execute("PRAGMA table_info(manifests)")
+            }
+            if "codec" not in columns:
+                db.execute(
+                    "ALTER TABLE manifests ADD COLUMN codec INTEGER NOT NULL DEFAULT 0"
+                )
         os.chmod(self.path, 0o600)
 
     @contextmanager
@@ -44,27 +69,28 @@ class CollectionQueue:
             db.close()
 
     def _save(self, manifest: Dict[str, Any]) -> None:
+        codec, blob = self._pack(json.dumps(manifest))
         with self.connect() as db:
             db.execute(
-                "INSERT OR REPLACE INTO manifests VALUES (?,?)",
-                (manifest["id"], json.dumps(manifest)),
+                "INSERT OR REPLACE INTO manifests(id, payload, codec) VALUES (?,?,?)",
+                (manifest["id"], blob, codec),
             )
 
     def get(self, identifier: str) -> Dict[str, Any]:
         with self.connect() as db:
             row = db.execute(
-                "SELECT payload FROM manifests WHERE id=?", (identifier,)
+                "SELECT payload, codec FROM manifests WHERE id=?", (identifier,)
             ).fetchone()
         if row is None:
             raise ValueError("Unknown collection manifest")
-        return json.loads(row[0])
+        return json.loads(self._unpack(row[1], row[0]))
 
     def list(self) -> List[Dict[str, Any]]:
         with self.connect() as db:
             return [
-                json.loads(row[0])
+                json.loads(self._unpack(row[1], row[0]))
                 for row in db.execute(
-                    "SELECT payload FROM manifests ORDER BY rowid DESC"
+                    "SELECT payload, codec FROM manifests ORDER BY rowid DESC"
                 )
             ]
 

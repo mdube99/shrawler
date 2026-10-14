@@ -4,7 +4,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from shrawler.store import ScanStore, WorkspaceBusyError
+from shrawler.store import SCHEMA_VERSION, ScanStore, WorkspaceBusyError
 from shrawler.web import DatabaseIndex
 
 
@@ -180,7 +180,7 @@ class ScanStoreTests(unittest.TestCase):
                 self.assertNotIn("payload_json", columns)
                 self.assertEqual(
                     store.connection.execute("PRAGMA user_version").fetchone()[0],
-                    2,
+                    SCHEMA_VERSION,
                 )
                 per_scan = store.connection.execute(
                     "SELECT size_bytes,max(readable_size) FROM scan_files"
