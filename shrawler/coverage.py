@@ -3,6 +3,7 @@
 import argparse
 import json
 import sqlite3
+import zlib
 from contextlib import closing
 from dataclasses import dataclass
 from pathlib import Path
@@ -60,6 +61,15 @@ def canonical(path: str) -> str:
     return "/" + "/".join(p for p in path.replace("\\", "/").split("/") if p)
 
 
+def decode_entries(value: Any) -> Optional[List[Dict[str, Any]]]:
+    """Decode a stored directory listing, compressed or legacy plain text."""
+    if value is None:
+        return None
+    if isinstance(value, (bytes, bytearray, memoryview)):
+        value = zlib.decompress(bytes(value)).decode("utf-8")
+    return json.loads(value)
+
+
 class DirectoryCoverage:
     def __init__(self, store: Any):
         self.store = store
@@ -113,7 +123,7 @@ class DirectoryCoverage:
                 (self.store.scan_id, host, share, canonical(path)),
             ).fetchone()
         return (
-            [SavedEntry(**entry) for entry in json.loads(row[0])]
+            [SavedEntry(**entry) for entry in decode_entries(row[0])]
             if row and row[0] is not None
             else None
         )
@@ -134,6 +144,7 @@ class DirectoryCoverage:
             for e in entries
             if e.get_longname() not in (".", "..")
         ]
+        entries_blob = zlib.compress(json.dumps(payload).encode("utf-8"), 6)
         # Listing and discovered child work commit together before file
         # processing — resume must never re-list a completed directory after
         # an interrupt, so this stays an explicit durable commit. The pending
@@ -149,7 +160,7 @@ class DirectoryCoverage:
                     share,
                     path,
                     depth,
-                    json.dumps(payload),
+                    entries_blob,
                     utc_now(),
                 ),
             )
@@ -246,17 +257,22 @@ def main(argv: Optional[List[str]] = None) -> int:
                 "SELECT payload_json FROM scan_scope WHERE scan_id=?", (scan["id"],)
             ).fetchone()
             rows = db.execute(
-                "SELECT host,share,path,depth,status,error,updated_at,"
-                "json_array_length(entries_json) AS observed_entries"
+                "SELECT host,share,path,depth,status,error,updated_at,entries_json"
                 + query
                 + " ORDER BY host,share,path LIMIT ? OFFSET ?",
                 (*values, args.limit, args.offset),
             )
+            items = []
+            for row in rows:
+                item = dict(row)
+                entries = decode_entries(item.pop("entries_json", None))
+                item["observed_entries"] = len(entries) if entries is not None else None
+                items.append(item)
             result = {
                 "scan": dict(scan),
                 "scope": json.loads(scope[0]) if scope else {},
                 "total": db.execute("SELECT COUNT(*)" + query, values).fetchone()[0],
-                "items": [dict(row) for row in rows],
+                "items": items,
                 "shares": [
                     dict(row)
                     for row in db.execute(

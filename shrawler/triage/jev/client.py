@@ -5,7 +5,6 @@ returns an ``answers`` map keyed by question ID. The requests are issued with
 ``requests`` so the transport is easy to fake in tests.
 """
 
-import json
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -14,6 +13,7 @@ from typing import Any, Dict, Optional
 
 import requests
 
+from . import codec
 from .config import ADAPTER_VERSION, JevConfig
 
 
@@ -332,4 +332,4 @@ def _distribution(answer: Dict[str, Any]) -> Optional[Dict[str, Any]]:
 
 
 def load_payload(batch_row: Any) -> Dict[str, Any]:
-    return json.loads(batch_row["payload_json"])
+    return codec.decode_json(batch_row["payload_json"])

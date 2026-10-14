@@ -15,19 +15,13 @@ from .engine import ENGINE_VERSION, Engine
 from .rules import RuleSet
 from .siblings import SiblingIndex
 
-WEB_SORT_INDEXES = (
-    (
-        "triage_priority_web",
-        "CREATE INDEX IF NOT EXISTS triage_priority_web ON triage_files(run_id, priority DESC, file_id DESC)",
-    ),
-    (
-        "triage_category_web",
-        "CREATE INDEX IF NOT EXISTS triage_category_web ON triage_categories(run_id, category, score DESC, file_id DESC)",
-    ),
-)
+# The WebUI orders equal scores by ascending file id, which the primary
+# triage_priority/triage_category_score indexes already cover. The older
+# direction-specific copies were pure duplication.
+WEB_SORT_INDEXES: Tuple[Tuple[str, str], ...] = ()
 
 BATCH_SIZE = 10_000
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 # Zero-point review pools: category membership is supplied by a zero-point rule
 # and the listing keeps the pool disjoint from recommendations and analyst
@@ -79,6 +73,31 @@ def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def _metadata_json_expr(files_alias: str = "i", scan_alias: str = "sf") -> str:
+    """Rebuild a file observation as JSON from inventory columns.
+
+    The inventory no longer repeats the payload per scan, but per-scan size and
+    timestamps are kept in ``scan_files`` so a historical ranking still reads
+    the observation it saw at scan time. Key order matches the historical
+    stored payload plus the ``share`` and ``file_id`` keys the old ``json_set``
+    added.
+    """
+    size = f"COALESCE({scan_alias}.size_bytes,{files_alias}.size_bytes)"
+    readable = f"COALESCE({scan_alias}.readable_size,{files_alias}.readable_size)"
+    mtime = f"COALESCE({scan_alias}.mtime_utc,{files_alias}.mtime_utc)"
+    stamp = (
+        f"COALESCE({scan_alias}.scan_timestamp_utc,{files_alias}.scan_timestamp_utc)"
+    )
+    return (
+        f"json_object('host',{files_alias}.host,'share_name',{files_alias}.share,"
+        f"'remote_path',{files_alias}.remote_path,'unc_path',{files_alias}.unc_path,"
+        f"'file_name',{files_alias}.file_name,'size_bytes',{size},"
+        f"'readable_size',{readable},'mtime_utc',{mtime},"
+        f"'is_directory',json('false'),'scan_timestamp_utc',{stamp},"
+        f"'share',{files_alias}.share,'file_id',{files_alias}.public_id)"
+    )
+
+
 def _cache_kib(env_name: str, default_mb: int) -> int:
     """Bounded page cache in KiB, overridable for measurement."""
     raw = os.environ.get(env_name)
@@ -97,6 +116,7 @@ def result_path(database: Path) -> Path:
 
 
 def connect_readonly(path: Path) -> sqlite3.Connection:
+    _ensure_inventory_schema(path)
     connection = sqlite3.connect(path.resolve().as_uri() + "?mode=ro", uri=True)
     connection.row_factory = sqlite3.Row
     connection.execute("PRAGMA query_only=ON")
@@ -105,6 +125,39 @@ def connect_readonly(path: Path) -> sqlite3.Connection:
     connection.execute("PRAGMA mmap_size=1073741824")
     connection.execute("PRAGMA temp_store=MEMORY")
     return connection
+
+
+def _ensure_inventory_schema(path: Path) -> None:
+    """Migrate a pre-normalization inventory before a read-only open.
+
+    Only the inventory is touched: a triage result database has a different
+    schema version and no ``files`` table.
+    """
+    try:
+        connection = sqlite3.connect(
+            path.resolve().as_uri() + "?mode=ro", uri=True
+        )
+    except sqlite3.Error:
+        return
+    try:
+        version = int(connection.execute("PRAGMA user_version").fetchone()[0])
+        if version != 1:
+            return
+        if (
+            connection.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='files'"
+            ).fetchone()
+            is None
+        ):
+            return
+    except sqlite3.Error:
+        return
+    finally:
+        connection.close()
+    # Import lazily: shrawler.store imports coverage, which imports this module.
+    from ..store import migrate_inventory
+
+    migrate_inventory(path)
 
 
 def select_scan(
@@ -154,7 +207,11 @@ def observables(
     `skip` discards the first N rows (already staged elsewhere) without parsing them.
     """
     rows = source.execute(
-        "SELECT f.public_id, h.host, s.name AS share, sf.payload_json "
+        "SELECT f.public_id, h.host, s.name AS share, f.remote_path, f.unc_path, "
+        "f.file_name, COALESCE(sf.size_bytes, f.size_bytes) AS size_bytes, "
+        "COALESCE(sf.readable_size, f.readable_size) AS readable_size, "
+        "COALESCE(sf.mtime_utc, f.mtime_utc) AS mtime_utc, "
+        "COALESCE(sf.scan_timestamp_utc, f.scan_timestamp_utc) AS scan_timestamp_utc "
         "FROM scan_files sf JOIN files f ON f.id=sf.file_id "
         "JOIN shares s ON s.id=sf.share_id JOIN hosts h ON h.id=s.host_id "
         "WHERE sf.scan_id=? ORDER BY sf.file_id",
@@ -164,11 +221,20 @@ def observables(
         if skip:
             skip -= 1
             continue
-        payload = row["payload_json"]
-        metadata = json.loads(payload)
-        metadata.update(
-            {"host": row["host"], "share": row["share"], "file_id": row["public_id"]}
-        )
+        base = {
+            "host": row["host"],
+            "share_name": row["share"],
+            "remote_path": row["remote_path"],
+            "unc_path": row["unc_path"],
+            "file_name": row["file_name"],
+            "size_bytes": int(row["size_bytes"]),
+            "readable_size": row["readable_size"],
+            "mtime_utc": row["mtime_utc"],
+            "is_directory": False,
+            "scan_timestamp_utc": row["scan_timestamp_utc"],
+        }
+        metadata = {**base, "share": row["share"], "file_id": row["public_id"]}
+        payload = json.dumps(base, ensure_ascii=False, separators=(",", ":"))
         for field in ("file_name", "remote_path", "unc_path"):
             if not isinstance(metadata.get(field), str):
                 raise ValueError(f"invalid scan observation: missing {field}")
@@ -265,9 +331,12 @@ def rank(
                 f"PRAGMA cache_size=-{_cache_kib('SHRAWLER_TRIAGE_CACHE_MB', 128)}"
             )
             version = target.execute("PRAGMA user_version").fetchone()[0]
-            if version not in (0, 1, 2, 3):
+            if version not in (0, 1, 2, 3, 4):
                 raise ValueError(f"unsupported triage database version: {version}")
             target.executescript(SCHEMA)
+            if 0 < version < 4:
+                target.execute("DROP INDEX IF EXISTS triage_priority_web")
+                target.execute("DROP INDEX IF EXISTS triage_category_web")
             for _, statement in WEB_SORT_INDEXES:
                 target.execute(statement)
             target.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
@@ -601,7 +670,9 @@ def list_results(
         identifier = "c.file_id" if category else "f.file_id"
         query = (
             (
-                "SELECT f.*, COALESCE(NULLIF(f.metadata_json,''),json_set(sf.payload_json,'$.host',i.host,'$.share',i.share,'$.file_id',i.public_id)) AS resolved_metadata_json, c.score AS review_score FROM triage_categories c "
+                "SELECT f.*, COALESCE(NULLIF(f.metadata_json,''),"
+                + _metadata_json_expr("i")
+                + ") AS resolved_metadata_json, c.score AS review_score FROM triage_categories c "
                 "JOIN triage_files f ON f.run_id=c.run_id AND f.file_id=c.file_id "
                 "LEFT JOIN inventory.files i ON i.public_id=f.file_id "
                 "LEFT JOIN inventory.scan_files sf ON sf.scan_id=? AND sf.file_id=i.id "
@@ -609,9 +680,12 @@ def list_results(
             )
             if category
             else (
-                "SELECT f.*, COALESCE(NULLIF(f.metadata_json,''),json_set(sf.payload_json,'$.host',i.host,'$.share',i.share,'$.file_id',i.public_id)) AS resolved_metadata_json, f.priority AS review_score FROM triage_files f "
+                "SELECT f.*, COALESCE(NULLIF(f.metadata_json,''),"
+                + _metadata_json_expr("i")
+                + ") AS resolved_metadata_json, f.priority AS review_score FROM triage_files f "
                 "LEFT JOIN inventory.files i ON i.public_id=f.file_id "
-                "LEFT JOIN inventory.scan_files sf ON sf.scan_id=? AND sf.file_id=i.id WHERE f.run_id=? AND f.priority>=?"
+                "LEFT JOIN inventory.scan_files sf ON sf.scan_id=? AND sf.file_id=i.id "
+                "WHERE f.run_id=? AND f.priority>=?"
             )
         )
         values: List[Any] = (
@@ -717,7 +791,9 @@ def explain(
         run = select_run(connection, database, run_id)
         connection.execute("ATTACH DATABASE ? AS inventory", (str(database.resolve()),))
         row = connection.execute(
-            "SELECT f.*,COALESCE(NULLIF(f.metadata_json,''),json_set(sf.payload_json,'$.host',i.host,'$.share',i.share,'$.file_id',i.public_id)) AS resolved_metadata_json "
+            "SELECT f.*,COALESCE(NULLIF(f.metadata_json,''),"
+            + _metadata_json_expr("i")
+            + ") AS resolved_metadata_json "
             "FROM triage_files f LEFT JOIN inventory.files i ON i.public_id=f.file_id "
             "LEFT JOIN inventory.scan_files sf ON sf.scan_id=? AND sf.file_id=i.id "
             "WHERE f.run_id=? AND f.file_id=?",
@@ -785,9 +861,12 @@ def promote_run(
             f"PRAGMA cache_size=-{_cache_kib('SHRAWLER_TRIAGE_CACHE_MB', 128)}"
         )
         version = target.execute("PRAGMA user_version").fetchone()[0]
-        if version not in (0, 1, 2, 3):
+        if version not in (0, 1, 2, 3, 4):
             raise ValueError(f"unsupported triage database version: {version}")
         target.executescript(SCHEMA)
+        if 0 < version < 4:
+            target.execute("DROP INDEX IF EXISTS triage_priority_web")
+            target.execute("DROP INDEX IF EXISTS triage_category_web")
         for _, statement in WEB_SORT_INDEXES:
             target.execute(statement)
         target.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
@@ -973,7 +1052,9 @@ def compare_runs(
         query = (
             _COMPARE_PAIRS
             + f"SELECT scored.*, {key} AS sort_key, "
-            "COALESCE(NULLIF(scored.metadata_json,''),json_set(sf.payload_json,'$.host',i.host,'$.share',i.share,'$.file_id',i.public_id)) AS resolved_metadata_json "
+            + "COALESCE(NULLIF(scored.metadata_json,''),"
+            + _metadata_json_expr("i")
+            + ") AS resolved_metadata_json "
             "FROM scored LEFT JOIN inventory.files i ON i.public_id=scored.file_id "
             "LEFT JOIN inventory.scan_files sf ON sf.scan_id=scored.scan_id AND sf.file_id=i.id "
             "WHERE 1"

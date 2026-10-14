@@ -6,9 +6,9 @@ inspection priority (0-4), applied in SQL before paging so a page is never a
 locally sorted slice. Rule results stay in their own immutable view.
 """
 
-import json
 from typing import Any, Dict, List, Optional
 
+from . import codec
 from .config import (
     PRIORITY_INSPECT_MIN,
     PRIORITY_LEVELS,
@@ -34,7 +34,7 @@ def _summary(row: Any) -> Dict[str, Any]:
         "choice": choice,
         "priority": score,
         "priority_name": PRIORITY_NAMES.get(choice, ""),
-        "distribution": json.loads(row["distribution_json"])
+        "distribution": codec.decode_json(row["distribution_json"])
         if row["distribution_json"]
         else None,
         "deployment_revision": row["deployment_revision"],

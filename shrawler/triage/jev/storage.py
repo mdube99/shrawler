@@ -26,9 +26,10 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterable, Iterator, List, Optional, Sequence, Tuple
 
+from . import codec
 from .config import canonical
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 # A run lease heartbeats at this interval; another process may reclaim the run
 # once the heartbeat is older than LEASE_TTL_SECONDS.
@@ -303,12 +304,15 @@ class JevStore:
         self.connection.execute("PRAGMA busy_timeout=5000")
         self.connection.execute("PRAGMA foreign_keys=ON")
         version = self.connection.execute("PRAGMA user_version").fetchone()[0]
-        if version not in (0, 1, SCHEMA_VERSION):
+        if version not in (0, 1, 2, SCHEMA_VERSION):
             raise JevStoreError(
                 f"no migration path from assessment database version {version}"
             )
         if version == 1:
             self._migrate_v1_to_v2()
+            version = 2
+        if version == 2:
+            self._migrate_v2_to_v3()
         self.connection.executescript(SCHEMA)
         self.connection.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
         self.connection.commit()
@@ -378,6 +382,37 @@ class JevStore:
                 "assessment_files_count_update",
             ):
                 connection.execute(f"DROP TRIGGER IF EXISTS {name}")
+            connection.execute("PRAGMA user_version=2")
+            connection.execute("COMMIT")
+        except BaseException:
+            connection.execute("ROLLBACK")
+            raise
+        finally:
+            connection.isolation_level = previous
+
+    def _migrate_v2_to_v3(self) -> None:
+        """Pack the large JSON audit columns and reclaim the freed pages."""
+        connection = self.connection
+        previous = connection.isolation_level
+        connection.isolation_level = None
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            for table, columns in (
+                ("request_batches", ("payload_json", "state_json", "question_json")),
+                ("assessment_files", ("feature_json",)),
+                ("directory_contexts", ("context_json",)),
+                ("decision_results", ("distribution_json",)),
+            ):
+                for column in columns:
+                    rows = connection.execute(
+                        f"SELECT rowid,{column} FROM {table} "
+                        f"WHERE {column} IS NOT NULL AND typeof({column})='text'"
+                    ).fetchall()
+                    for rowid, value in rows:
+                        connection.execute(
+                            f"UPDATE {table} SET {column}=? WHERE rowid=?",
+                            (codec.encode(value), rowid),
+                        )
             connection.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
             connection.execute("COMMIT")
         except BaseException:
@@ -385,6 +420,10 @@ class JevStore:
             raise
         finally:
             connection.isolation_level = previous
+        try:
+            connection.execute("VACUUM")
+        except sqlite3.Error:
+            pass
 
     def _column_exists(self, table: str, column: str) -> bool:
         rows = self.connection.execute(f"PRAGMA table_info({table})").fetchall()
@@ -505,11 +544,12 @@ class JevStore:
     # -- directory contexts ----------------------------------------------
 
     def insert_contexts(self, run_id: str, rows: List[Tuple[Any, ...]]) -> None:
+        packed = [(*row[:5], codec.encode(row[5]), *row[6:]) for row in rows]
         self.connection.executemany(
             "INSERT OR REPLACE INTO directory_contexts(run_id,directory_id,host,"
             "share,parent,context_json,context_hash,observed_files,context_tokens,"
             "truncated,omitted_json,enumeration) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
-            rows,
+            packed,
         )
         self.connection.commit()
 
@@ -532,6 +572,7 @@ class JevStore:
     def insert_files(self, rows: List[Tuple[Any, ...]]) -> None:
         if not rows:
             return
+        rows = [(*row[:9], codec.encode(row[9]), *row[10:]) for row in rows]
         run_id = str(rows[0][0])
         self.connection.executemany(
             "INSERT OR REPLACE INTO assessment_files(run_id,file_id,directory_id,"
@@ -736,11 +777,11 @@ class JevStore:
                     primary_directory_id,
                     request_id,
                     ordinal,
-                    payload_json,
+                    codec.encode(payload_json),
                     payload_hash,
                     input_tokens,
-                    state,
-                    canonical(questions),
+                    codec.encode(state),
+                    codec.encode(canonical(questions)),
                     "planned",
                     utc_now(),
                     cache_key,
@@ -861,7 +902,7 @@ class JevStore:
                             request_id,
                             str(answer["file_id"]),
                             str(answer["choice"]),
-                            canonical(answer["distribution"])
+                            codec.encode(canonical(answer["distribution"]))
                             if answer.get("distribution") is not None
                             else None,
                             str(answer["deployment_revision"]),

@@ -41,7 +41,7 @@ from .search_index import (
     supported as search_index_supported,
 )
 from .smb import SMBAuth, close_smb, connect_smb
-from .store import SCHEMA_VERSION
+from .store import SCHEMA_VERSION, migrate_inventory
 from .triage.jev.config import PRIORITY_NAMES, JevConfig, priority_score
 from .triage.jev.service import JevBusyError, JevService
 from .triage.jev.storage import assessment_path
@@ -834,6 +834,9 @@ class DatabaseIndex:
         self.path = path.expanduser().resolve()
         if not self.path.is_file():
             raise ValueError(f"DATABASE does not exist: {self.path}")
+        # A reader may be the first process to touch a pre-normalization
+        # inventory; migrate it before the schema check rejects it.
+        migrate_inventory(self.path)
         self.page_size = min(max(page_size, 1), 500)
         self.scoring = scoring or ScoringConfig()
         self.skipped = 0
@@ -1694,12 +1697,18 @@ class DatabaseIndex:
                 f"{jev_order} {direction.upper()}, files.public_id {direction.upper()}"
             )
         else:
+            # Equal scores always break by ascending file id. That matches the
+            # primary triage_priority/triage_category_score indexes and lets the
+            # direction-specific duplicates stay deleted.
+            tie_direction = (
+                "ASC" if ranking_order_id != "files.public_id" else direction.upper()
+            )
             order = (
                 " ORDER BY "
                 + ", ".join(
                     f"{column} {direction.upper()}" for column in sort_columns[sort]
                 )
-                + f", {ranking_order_id} {direction.upper()}"
+                + f", {ranking_order_id} {tie_direction}"
             )
         per_page = min(max(per_page, 1), self.page_size, 500)
         page = max(page, 1)

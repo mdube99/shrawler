@@ -18,7 +18,6 @@ sections once per batch and its result is cached by exact text.
 
 import base64
 import hashlib
-import json
 import uuid
 from collections import OrderedDict, deque
 from dataclasses import dataclass, field
@@ -34,6 +33,7 @@ from typing import (
     Tuple,
 )
 
+from . import codec
 from .config import (
     CONTEXT_VERSION,
     PAYLOAD_VERSION,
@@ -480,7 +480,7 @@ def _context_loader(store: JevStore, run_id: str) -> Callable[[int], Tuple[Dict[
             raise CandidateTooLargeError(
                 f"directory {directory_id} has no stored context"
             )
-        context = json.loads(row["context_json"])
+        context = codec.decode_json(row["context_json"])
         context["directory_id"] = int(row["directory_id"])
         value = (context, str(row["context_hash"]))
         cache[directory_id] = value
@@ -788,7 +788,7 @@ def plan_directory(
     context = (
         context_override
         if context_override is not None
-        else json.loads(directory["context_json"])
+        else codec.decode_json(directory["context_json"])
     )
     directory_id = int(directory["directory_id"])
     context = {**context, "directory_id": directory_id}

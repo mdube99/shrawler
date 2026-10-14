@@ -9,6 +9,7 @@ import sqlite3
 import threading
 import time
 import uuid
+import zlib
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Set, Tuple, cast
@@ -17,7 +18,7 @@ from .coverage import DirectoryCoverage
 from .output import safe_csv_row
 from .search_index import ensure as ensure_search_index, supported as search_supported
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 # Web-initiated retrievals share the downloads table but are not scan-time
 # downloads, so scan summaries and JSON/CSV exports exclude them.
@@ -38,6 +39,84 @@ def _path_key(value: Any) -> str:
         for part in str(value or "").replace("\\", "/").casefold().split("/")
         if part
     )
+
+
+def _files_ddl(table: str) -> str:
+    """Inventory file table.
+
+    ``search_text`` and ``readable_size`` are derived, so they are generated
+    columns that occupy no pages. ``search_text`` is still the FTS5 external
+    content column; its update trigger watches the source columns because
+    SQLite does not report generated columns in an ``UPDATE OF`` list.
+    """
+    return f"""
+    CREATE TABLE IF NOT EXISTS {table} (
+        id INTEGER PRIMARY KEY,
+        public_id TEXT NOT NULL UNIQUE,
+        host TEXT NOT NULL,
+        share TEXT NOT NULL,
+        remote_path TEXT NOT NULL,
+        parent_path TEXT NOT NULL,
+        unc_path TEXT NOT NULL,
+        file_name TEXT NOT NULL,
+        extension TEXT NOT NULL,
+        size_bytes INTEGER NOT NULL,
+        readable_size TEXT GENERATED ALWAYS AS (
+            CASE
+                WHEN size_bytes < 1024 THEN
+                    rtrim(rtrim(printf('%.2f', size_bytes), '0'), '.') || 'B'
+                WHEN size_bytes < 1048576 THEN
+                    rtrim(rtrim(printf('%.2f', size_bytes / 1024.0), '0'), '.') || 'KB'
+                WHEN size_bytes < 1073741824 THEN
+                    rtrim(rtrim(printf('%.2f', size_bytes / 1048576.0), '0'), '.') || 'MB'
+                ELSE
+                    rtrim(rtrim(printf('%.2f', size_bytes / 1073741824.0), '0'), '.') || 'GB'
+            END
+        ) VIRTUAL,
+        mtime_utc TEXT NOT NULL,
+        scan_timestamp_utc TEXT NOT NULL,
+        search_text TEXT GENERATED ALWAYS AS (
+            lower(host) || ' ' || lower(share) || ' ' || lower(remote_path) || ' ' ||
+            lower(unc_path) || ' ' || lower(file_name) || ' ' || lower(extension)
+        ) VIRTUAL,
+        UNIQUE(host, share, remote_path)
+    );
+    """
+
+
+_FILES_INDEXES = (
+    "CREATE INDEX IF NOT EXISTS files_host_idx ON files(host COLLATE NOCASE)",
+    "CREATE INDEX IF NOT EXISTS files_share_idx ON files(share COLLATE NOCASE)",
+    "CREATE INDEX IF NOT EXISTS files_ext_idx ON files(extension, id)",
+    "CREATE INDEX IF NOT EXISTS files_parent_idx ON files(host, share, parent_path, id)",
+    "CREATE INDEX IF NOT EXISTS files_path_sort_idx ON files(host COLLATE NOCASE, "
+    "share COLLATE NOCASE, remote_path COLLATE NOCASE, file_name COLLATE NOCASE, "
+    "public_id)",
+    "CREATE INDEX IF NOT EXISTS files_name_sort_idx ON files(file_name COLLATE NOCASE, "
+    "remote_path COLLATE NOCASE, public_id)",
+    "CREATE INDEX IF NOT EXISTS files_type_sort_idx ON files(extension COLLATE NOCASE, "
+    "file_name COLLATE NOCASE, public_id)",
+    "CREATE INDEX IF NOT EXISTS files_size_sort_idx ON files(size_bytes, "
+    "file_name COLLATE NOCASE, public_id)",
+    "CREATE INDEX IF NOT EXISTS files_modified_sort_idx ON files(mtime_utc, "
+    "file_name COLLATE NOCASE, public_id)",
+)
+
+
+def _file_payload(row: sqlite3.Row) -> Dict[str, Any]:
+    """Canonical discovered-file payload, rebuilt from stored columns."""
+    return {
+        "host": str(row["host"]),
+        "share_name": str(row["share"]),
+        "remote_path": str(row["remote_path"]),
+        "unc_path": str(row["unc_path"]),
+        "file_name": str(row["file_name"]),
+        "size_bytes": int(row["size_bytes"]),
+        "readable_size": str(row["readable_size"]),
+        "mtime_utc": str(row["mtime_utc"]),
+        "is_directory": False,
+        "scan_timestamp_utc": str(row["scan_timestamp_utc"]),
+    }
 
 
 class WorkspaceBusyError(RuntimeError):
@@ -164,6 +243,9 @@ class ScanStore:
 
     def _configure(self) -> None:
         self.connection.execute("PRAGMA journal_mode=WAL")
+        # Incremental auto-vacuum lets later deletes (resumed scans, pruned runs)
+        # return pages instead of leaving the file at its high-water mark.
+        self.connection.execute("PRAGMA auto_vacuum=INCREMENTAL")
         self.connection.execute("PRAGMA foreign_keys=ON")
         self.connection.execute("PRAGMA synchronous=NORMAL")
         self.connection.execute("PRAGMA busy_timeout=5000")
@@ -174,6 +256,9 @@ class ScanStore:
             raise ValueError(
                 f"database schema {version} is newer than supported schema {SCHEMA_VERSION}"
             )
+        if version == 1:
+            self._migrate_v1_to_v2()
+        self.connection.executescript(_files_ddl("files"))
         self.connection.executescript(
             """
             CREATE TABLE IF NOT EXISTS metadata (
@@ -213,28 +298,14 @@ class ScanStore:
                 payload_json TEXT NOT NULL,
                 UNIQUE(host_id, name)
             );
-            CREATE TABLE IF NOT EXISTS files (
-                id INTEGER PRIMARY KEY,
-                public_id TEXT NOT NULL UNIQUE,
-                host TEXT NOT NULL,
-                share TEXT NOT NULL,
-                remote_path TEXT NOT NULL,
-                parent_path TEXT NOT NULL,
-                unc_path TEXT NOT NULL,
-                file_name TEXT NOT NULL,
-                extension TEXT NOT NULL,
-                size_bytes INTEGER NOT NULL,
-                readable_size TEXT NOT NULL,
-                mtime_utc TEXT NOT NULL,
-                scan_timestamp_utc TEXT NOT NULL,
-                search_text TEXT NOT NULL,
-                UNIQUE(host, share, remote_path)
-            );
             CREATE TABLE IF NOT EXISTS scan_files (
                 scan_id TEXT NOT NULL REFERENCES scans(id) ON DELETE CASCADE,
                 share_id INTEGER NOT NULL REFERENCES shares(id) ON DELETE CASCADE,
                 file_id INTEGER NOT NULL REFERENCES files(id) ON DELETE CASCADE,
-                payload_json TEXT NOT NULL,
+                size_bytes INTEGER,
+                readable_size TEXT,
+                mtime_utc TEXT,
+                scan_timestamp_utc TEXT,
                 PRIMARY KEY(scan_id, file_id)
             );
             CREATE TABLE IF NOT EXISTS downloads (
@@ -251,23 +322,6 @@ class ScanStore:
                 remote_path_key TEXT,
                 payload_json TEXT NOT NULL
             );
-            CREATE INDEX IF NOT EXISTS files_host_idx ON files(host COLLATE NOCASE);
-            CREATE INDEX IF NOT EXISTS files_share_idx ON files(share COLLATE NOCASE);
-            CREATE INDEX IF NOT EXISTS files_ext_idx ON files(extension, id);
-            CREATE INDEX IF NOT EXISTS files_parent_idx
-                ON files(host, share, parent_path, id);
-            CREATE INDEX IF NOT EXISTS files_path_sort_idx
-                ON files(host COLLATE NOCASE, share COLLATE NOCASE,
-                         remote_path COLLATE NOCASE, file_name COLLATE NOCASE,
-                         public_id);
-            CREATE INDEX IF NOT EXISTS files_name_sort_idx
-                ON files(file_name COLLATE NOCASE, remote_path COLLATE NOCASE, public_id);
-            CREATE INDEX IF NOT EXISTS files_type_sort_idx
-                ON files(extension COLLATE NOCASE, file_name COLLATE NOCASE, public_id);
-            CREATE INDEX IF NOT EXISTS files_size_sort_idx
-                ON files(size_bytes, file_name COLLATE NOCASE, public_id);
-            CREATE INDEX IF NOT EXISTS files_modified_sort_idx
-                ON files(mtime_utc, file_name COLLATE NOCASE, public_id);
             CREATE INDEX IF NOT EXISTS scan_files_scan_idx ON scan_files(scan_id, share_id);
             CREATE INDEX IF NOT EXISTS scan_files_file_idx ON scan_files(file_id);
             CREATE INDEX IF NOT EXISTS matches_scan_share_idx ON snaffler_matches(scan_id, share_id);
@@ -276,6 +330,8 @@ class ScanStore:
             CREATE INDEX IF NOT EXISTS downloads_lookup_idx ON downloads(scan_id, share_id, remote_path_key);
             """
         )
+        for statement in _FILES_INDEXES:
+            self.connection.execute(statement)
         self.connection.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
         self.connection.commit()
         # New inventories stay indexed as they grow. Existing large inventories
@@ -285,6 +341,106 @@ class ScanStore:
             and search_supported()
         ):
             ensure_search_index(self.connection)
+
+    def _migrate_v1_to_v2(self) -> None:
+        """Rebuild the inventory around non-duplicated file metadata.
+
+        Version 1 stored ``search_text`` and ``readable_size`` as real columns
+        and repeated the whole file payload in ``scan_files``. The rebuild
+        preserves row ids (``scan_files`` references them) and assumes no
+        scanner is live: the workspace lock is held before this runs.
+        """
+        connection = self.connection
+        previous = connection.isolation_level
+        connection.isolation_level = None
+        # RENAME/DROP with foreign keys on would cascade through scan_files.
+        connection.execute("PRAGMA foreign_keys=OFF")
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            for trigger in (
+                "files_search_insert",
+                "files_search_delete",
+                "files_search_update",
+            ):
+                connection.execute(f"DROP TRIGGER IF EXISTS {trigger}")
+            connection.execute("DROP TABLE IF EXISTS files_search")
+            connection.execute("DROP TABLE IF EXISTS files_v2")
+            connection.execute(_files_ddl("files_v2"))
+            connection.execute(
+                "INSERT INTO files_v2(id,public_id,host,share,remote_path,"
+                "parent_path,unc_path,file_name,extension,size_bytes,mtime_utc,"
+                "scan_timestamp_utc) "
+                "SELECT id,public_id,host,share,remote_path,parent_path,unc_path,"
+                "file_name,extension,size_bytes,mtime_utc,scan_timestamp_utc "
+                "FROM files"
+            )
+            connection.execute("DROP TABLE files")
+            connection.execute("ALTER TABLE files_v2 RENAME TO files")
+            for statement in _FILES_INDEXES:
+                connection.execute(statement)
+            columns = {
+                str(row[1])
+                for row in connection.execute("PRAGMA table_info(scan_files)")
+            }
+            for name, definition in (
+                ("size_bytes", "INTEGER"),
+                ("readable_size", "TEXT"),
+                ("mtime_utc", "TEXT"),
+                ("scan_timestamp_utc", "TEXT"),
+            ):
+                if name not in columns:
+                    connection.execute(
+                        f"ALTER TABLE scan_files ADD COLUMN {name} {definition}"
+                    )
+            if "payload_json" in columns:
+                # Keep the per-scan observation (size, mtime, timestamp) so a
+                # historical ranking still sees the values it saw then; only
+                # the duplicated immutable metadata is dropped.
+                connection.execute(
+                    "UPDATE scan_files SET "
+                    "size_bytes=COALESCE(size_bytes,"
+                    "json_extract(payload_json,'$.size_bytes')), "
+                    "readable_size=COALESCE(readable_size,"
+                    "json_extract(payload_json,'$.readable_size')), "
+                    "mtime_utc=COALESCE(mtime_utc,"
+                    "json_extract(payload_json,'$.mtime_utc')), "
+                    "scan_timestamp_utc=COALESCE(scan_timestamp_utc,"
+                    "json_extract(payload_json,'$.scan_timestamp_utc'))"
+                )
+                connection.execute(
+                    "ALTER TABLE scan_files DROP COLUMN payload_json"
+                )
+            if (
+                connection.execute(
+                    "SELECT 1 FROM sqlite_master WHERE name='directory_work'"
+                ).fetchone()
+                is not None
+            ):
+                entries = connection.execute(
+                    "SELECT rowid,entries_json FROM directory_work "
+                    "WHERE entries_json IS NOT NULL AND typeof(entries_json)='text'"
+                ).fetchall()
+                for rowid, value in entries:
+                    connection.execute(
+                        "UPDATE directory_work SET entries_json=? WHERE rowid=?",
+                        (zlib.compress(value.encode("utf-8"), 6), rowid),
+                    )
+            connection.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
+            connection.execute("COMMIT")
+        except BaseException:
+            connection.execute("ROLLBACK")
+            raise
+        finally:
+            connection.execute("PRAGMA foreign_keys=ON")
+        try:
+            # Rebuilding frees the old payload pages into the freelist. VACUUM
+            # returns them and applies the incremental auto-vacuum mode used for
+            # later deletes. One-time cost on first open; a disk that cannot hold
+            # the second copy keeps the pages in the freelist instead.
+            connection.execute("VACUUM")
+        except sqlite3.Error:
+            pass
+        connection.isolation_level = previous
 
     def _select_resume(self, value: str, mode: str) -> Tuple[str, str, str]:
         if value:
@@ -419,22 +575,17 @@ class ScanStore:
         extension = Path(name).suffix.lower()
         normalized = "/" + remote.replace("\\", "/").lstrip("/")
         parent = normalized.rsplit("/", 1)[0] or "/"
-        search = " ".join(
-            (host, share, remote, str(payload["unc_path"]), name, extension)
-        ).casefold()
         with self._lock:
             row = self.connection.execute(
                 """INSERT INTO files
                    (public_id, host, share, remote_path, parent_path, unc_path,
-                    file_name, extension, size_bytes, readable_size, mtime_utc,
-                    scan_timestamp_utc, search_text)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    file_name, extension, size_bytes, mtime_utc, scan_timestamp_utc)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                    ON CONFLICT(host, share, remote_path) DO UPDATE SET
                     unc_path=excluded.unc_path, file_name=excluded.file_name,
                     extension=excluded.extension, size_bytes=excluded.size_bytes,
-                    readable_size=excluded.readable_size, mtime_utc=excluded.mtime_utc,
-                    scan_timestamp_utc=excluded.scan_timestamp_utc,
-                    search_text=excluded.search_text
+                    mtime_utc=excluded.mtime_utc,
+                    scan_timestamp_utc=excluded.scan_timestamp_utc
                    RETURNING id""",
                 (
                     secrets.token_urlsafe(16),
@@ -446,18 +597,25 @@ class ScanStore:
                     name,
                     extension,
                     int(payload.get("size_bytes") or 0),
-                    str(payload.get("readable_size") or ""),
                     str(payload.get("mtime_utc") or ""),
                     str(payload.get("scan_timestamp_utc") or ""),
-                    search,
                 ),
             ).fetchone()
             file_id = int(row[0])
             share_id = self._share_id(host, share)
             cursor = self.connection.execute(
                 """INSERT OR IGNORE INTO scan_files
-                   (scan_id, share_id, file_id, payload_json) VALUES (?, ?, ?, ?)""",
-                (self.scan_id, share_id, file_id, _json(payload)),
+                   (scan_id, share_id, file_id, size_bytes, readable_size,
+                    mtime_utc, scan_timestamp_utc) VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    self.scan_id,
+                    share_id,
+                    file_id,
+                    int(payload.get("size_bytes") or 0),
+                    str(payload.get("readable_size") or ""),
+                    str(payload.get("mtime_utc") or ""),
+                    str(payload.get("scan_timestamp_utc") or ""),
+                ),
             )
             self._touch()
             return cursor.rowcount > 0
@@ -648,14 +806,20 @@ class ScanStore:
                     property_value("status", share["status"], not first_property)
                     handle.write("," + _json("discovered_files") + ":[")
                     rows = self.connection.execute(
-                        """SELECT payload_json FROM scan_files
-                           WHERE scan_id=? AND share_id=? ORDER BY rowid""",
+                        """SELECT f.host, f.share, f.remote_path, f.unc_path,
+                                  f.file_name,
+                                  COALESCE(sf.size_bytes, f.size_bytes) AS size_bytes,
+                                  COALESCE(sf.readable_size, f.readable_size) AS readable_size,
+                                  COALESCE(sf.mtime_utc, f.mtime_utc) AS mtime_utc,
+                                  COALESCE(sf.scan_timestamp_utc, f.scan_timestamp_utc) AS scan_timestamp_utc
+                           FROM scan_files sf JOIN files f ON f.id=sf.file_id
+                           WHERE sf.scan_id=? AND sf.share_id=? ORDER BY sf.rowid""",
                         (self.scan_id, share["id"]),
                     )
                     for index, row in enumerate(rows):
                         if index:
                             handle.write(",")
-                        handle.write(row[0])
+                        handle.write(_json(_file_payload(row)))
                     handle.write("]," + _json("downloaded_files") + ":[")
                     rows = self.connection.execute(
                         f"""SELECT payload_json FROM downloads
@@ -807,9 +971,16 @@ class ScanStore:
             "shrawler_files.csv",
             file_fields,
             (
-                {**json.loads(row[0]), "can_read": None, "can_write": None}
+                {**_file_payload(row), "can_read": None, "can_write": None}
                 for row in self.connection.execute(
-                    "SELECT payload_json FROM scan_files WHERE scan_id=? ORDER BY rowid",
+                    """SELECT f.host, f.share, f.remote_path, f.unc_path,
+                              f.file_name,
+                              COALESCE(sf.size_bytes, f.size_bytes) AS size_bytes,
+                              COALESCE(sf.readable_size, f.readable_size) AS readable_size,
+                              COALESCE(sf.mtime_utc, f.mtime_utc) AS mtime_utc,
+                              COALESCE(sf.scan_timestamp_utc, f.scan_timestamp_utc) AS scan_timestamp_utc
+                       FROM scan_files sf JOIN files f ON f.id=sf.file_id
+                       WHERE sf.scan_id=? ORDER BY sf.rowid""",
                     (self.scan_id,),
                 )
             ),
@@ -878,4 +1049,35 @@ class ScanStore:
                 self._lock_file.close()
 
 
-__all__ = ["SCHEMA_VERSION", "ScanStore", "WorkspaceBusyError"]
+
+def migrate_inventory(path: Path) -> bool:
+    """Bring an inventory database to the current schema before a reader opens it.
+
+    Safe to call with a triage/result database path: a migration requires both
+    schema version 1 and a ``files`` table, so unrelated databases are left
+    alone. Returns True when the migration ran.
+    """
+    database = Path(path)
+    if not database.is_file():
+        return False
+    connection = sqlite3.connect(database, timeout=5)
+    try:
+        version = int(connection.execute("PRAGMA user_version").fetchone()[0])
+        if version != 1:
+            return False
+        if (
+            connection.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='files'"
+            ).fetchone()
+            is None
+        ):
+            return False
+        store = ScanStore.__new__(ScanStore)
+        store.connection = connection
+        store._migrate_v1_to_v2()
+        return True
+    finally:
+        connection.close()
+
+
+__all__ = ["SCHEMA_VERSION", "ScanStore", "WorkspaceBusyError", "migrate_inventory"]

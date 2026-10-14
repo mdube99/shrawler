@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from shrawler.store import ScanStore
+from shrawler.triage.jev import codec
 from shrawler.triage.jev.client import (
     Answer,
     DecisionResponse,
@@ -174,7 +175,7 @@ class BindingKeyTests(BaseCase):
                     )
                 )
                 file_ids = list(members)
-                payload = json.loads(row["payload_json"])
+                payload = codec.decode_json(row["payload_json"])
                 keys = answer_keys(payload, file_ids)
                 self.assertEqual(len(keys), len(file_ids))
                 for file_id in file_ids:
@@ -200,13 +201,13 @@ class BindingKeyTests(BaseCase):
             runner.plan(run_id)
             first_keys = [str(row["cache_key"]) for row in store.batch_rows(run_id)]
             first_payloads = [
-                json.loads(row["payload_json"])["questions"] for row in store.batch_rows(run_id)
+                codec.decode_json(row["payload_json"])["questions"] for row in store.batch_rows(run_id)
             ]
             # Replan the same pending candidates into a fresh run over the same
             # database; the cache identity must not change.
             runner.plan(run_id)
             second_payloads = [
-                json.loads(row["payload_json"])["questions"] for row in store.batch_rows(run_id)
+                codec.decode_json(row["payload_json"])["questions"] for row in store.batch_rows(run_id)
             ]
             self.assertEqual(first_payloads, second_payloads * 1)
             self.assertEqual(len(set(first_keys)), len(first_keys))
@@ -343,7 +344,7 @@ class PayloadShapeTests(BaseCase):
             rows = store.batch_rows(run_id)
             self.assertTrue(rows)
             for row in rows:
-                payload = json.loads(row["payload_json"])
+                payload = codec.decode_json(row["payload_json"])
                 state = payload["state"]
                 questions = payload["questions"]
                 blob = state + json.dumps(questions)

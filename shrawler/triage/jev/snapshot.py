@@ -13,6 +13,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 from ..engine import segments
 from ..rules import RuleSet
 from ..storage import connect_readonly, observables, select_scan
+from . import codec
 from .config import (
     CONTEXT_VERSION,
     canonical,
@@ -301,9 +302,8 @@ def _apply_priority(
     for row in rows:
         if cancelled and cancelled():
             raise KeyboardInterrupt
-        import json
 
-        metadata = json.loads(row["feature_json"])
+        metadata = codec.decode_json(row["feature_json"])
         evaluated = engine.evaluate(metadata)
         result = (evaluated["priority"], run_id, row["file_id"])
         batch.append((result[0], run_id, row["file_id"]))

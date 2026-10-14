@@ -10,12 +10,15 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from ..output import escape_terminal
+from ..store import migrate_inventory
 from .storage import connect_readonly, observations, select_scan, utc_now
+
+SCHEMA_VERSION = 2
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS family_members (
  scan_id TEXT NOT NULL, family_id TEXT NOT NULL, file_id TEXT NOT NULL,
- metadata_json TEXT NOT NULL, PRIMARY KEY(scan_id,file_id)
+ PRIMARY KEY(scan_id,file_id)
 );
 CREATE INDEX IF NOT EXISTS family_members_group ON family_members(scan_id,family_id,file_id);
 CREATE TABLE IF NOT EXISTS review_events (
@@ -44,8 +47,32 @@ class ReviewStore:
     def __init__(self, database: Path):
         self.database = database.resolve()
         self.path = self.database.with_name(self.database.stem + ".review.db")
+        migrate_inventory(self.database)
         with closing(self.connect()) as db, db:
             db.executescript(SCHEMA)
+            columns = {
+                str(row[1]) for row in db.execute("PRAGMA table_info(family_members)")
+            }
+            if "metadata_json" in columns:
+                # Version 1 copied the whole observation into the review file.
+                # Keep the family membership and rebuild the rest from the
+                # inventory at read time.
+                db.execute("ALTER TABLE family_members RENAME TO family_members_v1")
+                db.execute("DROP INDEX IF EXISTS family_members_group")
+                db.executescript(
+                    "CREATE TABLE family_members ("
+                    " scan_id TEXT NOT NULL, family_id TEXT NOT NULL,"
+                    " file_id TEXT NOT NULL, PRIMARY KEY(scan_id,file_id));"
+                    "CREATE INDEX family_members_group"
+                    " ON family_members(scan_id,family_id,file_id)"
+                )
+                db.execute(
+                    "INSERT OR IGNORE INTO family_members"
+                    "(scan_id,family_id,file_id) "
+                    "SELECT scan_id,family_id,file_id FROM family_members_v1"
+                )
+                db.execute("DROP TABLE family_members_v1")
+            db.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
         self.path.chmod(0o600)
 
     def connect(self) -> sqlite3.Connection:
@@ -68,17 +95,14 @@ class ReviewStore:
                         scan["id"],
                         family_key(item),
                         item["file_id"],
-                        json.dumps(item),
                     )
                 )
                 count += 1
                 if len(buffer) >= 10_000:
-                    db.executemany(
-                        "INSERT INTO family_members VALUES (?,?,?,?)", buffer
-                    )
+                    db.executemany("INSERT INTO family_members VALUES (?,?,?)", buffer)
                     buffer.clear()
             if buffer:
-                db.executemany("INSERT INTO family_members VALUES (?,?,?,?)", buffer)
+                db.executemany("INSERT INTO family_members VALUES (?,?,?)", buffer)
             return {
                 "scan_id": scan["id"],
                 "files": count,
@@ -98,20 +122,56 @@ class ReviewStore:
         if not 1 <= limit <= 1000 or offset < 0:
             raise ValueError("limit must be 1..1000 and offset nonnegative")
         with closing(self.connect()) as db:
+            # File details live in the inventory; the review database keeps only
+            # the family membership so the same bytes are not stored twice.
+            db.execute("ATTACH DATABASE ? AS inventory", (str(self.database),))
             if family_id:
                 rows = db.execute(
-                    "SELECT metadata_json FROM family_members WHERE scan_id=? AND family_id=? ORDER BY file_id LIMIT ? OFFSET ?",
+                    """SELECT i.host, i.share, i.remote_path, i.unc_path,
+                              i.file_name,
+                              COALESCE(sf.size_bytes,i.size_bytes) AS size_bytes,
+                              COALESCE(sf.readable_size,i.readable_size) AS readable_size,
+                              COALESCE(sf.mtime_utc,i.mtime_utc) AS mtime_utc,
+                              COALESCE(sf.scan_timestamp_utc,i.scan_timestamp_utc) AS scan_timestamp_utc,
+                              i.public_id AS file_id
+                       FROM family_members fm
+                       JOIN inventory.files i ON i.public_id=fm.file_id
+                       LEFT JOIN inventory.scan_files sf
+                         ON sf.scan_id=fm.scan_id AND sf.file_id=i.id
+                       WHERE fm.scan_id=? AND fm.family_id=?
+                       ORDER BY fm.file_id LIMIT ? OFFSET ?""",
                     (scan_id, family_id, limit, offset),
                 )
-                return {"items": [json.loads(row[0]) for row in rows]}
+                items = [
+                    {
+                        "host": row["host"],
+                        "share_name": row["share"],
+                        "remote_path": row["remote_path"],
+                        "unc_path": row["unc_path"],
+                        "file_name": row["file_name"],
+                        "size_bytes": int(row["size_bytes"]),
+                        "readable_size": row["readable_size"],
+                        "mtime_utc": row["mtime_utc"],
+                        "is_directory": False,
+                        "scan_timestamp_utc": row["scan_timestamp_utc"],
+                        "share": row["share"],
+                        "file_id": row["file_id"],
+                    }
+                    for row in rows
+                ]
+                return {"items": items}
             rows = db.execute(
-                """SELECT family_id,COUNT(*) AS file_count,
-                MIN(json_extract(metadata_json,'$.mtime_utc')) AS first_mtime,
-                MAX(json_extract(metadata_json,'$.mtime_utc')) AS last_mtime,
-                MIN(json_extract(metadata_json,'$.unc_path')) AS representative,
-                SUM(json_extract(metadata_json,'$.size_bytes')) AS expected_bytes
-                FROM family_members WHERE scan_id=? GROUP BY family_id
-                ORDER BY file_count DESC,family_id LIMIT ? OFFSET ?""",
+                """SELECT fm.family_id,COUNT(*) AS file_count,
+                MIN(COALESCE(sf.mtime_utc,i.mtime_utc)) AS first_mtime,
+                MAX(COALESCE(sf.mtime_utc,i.mtime_utc)) AS last_mtime,
+                MIN(i.unc_path) AS representative,
+                SUM(COALESCE(sf.size_bytes,i.size_bytes)) AS expected_bytes
+                FROM family_members fm
+                JOIN inventory.files i ON i.public_id=fm.file_id
+                LEFT JOIN inventory.scan_files sf
+                  ON sf.scan_id=fm.scan_id AND sf.file_id=i.id
+                WHERE fm.scan_id=? GROUP BY fm.family_id
+                ORDER BY file_count DESC,fm.family_id LIMIT ? OFFSET ?""",
                 (scan_id, limit, offset),
             )
             items = [dict(row) for row in rows]

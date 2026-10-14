@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from shrawler.store import ScanStore
+from shrawler.triage.jev import codec
 from shrawler.triage.jev.client import Answer, DecisionResponse, JevClient
 from shrawler.triage.jev.config import JevConfig
 from shrawler.triage.jev.planner import (
@@ -173,7 +174,7 @@ class PlannerPackingTests(unittest.TestCase):
             plan_run(store, run_id, config, counter)
             row = store.batch_rows(run_id)[0]
             # The first example must render one labeled block per directory.
-            payload = json.loads(row["payload_json"])
+            payload = codec.decode_json(row["payload_json"])
             self.assertRegex(payload["state"], r"(?m)^D000001 .*$")
             # Exactly one block header line per recorded directory.
             self.assertEqual(
@@ -195,9 +196,9 @@ class PlannerPackingTests(unittest.TestCase):
             result = plan_run(store, run_id, config, counter)
             self.assertEqual(result.batches, 6)
             for batch_id in result.batch_ids:
-                self.assertRegex(store.connection.execute(
+                self.assertRegex(codec.decode(store.connection.execute(
                     "SELECT state_json FROM request_batches WHERE id=?", (batch_id,)
-                ).fetchone()[0], r"(?m)^D000001 .*$")
+                ).fetchone()[0]), r"(?m)^D000001 .*$")
 
     def test_run_wide_ordinals_are_globally_increasing(self) -> None:
         config = self.config()

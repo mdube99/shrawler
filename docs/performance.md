@@ -60,3 +60,26 @@ loaded only when expanded.
 Scan discoveries are committed to `shrawler.db` in bounded batches. This avoids
 rewriting a growing JSON document for each file and permits concurrent WebUI
 reads through SQLite WAL mode.
+
+## Storage footprint
+
+The inventory stores each discovered file once. `files.search_text` and
+`files.readable_size` are virtual generated columns, so they cost no pages, and
+`scan_files` keeps only the per-scan observation (size, readable size, mtime,
+scan timestamp) plus its scan/share/file keys instead of a second copy of the
+whole payload. Ranking and the WebUI rebuild that payload from the inventory.
+The review database keeps only family membership, joining the inventory for
+file details. Per-directory listings and the optional Jev audit documents are
+zlib-compressed per row.
+
+Measured on a 100,000-file synthetic inventory (20,000 directories, long
+paths): a fresh inventory fell from 191 MiB to 125 MiB (-35%), and a schema-1
+inventory shrank to 116 MiB (-39%, plus an ~8 MiB FTS index that the WebUI
+rebuilds on demand) after the in-place migration and its one-time `VACUUM`. A
+2,322-file Jev assessment database fell from 9.65 MiB to 6.48 MiB (-33%). The
+remaining inventory size is dominated by the WebUI sort indexes and the FTS5
+substring index.
+
+Opening a schema-1 database migrates it in place; a scan, the WebUI, ranking,
+review, or coverage can trigger the migration. Back up an inventory before the
+first open with a newer build if it is irreplaceable.

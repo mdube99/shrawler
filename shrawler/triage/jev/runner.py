@@ -23,6 +23,7 @@ from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 import requests
 
 from ..storage import connect_readonly, select_scan
+from . import codec
 from .client import (
     AuthError,
     DecisionResponse,
@@ -646,7 +647,7 @@ class JevRunner:
                 {
                     "file_id": file_id,
                     "choice": str(result["choice"]),
-                    "distribution": json.loads(result["distribution_json"])
+                    "distribution": codec.decode_json(result["distribution_json"])
                     if result["distribution_json"]
                     else None,
                     "deployment_revision": str(result["deployment_revision"]),
