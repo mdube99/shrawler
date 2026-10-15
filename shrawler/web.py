@@ -31,6 +31,7 @@ from typing import (
     cast,
 )
 
+from .catalog_total import total as catalog_total
 from .collection import CollectionBusyError, CollectionQueue, smb_retriever
 from .nemesis import DeliveryStore, NemesisConfig
 from .output import escape_terminal
@@ -1687,6 +1688,7 @@ class DatabaseIndex:
             if extensions:
                 where.append(f"e.extension IN ({','.join('?' for _ in extensions)})")
                 values.extend(extensions)
+            plans: List[Any] = []
             if terms:
                 plans = [search_plan_term(connection, term) for term in terms]
                 for plan in plans:
@@ -1702,37 +1704,32 @@ class DatabaseIndex:
                     where.append("f.id IN (SELECT value FROM json_each(?))")
                     values.append(json.dumps(sorted(bounded)))
             clause = (" WHERE " + " AND ".join(where)) if where else ""
-            total = None
-            if include_total:
-                if not terms and not extensions:
-                    dir_where: List[str] = []
-                    dir_values: List[Any] = []
-                    if hosts:
-                        dir_where.append(f"host IN ({','.join('?' for _ in hosts)})")
-                        dir_values.extend(hosts)
-                    if shares:
-                        dir_where.append(f"share IN ({','.join('?' for _ in shares)})")
-                        dir_values.extend(shares)
-                    dir_clause = (
-                        " WHERE " + " AND ".join(dir_where) if dir_where else ""
-                    )
-                    total = int(
-                        connection.execute(
-                            "SELECT coalesce(sum(file_count), 0) FROM catalog_dirs"
-                            + dir_clause,
-                            dir_values,
-                        ).fetchone()[0]
-                    )
-                else:
-                    total = int(
-                        connection.execute(
-                            f"SELECT COUNT(*) FROM {source}{clause}", values
-                        ).fetchone()[0]
-                    )
             revision_row = connection.execute(
                 "SELECT value FROM metadata WHERE key='revision'"
             ).fetchone()
             revision = int(revision_row[0]) if revision_row else 0
+            total = None
+            if include_total:
+                # Totals are cached against the catalog revision, which every
+                # writer bumps in the same commit as its change. The UI asks for
+                # a total on every request, including paging, so recounting each
+                # time is what regressed against the pre-normalization path.
+                total_key = (
+                    revision,
+                    "catalog",
+                    tuple(terms),
+                    tuple(hosts),
+                    tuple(shares),
+                    tuple(extensions),
+                )
+                total = self._total_cache.get(total_key)
+                if total is None:
+                    total = catalog_total(
+                        connection, terms, plans, hosts, shares, extensions
+                    )
+                    if len(self._total_cache) >= 64:
+                        self._total_cache.clear()
+                    self._total_cache[total_key] = total
             order = ", ".join(f"{key} {direction.upper()}" for key in order_keys[sort])
             per_page = min(max(per_page, 1), self.page_size, 500)
             page = max(page, 1)
