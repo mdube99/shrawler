@@ -54,8 +54,8 @@ CREATE INDEX IF NOT EXISTS triage_category_score ON triage_categories(run_id, ca
 """
 
 # Ranking rows are staged here in observation order and moved into the real
-# tables in public_id order at the end of the run. Inserting into the ranked
-# tables (whose keys are the random opaque public_id) in sorted order turns
+# tables in catalog-id order at the end of the run. Inserting into the ranked
+# tables (whose keys are the catalog integer id) in sorted order turns
 # scattered B-tree writes into sequential ones; measured ~6x on 2M rows. The
 # staging tables are dropped when the run finishes.
 STAGE_SCHEMA = """
@@ -67,19 +67,6 @@ CREATE TABLE IF NOT EXISTS triage_stage_categories (
  file_id INTEGER NOT NULL, category TEXT NOT NULL, score INTEGER NOT NULL
 );
 """
-
-# Explicit DDL used by the key migration, which cannot call executescript
-# inside its transaction (executescript commits first).
-_RESULT_TABLES_V5 = (
-    "CREATE TABLE triage_files_new ("
-    " run_id TEXT NOT NULL REFERENCES triage_runs(id), file_id INTEGER NOT NULL,"
-    " priority INTEGER NOT NULL, metadata_json TEXT NOT NULL, result_json TEXT NOT NULL,"
-    " PRIMARY KEY(run_id, file_id))",
-    "CREATE TABLE triage_categories_new ("
-    " run_id TEXT NOT NULL, file_id INTEGER NOT NULL, category TEXT NOT NULL,"
-    " score INTEGER NOT NULL, PRIMARY KEY(run_id, file_id, category),"
-    " FOREIGN KEY(run_id, file_id) REFERENCES triage_files_new(run_id, file_id))",
-)
 
 
 def utc_now() -> str:
@@ -107,7 +94,7 @@ def _metadata_json_expr(files_alias: str = "i", scan_alias: str = "sf") -> str:
         f"'file_name',{files_alias}.file_name,'size_bytes',{size},"
         f"'readable_size',{readable},'mtime_utc',{mtime},"
         f"'is_directory',json('false'),'scan_timestamp_utc',{stamp},"
-        f"'share',{files_alias}.share,'file_id',{files_alias}.public_id)"
+        f"'share',{files_alias}.share,'file_id',public_id_token({files_alias}.id))"
     )
 
 
@@ -140,74 +127,8 @@ def connect_readonly(path: Path) -> sqlite3.Connection:
     return connection
 
 
-def _migrate_results(connection: sqlite3.Connection, database: Path) -> None:
-    """Rewrite pre-v5 result keys from public tokens to catalog integers.
-
-    ``triage_files.file_id`` and ``triage_categories.file_id`` are rebuilt in
-    one transaction, resolving ``public_id`` through the attached inventory.
-    Derived runs whose file is gone from the inventory lose that row; a run is
-    only reviewable against the inventory it was scored from.
-    """
-    version = int(connection.execute("PRAGMA user_version").fetchone()[0])
-    if version == 0 or version >= SCHEMA_VERSION:
-        return
-    previous = connection.isolation_level
-    connection.isolation_level = None
-    connection.execute("PRAGMA foreign_keys=OFF")
-    attached = False
-    try:
-        connection.execute("BEGIN IMMEDIATE")
-        connection.execute("DROP TABLE IF EXISTS triage_stage_files")
-        connection.execute("DROP TABLE IF EXISTS triage_stage_categories")
-        for statement in _RESULT_TABLES_V5:
-            connection.execute(statement)
-        connection.execute(
-            "ATTACH DATABASE ? AS inventory", (str(Path(database).resolve()),)
-        )
-        attached = True
-        connection.execute(
-            "INSERT INTO triage_files_new"
-            "(run_id,file_id,priority,metadata_json,result_json) "
-            "SELECT t.run_id,i.id,t.priority,t.metadata_json,t.result_json "
-            "FROM triage_files t JOIN inventory.files i ON i.public_id=t.file_id"
-        )
-        connection.execute(
-            "INSERT INTO triage_categories_new"
-            "(run_id,file_id,category,score) "
-            "SELECT c.run_id,i.id,c.category,c.score "
-            "FROM triage_categories c JOIN inventory.files i ON i.public_id=c.file_id"
-        )
-        connection.execute("DROP TABLE triage_files")
-        connection.execute("DROP TABLE triage_categories")
-        connection.execute("ALTER TABLE triage_files_new RENAME TO triage_files")
-        connection.execute(
-            "ALTER TABLE triage_categories_new RENAME TO triage_categories"
-        )
-        connection.execute(
-            "CREATE INDEX IF NOT EXISTS triage_priority"
-            " ON triage_files(run_id, priority DESC, file_id)"
-        )
-        connection.execute(
-            "CREATE INDEX IF NOT EXISTS triage_category_score"
-            " ON triage_categories(run_id, category, score DESC, file_id)"
-        )
-        connection.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
-        connection.execute("COMMIT")
-    except BaseException:
-        connection.execute("ROLLBACK")
-        raise
-    finally:
-        connection.execute("PRAGMA foreign_keys=ON")
-        connection.isolation_level = previous
-        if attached:
-            try:
-                connection.execute("DETACH DATABASE inventory")
-            except sqlite3.Error:
-                pass
-
-
 def _ensure_result_schema(path: Path, database: Path) -> None:
-    """Migrate a pre-v5 result database before a read-only open."""
+    """Reject a pre-v5 result database before a read-only open."""
     target = Path(path)
     if not target.is_file():
         return
@@ -216,42 +137,44 @@ def _ensure_result_schema(path: Path, database: Path) -> None:
     except sqlite3.Error:
         return
     try:
-        _migrate_results(connection, database)
+        version = int(connection.execute("PRAGMA user_version").fetchone()[0])
+        if 0 < version < SCHEMA_VERSION:
+            raise ValueError(
+                f"triage result schema {version} is not supported; "
+                f"recreate the workspace to upgrade to schema {SCHEMA_VERSION}"
+            )
     finally:
         connection.close()
 
 
 def _ensure_inventory_schema(path: Path) -> None:
-    """Migrate a pre-normalization inventory before a read-only open.
+    """Reject an older inventory schema before a read-only open.
 
     Only the inventory is touched: a triage result database has a different
-    schema version and no ``files`` table.
+    schema version and no ``files`` table or view.
     """
     try:
-        connection = sqlite3.connect(
-            path.resolve().as_uri() + "?mode=ro", uri=True
-        )
+        connection = sqlite3.connect(path.resolve().as_uri() + "?mode=ro", uri=True)
     except sqlite3.Error:
         return
     try:
         version = int(connection.execute("PRAGMA user_version").fetchone()[0])
-        if version != 1:
-            return
-        if (
+        has_files = (
             connection.execute(
-                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='files'"
+                "SELECT 1 FROM sqlite_master WHERE type IN ('table', 'view') "
+                "AND name='files'"
             ).fetchone()
-            is None
-        ):
-            return
+            is not None
+        )
     except sqlite3.Error:
         return
     finally:
         connection.close()
-    # Import lazily: shrawler.store imports coverage, which imports this module.
-    from ..store import migrate_inventory
-
-    migrate_inventory(path)
+    if has_files and 0 < version < SCHEMA_VERSION:
+        raise ValueError(
+            f"database schema {version} is not supported; "
+            f"recreate the workspace to upgrade to schema {SCHEMA_VERSION}"
+        )
 
 
 def select_scan(
@@ -300,8 +223,11 @@ def observables(
 
     `skip` discards the first N rows (already staged elsewhere) without parsing them.
     """
+    from ..store import public_id, public_id_key
+
+    key = public_id_key(source)
     rows = source.execute(
-        "SELECT f.id AS row_id, f.public_id, h.host, s.name AS share, f.remote_path, "
+        "SELECT f.id AS row_id, h.host, s.name AS share, f.remote_path, "
         "f.unc_path, f.file_name, "
         "COALESCE(sf.size_bytes, f.size_bytes) AS size_bytes, "
         "COALESCE(sf.readable_size, f.readable_size) AS readable_size, "
@@ -330,11 +256,11 @@ def observables(
         }
         # ``file_id`` stays the public token because analyst decisions are keyed
         # by it; ``file_key`` is the catalog integer used as the storage key in
-        # every derived database, where it is 3-4 bytes instead of 22.
+        # every derived database, where it is 3-4 bytes instead of 11.
         metadata = {
             **base,
             "share": row["share"],
-            "file_id": row["public_id"],
+            "file_id": public_id(key, int(row["row_id"])),
             "file_key": int(row["row_id"]),
         }
         payload = json.dumps(base, ensure_ascii=False, separators=(",", ":"))
@@ -434,10 +360,11 @@ def rank(
                 f"PRAGMA cache_size=-{_cache_kib('SHRAWLER_TRIAGE_CACHE_MB', 128)}"
             )
             version = target.execute("PRAGMA user_version").fetchone()[0]
-            if version not in (0, 1, 2, 3, 4, SCHEMA_VERSION):
-                raise ValueError(f"unsupported triage database version: {version}")
-            if 0 < version < SCHEMA_VERSION:
-                _migrate_results(target, database)
+            if version not in (0, SCHEMA_VERSION):
+                raise ValueError(
+                    f"triage database schema {version} is not supported; "
+                    f"recreate the workspace to upgrade to schema {SCHEMA_VERSION}"
+                )
             target.executescript(SCHEMA)
             for _, statement in WEB_SORT_INDEXES:
                 target.execute(statement)
@@ -640,9 +567,9 @@ def rank(
                 if on_phase:
                     on_phase("saving", count)
                 # Flush the trailing partial batch into staging, then move all
-                # rows into the ranked tables in public_id order. The ranked
-                # keys are random opaque IDs, so sorted insertion turns
-                # scattered B-tree writes into sequential ones.
+                # rows into the ranked tables in catalog-id order. The ranked
+                # keys are integers, so sorted insertion turns scattered
+                # B-tree writes into sequential ones.
                 target.executemany(
                     "INSERT INTO triage_stage_files VALUES (?,?,?,?)", file_rows
                 )
@@ -769,6 +696,9 @@ def list_results(
     with closing(connect_readonly(output or result_path(database))) as connection:
         run = select_run(connection, database, run_id)
         connection.execute("ATTACH DATABASE ? AS inventory", (str(database.resolve()),))
+        from ..store import public_id_key, register_public_id_function
+
+        register_public_id_function(connection, public_id_key(connection, "inventory"))
         score = "c.score" if category else "f.priority"
         identifier = "c.file_id" if category else "f.file_id"
         query = (
@@ -804,15 +734,21 @@ def list_results(
             )
         if file_ids is not None:
             # A named selection is a membership question, not a page of a
-            # ranking: the caller passes public IDs, so match them through the
-            # attached inventory. `identifier` would be the integer key.
-            selected = sorted(set(file_ids))
+            # ranking: the caller passes public tokens, so resolve them to the
+            # catalog integers that key the attached inventory.
+            from ..store import resolve_public_id
+
+            resolved = []
+            for token in sorted(set(file_ids)):
+                file_key = resolve_public_id(connection, token, "inventory")
+                if file_key is not None:
+                    resolved.append(file_key)
             query += (
-                f" AND i.public_id IN ({','.join('?' for _ in selected)})"
-                if selected
+                f" AND i.id IN ({','.join('?' for _ in resolved)})"
+                if resolved
                 else " AND 0"
             )
-            values.extend(selected)
+            values.extend(resolved)
         if after is not None:
             if type(after[0]) is not int or after[0] < 0:
                 raise ValueError("invalid ranking cursor")
@@ -896,14 +832,24 @@ def explain(
     with closing(connect_readonly(output or result_path(database))) as connection:
         run = select_run(connection, database, run_id)
         connection.execute("ATTACH DATABASE ? AS inventory", (str(database.resolve()),))
+        from ..store import (
+            public_id_key,
+            register_public_id_function,
+            resolve_public_id,
+        )
+
+        register_public_id_function(connection, public_id_key(connection, "inventory"))
+        file_key = resolve_public_id(connection, file_id, "inventory")
+        if file_key is None:
+            raise ValueError("file ID was not present in the selected ranking run")
         row = connection.execute(
             "SELECT f.*,COALESCE(NULLIF(f.metadata_json,''),"
             + _metadata_json_expr("i")
             + ") AS resolved_metadata_json "
             "FROM triage_files f LEFT JOIN inventory.files i ON i.id=f.file_id "
             "LEFT JOIN inventory.scan_files sf ON sf.scan_id=? AND sf.file_id=i.id "
-            "WHERE f.run_id=? AND i.public_id=?",
-            (run["scan_id"], run["id"], file_id),
+            "WHERE f.run_id=? AND i.id=?",
+            (run["scan_id"], run["id"], file_key),
         ).fetchone()
         if row is None:
             raise ValueError("file ID was not present in the selected ranking run")
@@ -967,11 +913,11 @@ def promote_run(
             f"PRAGMA cache_size=-{_cache_kib('SHRAWLER_TRIAGE_CACHE_MB', 128)}"
         )
         version = target.execute("PRAGMA user_version").fetchone()[0]
-        if version not in (0, 1, 2, 3, 4, SCHEMA_VERSION):
-            raise ValueError(f"unsupported triage database version: {version}")
-        if 0 < version < SCHEMA_VERSION:
-            # The preview run records the inventory it was scored from.
-            _migrate_results(target, Path(str(run["source_path"])))
+        if version not in (0, SCHEMA_VERSION):
+            raise ValueError(
+                f"triage database schema {version} is not supported; "
+                f"recreate the workspace to upgrade to schema {SCHEMA_VERSION}"
+            )
         target.executescript(SCHEMA)
         for _, statement in WEB_SORT_INDEXES:
             target.execute(statement)
@@ -1071,7 +1017,9 @@ WITH pairs AS (
 """
 
 
-def _run_summary(connection: sqlite3.Connection, schema: str, run_id: str) -> Dict[str, Any]:
+def _run_summary(
+    connection: sqlite3.Connection, schema: str, run_id: str
+) -> Dict[str, Any]:
     found = connection.execute(
         f"SELECT summary_json FROM {schema}.triage_summaries WHERE run_id=?", (run_id,)
     ).fetchone()
@@ -1118,6 +1066,9 @@ def compare_runs(
             raise ValueError("preview run is missing or incomplete")
         connection.execute("ATTACH DATABASE ? AS base", (_readonly_uri(results),))
         connection.execute("ATTACH DATABASE ? AS inventory", (str(database.resolve()),))
+        from ..store import public_id_key, register_public_id_function
+
+        register_public_id_function(connection, public_id_key(connection, "inventory"))
         names = {
             "preview": preview["id"],
             "base": base["id"],

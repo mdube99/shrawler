@@ -12,6 +12,7 @@ from types import SimpleNamespace
 from typing import Any, Callable, Dict, Generator, List, Optional, Tuple
 
 from .smb import SMBAuth
+from .store import resolve_public_id
 from .triage.storage import (
     FALLBACK_CATEGORIES,
     connect_readonly,
@@ -32,9 +33,7 @@ class CollectionQueue:
 
     @staticmethod
     def _pack(payload: str) -> Tuple[int, bytes]:
-        return CollectionQueue.CODEC_ZLIB, zlib.compress(
-            payload.encode("utf-8"), 6
-        )
+        return CollectionQueue.CODEC_ZLIB, zlib.compress(payload.encode("utf-8"), 6)
 
     @staticmethod
     def _unpack(codec: Any, payload: Any) -> str:
@@ -148,10 +147,7 @@ class CollectionQueue:
             # Scope to the candidate hosts/shares so growing web-download evidence
             # never turns manifest creation into a full-table materialization.
             targets = sorted(
-                {
-                    (candidate["host"], candidate["share"])
-                    for candidate in selection
-                }
+                {(candidate["host"], candidate["share"]) for candidate in selection}
             )
             prior_paths: set = set()
             for start in range(0, len(targets), 200):
@@ -281,17 +277,25 @@ class CollectionQueue:
         if not file_ids:
             return []
         with closing(connect_readonly(self.database)) as source:
-            placeholders = ",".join("?" for _ in file_ids)
+            id_by_token: Dict[str, int] = {}
+            for token in file_ids:
+                file_key = resolve_public_id(source, token)
+                if file_key is not None:
+                    id_by_token[token] = file_key
+            if not id_by_token:
+                raise ValueError("Unknown file ID: " + ", ".join(sorted(file_ids)[:5]))
+            placeholders = ",".join("?" for _ in id_by_token)
             rows = source.execute(
-                "SELECT public_id, host, share, remote_path, unc_path, file_name, "
+                "SELECT id, host, share, remote_path, unc_path, file_name, "
                 "extension, size_bytes, readable_size, mtime_utc, "
                 "scan_timestamp_utc FROM files "
-                f"WHERE public_id IN ({placeholders})",
-                file_ids,
+                f"WHERE id IN ({placeholders})",
+                list(id_by_token.values()),
             ).fetchall()
+        token_by_id = {file_key: token for token, file_key in id_by_token.items()}
         found = {
-            str(row["public_id"]): {
-                "file_id": str(row["public_id"]),
+            token_by_id[int(row["id"])]: {
+                "file_id": token_by_id[int(row["id"])],
                 "host": str(row["host"]),
                 "share": str(row["share"]),
                 "remote_path": str(row["remote_path"]),

@@ -319,12 +319,8 @@ class StorageTests(unittest.TestCase):
         self.assertEqual(detail["rules_hash"], rules.digest)
         self.assertTrue(detail["rule_diagnostics"][0]["matched"])
 
-    def test_v4_result_keys_migrate_to_catalog_integers(self):
-        scan_id = self.scan([metadata()])
-        with sqlite3.connect(self.database) as source:
-            row_id, public_id = source.execute(
-                "SELECT id, public_id FROM files"
-            ).fetchone()
+    def test_legacy_result_schema_requires_recreate(self):
+        self.scan([metadata()])
         path = result_path(self.database)
         connection = sqlite3.connect(path)
         connection.executescript(
@@ -339,41 +335,15 @@ class StorageTests(unittest.TestCase):
              run_id TEXT NOT NULL, file_id TEXT NOT NULL, priority INTEGER NOT NULL,
              metadata_json TEXT NOT NULL, result_json TEXT NOT NULL,
              PRIMARY KEY(run_id, file_id));
-            CREATE TABLE triage_categories (
-             run_id TEXT NOT NULL, file_id TEXT NOT NULL, category TEXT NOT NULL,
-             score INTEGER NOT NULL, PRIMARY KEY(run_id, file_id, category));
             PRAGMA user_version=4;
             """
-        )
-        connection.execute(
-            "INSERT INTO triage_runs(id,source_path,scan_id,started_at,status,"
-            "engine_version,rules_hash,rules_json,scan_json,file_count) "
-            "VALUES ('run1',?,?,'2026-01-01T00:00:00+00:00','completed','5','h',"
-            "?,'{}',1)",
-            (str(self.database), scan_id, json.dumps({"version": 1, "rules": []})),
-        )
-        connection.execute(
-            "INSERT INTO triage_files VALUES ('run1',?,30,'',?)",
-            (public_id, json.dumps({"priority": 30, "signals": []})),
         )
         connection.commit()
         connection.close()
 
-        listing = list_results(self.database, "run1")
-        self.assertEqual(listing["items"][0]["file_id"], public_id)
-        connection = sqlite3.connect(path)
-        try:
-            self.assertEqual(
-                connection.execute("PRAGMA user_version").fetchone()[0], 5
-            )
-            self.assertEqual(
-                connection.execute(
-                    "SELECT file_id FROM triage_files WHERE run_id='run1'"
-                ).fetchone()[0],
-                row_id,
-            )
-        finally:
-            connection.close()
+        with self.assertRaises(ValueError) as caught:
+            list_results(self.database, "run1")
+        self.assertIn("recreate", str(caught.exception))
 
     def test_category_order_and_prior_runs_remain_available(self):
         self.scan([metadata(), metadata("/vault.kdbx"), metadata("/notes.txt")])
@@ -399,11 +369,6 @@ class StorageTests(unittest.TestCase):
 
     def test_offline_cli_and_rule_preview(self):
         self.scan([metadata(), metadata("/\x1b[31mnotes.txt")])
-        with sqlite3.connect(self.database) as connection:
-            connection.execute(
-                "UPDATE files SET public_id=? WHERE file_name=?",
-                ("-leading-hyphen-id", "production.config"),
-            )
         with patch.object(
             socket.socket, "connect", side_effect=AssertionError("network used")
         ), patch("shrawler.cli._create_auth", side_effect=AssertionError("auth used")):

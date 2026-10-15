@@ -10,7 +10,6 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from ..output import escape_terminal
-from ..store import migrate_inventory
 from .storage import connect_readonly, observations, select_scan, utc_now
 
 SCHEMA_VERSION = 3
@@ -47,40 +46,18 @@ class ReviewStore:
     def __init__(self, database: Path):
         self.database = database.resolve()
         self.path = self.database.with_name(self.database.stem + ".review.db")
-        migrate_inventory(self.database)
         with closing(self.connect()) as db, db:
             db.executescript(SCHEMA)
             declared = {
                 str(row[1]): str(row[2]).upper()
                 for row in db.execute("PRAGMA table_info(family_members)")
             }
-            # A v1 database stored the whole observation; a v2 database still
-            # keyed on the public token. Both rebuild to the integer key,
-            # resolving it through the inventory.
+            # Older review databases keyed family members by the public token;
+            # the catalog no longer stores that token, so they cannot be
+            # rebuilt and must be recreated.
             if declared.get("file_id") not in (None, "INTEGER"):
-                db.execute("ALTER TABLE family_members RENAME TO family_members_old")
-                db.execute("DROP INDEX IF EXISTS family_members_group")
-                db.execute(
-                    "CREATE TABLE family_members ("
-                    " scan_id TEXT NOT NULL, family_id TEXT NOT NULL,"
-                    " file_id INTEGER NOT NULL, PRIMARY KEY(scan_id,file_id))"
-                )
-                db.execute(
-                    "ATTACH DATABASE ? AS inventory", (str(self.database),)
-                )
-                try:
-                    db.execute(
-                        "INSERT OR IGNORE INTO family_members"
-                        "(scan_id,family_id,file_id) "
-                        "SELECT fm.scan_id,fm.family_id,i.id FROM family_members_old fm "
-                        "JOIN inventory.files i ON i.public_id=fm.file_id"
-                    )
-                finally:
-                    db.execute("DETACH DATABASE inventory")
-                db.execute("DROP TABLE family_members_old")
-                db.execute(
-                    "CREATE INDEX IF NOT EXISTS family_members_group"
-                    " ON family_members(scan_id,family_id,file_id)"
+                raise ValueError(
+                    "review database schema is not supported; recreate the workspace"
                 )
             db.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
         self.path.chmod(0o600)
@@ -135,6 +112,9 @@ class ReviewStore:
             # File details live in the inventory; the review database keeps only
             # the family membership so the same bytes are not stored twice.
             db.execute("ATTACH DATABASE ? AS inventory", (str(self.database),))
+            from ..store import public_id_key, register_public_id_function
+
+            register_public_id_function(db, public_id_key(db, "inventory"))
             if family_id:
                 rows = db.execute(
                     """SELECT i.host, i.share, i.remote_path, i.unc_path,
@@ -143,7 +123,7 @@ class ReviewStore:
                               COALESCE(sf.readable_size,i.readable_size) AS readable_size,
                               COALESCE(sf.mtime_utc,i.mtime_utc) AS mtime_utc,
                               COALESCE(sf.scan_timestamp_utc,i.scan_timestamp_utc) AS scan_timestamp_utc,
-                              i.public_id AS file_id
+                              public_id_token(i.id) AS file_id
                        FROM family_members fm
                        JOIN inventory.files i ON i.id=fm.file_id
                        LEFT JOIN inventory.scan_files sf
@@ -210,11 +190,16 @@ class ReviewStore:
             db.execute("ATTACH DATABASE ? AS inventory", (str(self.database),))
             try:
                 if scope == "file":
-                    found = db.execute(
-                        "SELECT 1 FROM family_members fm JOIN inventory.files i"
-                        " ON i.id=fm.file_id WHERE i.public_id=? LIMIT 1",
-                        (target,),
-                    ).fetchone()
+                    from ..store import resolve_public_id
+
+                    file_key = resolve_public_id(db, target, "inventory")
+                    found = None
+                    if file_key is not None:
+                        found = db.execute(
+                            "SELECT 1 FROM family_members fm JOIN inventory.files i"
+                            " ON i.id=fm.file_id WHERE i.id=? LIMIT 1",
+                            (file_key,),
+                        ).fetchone()
                 else:
                     found = db.execute(
                         "SELECT 1 FROM family_members WHERE " + column + "=? LIMIT 1",

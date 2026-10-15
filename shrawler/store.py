@@ -1,28 +1,39 @@
 """SQLite-backed scan persistence and export."""
 
+import base64
+import binascii
+import calendar
 import csv
 import fcntl
+import functools
+import hashlib
 import json
 import os
+import re
 import secrets
 import sqlite3
 import threading
 import time
 import uuid
-import zlib
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Set, Tuple, cast
 
 from .coverage import DirectoryCoverage
 from .output import safe_csv_row
-from .search_index import ensure as ensure_search_index, supported as search_supported
+from .search_index import (
+    ensure as ensure_search_index,
+    optimize as optimize_search_index,
+    supported as search_supported,
+)
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 # Web-initiated retrievals share the downloads table but are not scan-time
 # downloads, so scan summaries and JSON/CSV exports exclude them.
-_SCAN_DOWNLOAD_FILTER = "COALESCE(json_extract(payload_json, '$.source'), 'scan') != 'web'"
+_SCAN_DOWNLOAD_FILTER = (
+    "COALESCE(json_extract(payload_json, '$.source'), 'scan') != 'web'"
+)
 
 
 def utc_now() -> str:
@@ -41,85 +52,521 @@ def _path_key(value: Any) -> str:
     )
 
 
-def _files_ddl(table: str) -> str:
-    """Inventory file table.
+# --- Value encodings -------------------------------------------------------
+#
+# Timestamps are written by the scanner as ``datetime.isoformat()`` in UTC:
+# ``YYYY-MM-DDTHH:MM:SS[.ffffff]+00:00``. Such a value is stored as integer
+# epoch seconds plus an optional microsecond column, which is exact and keeps
+# chronological (= lexicographic) order. Anything else is stored verbatim as
+# text, and the empty string as NULL so it still sorts first. ``_ts_sql``
+# renders the original text back.
 
-    ``search_text`` and ``readable_size`` are derived, so they are generated
-    columns that occupy no pages. ``search_text`` is still the FTS5 external
-    content column; its update trigger watches the source columns because
-    SQLite does not report generated columns in an ``UPDATE OF`` list.
-    """
-    return f"""
-    CREATE TABLE IF NOT EXISTS {table} (
-        id INTEGER PRIMARY KEY,
-        public_id TEXT NOT NULL UNIQUE,
-        host TEXT NOT NULL,
-        share TEXT NOT NULL,
-        remote_path TEXT NOT NULL,
-        file_name TEXT GENERATED ALWAYS AS (
-            replace(remote_path, rtrim(remote_path, replace(remote_path, '/', '')), '')
-        ) VIRTUAL,
-        extension TEXT NOT NULL,
-        size_bytes INTEGER NOT NULL,
-        readable_size TEXT GENERATED ALWAYS AS (
-            CASE
-                WHEN size_bytes < 1024 THEN
-                    rtrim(rtrim(printf('%.2f', size_bytes), '0'), '.') || 'B'
-                WHEN size_bytes < 1048576 THEN
-                    rtrim(rtrim(printf('%.2f', size_bytes / 1024.0), '0'), '.') || 'KB'
-                WHEN size_bytes < 1073741824 THEN
-                    rtrim(rtrim(printf('%.2f', size_bytes / 1048576.0), '0'), '.') || 'MB'
-                ELSE
-                    rtrim(rtrim(printf('%.2f', size_bytes / 1073741824.0), '0'), '.') || 'GB'
-            END
-        ) VIRTUAL,
-        parent_path TEXT GENERATED ALWAYS AS (
-            CASE
-                WHEN rtrim(rtrim(remote_path, replace(remote_path, '/', '')), '/') = ''
-                    THEN '/'
-                ELSE rtrim(rtrim(remote_path, replace(remote_path, '/', '')), '/')
-            END
-        ) VIRTUAL,
-        unc_path TEXT GENERATED ALWAYS AS (
-            '\\\\' || host || '\\' || share || '\\' || ltrim(remote_path, '/')
-        ) VIRTUAL,
-        mtime_utc TEXT NOT NULL,
-        scan_timestamp_utc TEXT NOT NULL,
-        search_text TEXT GENERATED ALWAYS AS (
-            lower(host) || ' ' || lower(share) || ' ' || lower(remote_path) || ' ' ||
-            lower(unc_path) || ' ' || lower(file_name) || ' ' || lower(extension)
-        ) VIRTUAL,
-        UNIQUE(host, share, remote_path)
-    );
-    """
-
-
-# Catalog query indexes. Every index carries an integer rowid or the short
-# ``public_id`` token as its tie-break rather than a second copy of the path or
-# the file name, which is where most of the index bytes used to go.
-_FILES_INDEXES = (
-    "CREATE INDEX IF NOT EXISTS files_share_idx ON files(share COLLATE NOCASE)",
-    "CREATE INDEX IF NOT EXISTS files_parent_idx ON files(host, share, parent_path, id)",
-    "CREATE INDEX IF NOT EXISTS files_path_sort_idx ON files(host COLLATE NOCASE, "
-    "share COLLATE NOCASE, remote_path COLLATE NOCASE, public_id)",
-    "CREATE INDEX IF NOT EXISTS files_name_sort_idx ON files(file_name COLLATE NOCASE, "
-    "public_id)",
-    "CREATE INDEX IF NOT EXISTS files_type_sort_idx ON files(extension COLLATE NOCASE, "
-    "public_id)",
-    "CREATE INDEX IF NOT EXISTS files_size_sort_idx ON files(size_bytes, public_id)",
-    "CREATE INDEX IF NOT EXISTS files_modified_sort_idx ON files(mtime_utc, public_id)",
+_CANONICAL_TS = re.compile(
+    r"(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.(\d{6}))?\+00:00"
 )
 
-# Indexes replaced by the narrower set above. Dropped by the v2 to v3 migration.
-_FILES_INDEXES_V2 = (
-    "files_host_idx",
-    "files_ext_idx",
-    "files_path_sort_idx",
-    "files_name_sort_idx",
-    "files_type_sort_idx",
-    "files_size_sort_idx",
-    "files_modified_sort_idx",
+
+@functools.lru_cache(maxsize=65536)
+def encode_timestamp(text: str) -> Tuple[Any, Optional[int]]:
+    """Return ``(seconds_or_text_or_None, microseconds_or_None)``."""
+    if text == "":
+        return None, None
+    match = _CANONICAL_TS.fullmatch(text)
+    if match is None:
+        return text, None
+    year, month, day, hour, minute, second = (int(part) for part in match.groups()[:6])
+    try:
+        moment = datetime(year, month, day, hour, minute, second, tzinfo=timezone.utc)
+    except ValueError:
+        return text, None
+    seconds = calendar.timegm(moment.utctimetuple())
+    fraction = match.group(7)
+    return seconds, (int(fraction) if fraction is not None else None)
+
+
+def decode_timestamp(value: Any, micro: Optional[int]) -> str:
+    """Python mirror of ``_ts_sql``."""
+    if value is None:
+        return ""
+    if isinstance(value, int):
+        moment = datetime(1970, 1, 1, tzinfo=timezone.utc) + timedelta(seconds=value)
+        text = (
+            f"{moment.year:04d}-{moment.month:02d}-{moment.day:02d}T"
+            f"{moment.hour:02d}:{moment.minute:02d}:{moment.second:02d}"
+        )
+        return text + ("" if micro is None else f".{micro:06d}") + "+00:00"
+    return str(value)
+
+
+def _ts_sql(value: str, micro: str) -> str:
+    return (
+        f"CASE typeof({value}) WHEN 'integer' THEN "
+        f"strftime('%Y-%m-%dT%H:%M:%S', {value}, 'unixepoch') || "
+        f"CASE WHEN {micro} IS NULL THEN '' ELSE printf('.%06d', {micro}) END || '+00:00' "
+        f"WHEN 'null' THEN '' ELSE {value} END"
+    )
+
+
+def _readable_sql(size: str) -> str:
+    """The printable size: a pure function of the byte count."""
+    return f"""CASE
+        WHEN {size} < 1024 THEN
+            rtrim(rtrim(printf('%.2f', {size}), '0'), '.') || 'B'
+        WHEN {size} < 1048576 THEN
+            rtrim(rtrim(printf('%.2f', {size} / 1024.0), '0'), '.') || 'KB'
+        WHEN {size} < 1073741824 THEN
+            rtrim(rtrim(printf('%.2f', {size} / 1048576.0), '0'), '.') || 'MB'
+        ELSE
+            rtrim(rtrim(printf('%.2f', {size} / 1073741824.0), '0'), '.') || 'GB'
+    END"""
+
+
+# Public file tokens. A token is a keyed 64-bit Feistel permutation of the
+# integer id, so it is unique, stable for the life of the database (ids are
+# AUTOINCREMENT and never reused) and opaque without the per-database key in
+# ``metadata``.
+
+_PUBLIC_ID_KEY = "public_id_key"
+
+
+def public_id_key(
+    connection: sqlite3.Connection, schema: Optional[str] = None
+) -> bytes:
+    table = "metadata" if schema is None else f'"{schema}".metadata'
+    row = connection.execute(
+        f"SELECT value FROM {table} WHERE key=?", (_PUBLIC_ID_KEY,)
+    ).fetchone()
+    if row is None:
+        raise ValueError("catalog has no public id key")
+    return int(row[0]).to_bytes(8, "big", signed=True)
+
+
+@functools.lru_cache(maxsize=16)
+def _round_states(key: bytes) -> Tuple[Any, ...]:
+    # Keyed BLAKE2b state per Feistel round; copying it skips the key setup.
+    return tuple(
+        hashlib.blake2b(digest_size=4, key=key, person=bytes([number]) * 16)
+        for number in range(4)
+    )
+
+
+def _round(key: bytes, number: int, half: int) -> int:
+    state = _round_states(key)[number].copy()
+    state.update(half.to_bytes(4, "big"))
+    return int.from_bytes(state.digest(), "big")
+
+
+def derive_public_id(key: bytes, file_id: int) -> str:
+    left, right = file_id >> 32, file_id & 0xFFFFFFFF
+    for number in range(4):
+        left, right = right, left ^ _round(key, number, right)
+    block = ((left << 32) | right).to_bytes(8, "big")
+    return base64.urlsafe_b64encode(block).decode("ascii").rstrip("=")
+
+
+def _underive_public_id(key: bytes, token: str) -> Optional[int]:
+    if len(token) != 11:
+        return None
+    try:
+        block = base64.urlsafe_b64decode(token + "=")
+    except (binascii.Error, ValueError):
+        return None
+    if len(block) != 8 or base64.urlsafe_b64encode(block).decode("ascii")[:11] != token:
+        return None
+    value = int.from_bytes(block, "big")
+    left, right = value >> 32, value & 0xFFFFFFFF
+    for number in reversed(range(4)):
+        left, right = right ^ _round(key, number, left), left
+    return (left << 32) | right
+
+
+def public_id(key: bytes, file_id: int) -> str:
+    """The opaque token callers see for a catalog row."""
+    return derive_public_id(key, int(file_id))
+
+
+def resolve_public_id(
+    connection: sqlite3.Connection, token: str, schema: Optional[str] = None
+) -> Optional[int]:
+    """Map a token back to its catalog row id, or None when it is unknown."""
+    file_id = _underive_public_id(public_id_key(connection, schema), token)
+    if file_id is None or file_id >= 1 << 63:
+        return None
+    table = "catalog_files" if schema is None else f'"{schema}".catalog_files'
+    row = connection.execute(
+        f"SELECT id FROM {table} WHERE id=?", (file_id,)
+    ).fetchone()
+    return int(row[0]) if row else None
+
+
+def register_public_id_function(
+    connection: sqlite3.Connection, key: bytes, name: str = "public_id_token"
+) -> None:
+    """Register a SQL function that maps a catalog row id to its token."""
+
+    def render(value: Any) -> str:
+        return public_id(key, int(value))
+
+    connection.create_function(name, 1, render, deterministic=True)
+
+
+# --- Catalog schema (version 5) -------------------------------------------
+#
+# One row per directory (host, share and the remote path up to and including
+# its last ``/``) and one narrow row per file: directory id, name, extension
+# id, size and integer timestamps. ``files`` and ``scan_files`` are views with
+# the exact column set and values of the version 4 tables, so readers and
+# exports keep working; the views store nothing.
+
+_UNC_DIR_SQL = "'\\\\' || {d}.host || '\\' || {d}.share || '\\' || ltrim({d}.path, '/')"
+
+_CATALOG_TABLES = """
+CREATE TABLE IF NOT EXISTS catalog_dirs (
+    id INTEGER PRIMARY KEY,
+    host TEXT NOT NULL,
+    share TEXT NOT NULL,
+    path TEXT NOT NULL,
+    file_count INTEGER NOT NULL DEFAULT 0,
+    size_bytes INTEGER NOT NULL DEFAULT 0,
+    search_text TEXT GENERATED ALWAYS AS (
+        lower(host) || ' ' || lower(share) || ' ' || lower(path) || ' ' ||
+        lower('\\\\' || host || '\\' || share || '\\' || ltrim(path, '/'))
+    ) VIRTUAL
+);
+CREATE INDEX IF NOT EXISTS catalog_dirs_sort_idx ON catalog_dirs(
+    host COLLATE NOCASE, share COLLATE NOCASE, path COLLATE NOCASE);
+CREATE TABLE IF NOT EXISTS catalog_extensions (
+    id INTEGER PRIMARY KEY,
+    extension TEXT NOT NULL UNIQUE
+);
+CREATE INDEX IF NOT EXISTS catalog_extensions_sort_idx
+    ON catalog_extensions(extension COLLATE NOCASE);
+CREATE TABLE IF NOT EXISTS catalog_files (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    dir_id INTEGER NOT NULL REFERENCES catalog_dirs(id),
+    name TEXT NOT NULL,
+    ext_id INTEGER NOT NULL REFERENCES catalog_extensions(id),
+    size_bytes INTEGER NOT NULL,
+    mtime,
+    mtime_us INTEGER,
+    scan_ts,
+    scan_ts_us INTEGER
+);
+-- Per-scan observations: which share of which scan saw the file, in
+-- discovery order (seq). readable_size is NULL when it equals the formula for
+-- the observed size. The observed size and timestamps are the file row's
+-- current values unless scan_observation_history holds the row: those values
+-- are written there just before the file row changes (see
+-- catalog_files_observation_history), so every scan keeps what it saw.
+CREATE TABLE IF NOT EXISTS scan_observations (
+    file_id INTEGER NOT NULL REFERENCES catalog_files(id) ON DELETE CASCADE,
+    share_id INTEGER NOT NULL REFERENCES shares(id) ON DELETE CASCADE,
+    seq INTEGER NOT NULL,
+    readable_size TEXT,
+    PRIMARY KEY(file_id, share_id)
+) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS scan_observation_history (
+    file_id INTEGER NOT NULL,
+    share_id INTEGER NOT NULL,
+    size_bytes INTEGER NOT NULL,
+    mtime,
+    mtime_us INTEGER,
+    scan_ts,
+    scan_ts_us INTEGER,
+    PRIMARY KEY(file_id, share_id),
+    FOREIGN KEY(file_id, share_id) REFERENCES scan_observations(file_id, share_id)
+        ON DELETE CASCADE
+) WITHOUT ROWID;
+-- Version 4 observation rows whose share does not resolve to their scan are
+-- kept verbatim here (normally empty).
+CREATE TABLE IF NOT EXISTS scan_files_unmapped (
+    scan_id TEXT NOT NULL,
+    share_id INTEGER NOT NULL,
+    file_id INTEGER NOT NULL,
+    size_bytes INTEGER,
+    readable_size TEXT,
+    mtime_utc TEXT,
+    scan_timestamp_utc TEXT,
+    seq INTEGER NOT NULL
+);
+"""
+
+# Indexes the writer needs while a scan is running: the (directory, name)
+# lookup behind every upsert and the per-share observation index used by
+# exports and share deletes.
+_CATALOG_WRITE_INDEXES = (
+    "CREATE INDEX IF NOT EXISTS catalog_files_dir_idx "
+    "ON catalog_files(dir_id, name COLLATE NOCASE)",
+    "CREATE INDEX IF NOT EXISTS scan_observations_share_idx ON scan_observations(share_id, seq)",
 )
+
+_CATALOG_TRIGGERS = """
+-- catalog_dirs_sort_idx is NOCASE; enforce (host, share, path) uniqueness
+-- under the binary comparison with one probe of it instead of a second index.
+CREATE TRIGGER IF NOT EXISTS catalog_dirs_unique_insert BEFORE INSERT ON catalog_dirs
+WHEN EXISTS (SELECT 1 FROM catalog_dirs WHERE host = NEW.host COLLATE NOCASE
+             AND share = NEW.share COLLATE NOCASE AND path = NEW.path COLLATE NOCASE
+             AND host = NEW.host AND share = NEW.share AND path = NEW.path)
+BEGIN
+    SELECT RAISE(ABORT, 'UNIQUE constraint failed: catalog_dirs.host, catalog_dirs.share, catalog_dirs.path');
+END;
+CREATE TRIGGER IF NOT EXISTS catalog_dirs_unique_update BEFORE UPDATE OF host, share, path
+ON catalog_dirs
+WHEN EXISTS (SELECT 1 FROM catalog_dirs WHERE host = NEW.host COLLATE NOCASE
+             AND share = NEW.share COLLATE NOCASE AND path = NEW.path COLLATE NOCASE
+             AND host = NEW.host AND share = NEW.share AND path = NEW.path AND id != OLD.id)
+BEGIN
+    SELECT RAISE(ABORT, 'UNIQUE constraint failed: catalog_dirs.host, catalog_dirs.share, catalog_dirs.path');
+END;
+-- The sort index is NOCASE, so (directory, name) uniqueness under the
+-- original binary comparison is enforced here with one probe of that index.
+CREATE TRIGGER IF NOT EXISTS catalog_files_unique_insert BEFORE INSERT ON catalog_files
+WHEN EXISTS (SELECT 1 FROM catalog_files WHERE dir_id = NEW.dir_id
+             AND name = NEW.name COLLATE NOCASE AND name = NEW.name)
+BEGIN
+    SELECT RAISE(ABORT, 'UNIQUE constraint failed: files.host, files.share, files.remote_path');
+END;
+CREATE TRIGGER IF NOT EXISTS catalog_files_unique_update BEFORE UPDATE OF dir_id, name
+ON catalog_files
+WHEN EXISTS (SELECT 1 FROM catalog_files WHERE dir_id = NEW.dir_id
+             AND name = NEW.name COLLATE NOCASE AND name = NEW.name AND id != OLD.id)
+BEGIN
+    SELECT RAISE(ABORT, 'UNIQUE constraint failed: files.host, files.share, files.remote_path');
+END;
+-- Per-directory totals make tree browsing independent of the file count.
+CREATE TRIGGER IF NOT EXISTS catalog_files_count_insert AFTER INSERT ON catalog_files BEGIN
+    UPDATE catalog_dirs SET file_count = file_count + 1, size_bytes = size_bytes + NEW.size_bytes
+    WHERE id = NEW.dir_id;
+END;
+CREATE TRIGGER IF NOT EXISTS catalog_files_count_delete AFTER DELETE ON catalog_files BEGIN
+    UPDATE catalog_dirs SET file_count = file_count - 1, size_bytes = size_bytes - OLD.size_bytes
+    WHERE id = OLD.dir_id;
+END;
+CREATE TRIGGER IF NOT EXISTS catalog_files_count_update AFTER UPDATE OF dir_id, size_bytes
+ON catalog_files BEGIN
+    UPDATE catalog_dirs SET file_count = file_count - 1, size_bytes = size_bytes - OLD.size_bytes
+    WHERE id = OLD.dir_id;
+    UPDATE catalog_dirs SET file_count = file_count + 1, size_bytes = size_bytes + NEW.size_bytes
+    WHERE id = NEW.dir_id;
+END;
+-- When a file's size or timestamps change, every observation that was
+-- sharing them (no history row yet) receives the outgoing values, so each
+-- scan keeps exactly what it saw.
+CREATE TRIGGER IF NOT EXISTS catalog_files_observation_history
+AFTER UPDATE OF size_bytes, mtime, mtime_us, scan_ts, scan_ts_us ON catalog_files
+WHEN NEW.size_bytes IS NOT OLD.size_bytes OR NEW.mtime IS NOT OLD.mtime
+  OR NEW.mtime_us IS NOT OLD.mtime_us OR NEW.scan_ts IS NOT OLD.scan_ts
+  OR NEW.scan_ts_us IS NOT OLD.scan_ts_us
+BEGIN
+    INSERT OR IGNORE INTO scan_observation_history(file_id, share_id, size_bytes, mtime,
+        mtime_us, scan_ts, scan_ts_us)
+    SELECT file_id, share_id, OLD.size_bytes, OLD.mtime, OLD.mtime_us, OLD.scan_ts,
+        OLD.scan_ts_us
+    FROM scan_observations WHERE file_id = OLD.id;
+END;
+"""
+
+# The exported columns of one observation row: catalog_files f, catalog_dirs d,
+# scan_observations o and its optional scan_observation_history p.
+_OBSERVED_COLUMNS = f"""
+       d.host AS host,
+       d.share AS share,
+       d.path || f.name AS remote_path,
+       {_UNC_DIR_SQL.format(d="d")} || f.name AS unc_path,
+       f.name AS file_name,
+       coalesce(p.size_bytes, f.size_bytes) AS size_bytes,
+       coalesce(o.readable_size, {_readable_sql("coalesce(p.size_bytes, f.size_bytes)")})
+           AS readable_size,
+       CASE WHEN p.file_id IS NULL THEN {_ts_sql("f.mtime", "f.mtime_us")}
+            ELSE {_ts_sql("p.mtime", "p.mtime_us")} END AS mtime_utc,
+       CASE WHEN p.file_id IS NULL THEN {_ts_sql("f.scan_ts", "f.scan_ts_us")}
+            ELSE {_ts_sql("p.scan_ts", "p.scan_ts_us")} END AS scan_timestamp_utc,
+       o.seq AS seq"""
+_OBSERVED_FROM = """
+FROM scan_observations o
+JOIN catalog_files f ON f.id = o.file_id
+JOIN catalog_dirs d ON d.id = f.dir_id
+LEFT JOIN scan_observation_history p ON p.file_id = o.file_id AND p.share_id = o.share_id"""
+# The same columns for a verbatim version 4 row in scan_files_unmapped u
+# (NULL meant "the file's value", as it did in version 4).
+_UNMAPPED_COLUMNS = f"""
+       d.host, d.share, d.path || f.name, {_UNC_DIR_SQL.format(d="d")} || f.name, f.name,
+       coalesce(u.size_bytes, f.size_bytes),
+       coalesce(u.readable_size, {_readable_sql("f.size_bytes")}),
+       coalesce(u.mtime_utc, {_ts_sql("f.mtime", "f.mtime_us")}),
+       coalesce(u.scan_timestamp_utc, {_ts_sql("f.scan_ts", "f.scan_ts_us")}),
+       u.seq"""
+_UNMAPPED_FROM = """
+FROM scan_files_unmapped u
+JOIN catalog_files f ON f.id = u.file_id
+JOIN catalog_dirs d ON d.id = f.dir_id"""
+
+_CATALOG_VIEWS = f"""
+CREATE VIEW IF NOT EXISTS files AS
+SELECT f.id AS id,
+       d.host AS host,
+       d.share AS share,
+       d.path || f.name AS remote_path,
+       f.name AS file_name,
+       e.extension AS extension,
+       f.size_bytes AS size_bytes,
+       {_readable_sql("f.size_bytes")} AS readable_size,
+       CASE WHEN rtrim(d.path, '/') = '' THEN '/' ELSE rtrim(d.path, '/') END AS parent_path,
+       {_UNC_DIR_SQL.format(d="d")} || f.name AS unc_path,
+       {_ts_sql("f.mtime", "f.mtime_us")} AS mtime_utc,
+       {_ts_sql("f.scan_ts", "f.scan_ts_us")} AS scan_timestamp_utc,
+       lower(d.host) || ' ' || lower(d.share) || ' ' || lower(d.path || f.name) || ' ' ||
+       lower({_UNC_DIR_SQL.format(d="d")} || f.name) || ' ' || lower(f.name) || ' ' ||
+       lower(e.extension) AS search_text
+FROM catalog_files f
+JOIN catalog_dirs d ON d.id = f.dir_id
+JOIN catalog_extensions e ON e.id = f.ext_id;
+CREATE VIEW IF NOT EXISTS scan_files AS
+SELECT h.scan_id AS scan_id,
+       o.share_id AS share_id,
+       o.file_id AS file_id,
+       coalesce(p.size_bytes, f.size_bytes) AS size_bytes,
+       coalesce(o.readable_size, {_readable_sql("coalesce(p.size_bytes, f.size_bytes)")})
+           AS readable_size,
+       CASE WHEN p.file_id IS NULL THEN {_ts_sql("f.mtime", "f.mtime_us")}
+            ELSE {_ts_sql("p.mtime", "p.mtime_us")} END AS mtime_utc,
+       CASE WHEN p.file_id IS NULL THEN {_ts_sql("f.scan_ts", "f.scan_ts_us")}
+            ELSE {_ts_sql("p.scan_ts", "p.scan_ts_us")} END AS scan_timestamp_utc,
+       o.seq AS seq
+FROM scan_observations o
+JOIN shares s ON s.id = o.share_id
+JOIN hosts h ON h.id = s.host_id
+LEFT JOIN catalog_files f ON f.id = o.file_id
+LEFT JOIN scan_observation_history p ON p.file_id = o.file_id AND p.share_id = o.share_id
+UNION ALL
+SELECT u.scan_id, u.share_id, u.file_id,
+       coalesce(u.size_bytes, f.size_bytes),
+       coalesce(u.readable_size, {_readable_sql("f.size_bytes")}),
+       coalesce(u.mtime_utc, {_ts_sql("f.mtime", "f.mtime_us")}),
+       coalesce(u.scan_timestamp_utc, {_ts_sql("f.scan_ts", "f.scan_ts_us")}),
+       u.seq
+FROM scan_files_unmapped u LEFT JOIN catalog_files f ON f.id = u.file_id;
+"""
+
+# Sort indexes that are only needed by readers. A fresh inventory creates them
+# after the bulk load (build_file_indexes) so their leaves are packed. Every
+# entry is the key plus the implicit rowid, which is also the tie-break.
+_CATALOG_INDEXES = (
+    "CREATE INDEX IF NOT EXISTS catalog_files_name_idx ON catalog_files(name COLLATE NOCASE)",
+    "CREATE INDEX IF NOT EXISTS catalog_files_ext_idx ON catalog_files(ext_id)",
+    "CREATE INDEX IF NOT EXISTS catalog_files_size_idx ON catalog_files(size_bytes)",
+    "CREATE INDEX IF NOT EXISTS catalog_files_mtime_idx ON catalog_files(mtime, mtime_us)",
+)
+
+# Tables other than the catalog that every inventory has.
+_COMMON_DDL = """
+CREATE TABLE IF NOT EXISTS metadata (
+    key TEXT PRIMARY KEY,
+    value INTEGER NOT NULL
+);
+INSERT OR IGNORE INTO metadata(key, value) VALUES ('revision', 0);
+CREATE TABLE IF NOT EXISTS scans (
+    id TEXT PRIMARY KEY,
+    short_id TEXT NOT NULL UNIQUE,
+    mode TEXT NOT NULL,
+    status TEXT NOT NULL,
+    started_at_utc TEXT NOT NULL,
+    updated_at_utc TEXT NOT NULL,
+    finished_at_utc TEXT,
+    run_dir TEXT NOT NULL,
+    domain TEXT NOT NULL DEFAULT '',
+    username TEXT NOT NULL DEFAULT '',
+    summary_json TEXT,
+    snaffler_summary_json TEXT
+);
+CREATE TABLE IF NOT EXISTS hosts (
+    id INTEGER PRIMARY KEY,
+    scan_id TEXT NOT NULL REFERENCES scans(id) ON DELETE CASCADE,
+    host TEXT NOT NULL,
+    display_name TEXT,
+    status TEXT NOT NULL,
+    error TEXT,
+    scan_timestamp_utc TEXT NOT NULL,
+    UNIQUE(scan_id, host)
+);
+CREATE TABLE IF NOT EXISTS shares (
+    id INTEGER PRIMARY KEY,
+    host_id INTEGER NOT NULL REFERENCES hosts(id) ON DELETE CASCADE,
+    name TEXT NOT NULL,
+    status TEXT NOT NULL,
+    payload_json TEXT NOT NULL,
+    UNIQUE(host_id, name)
+);
+CREATE TABLE IF NOT EXISTS downloads (
+    id INTEGER PRIMARY KEY,
+    scan_id TEXT NOT NULL REFERENCES scans(id) ON DELETE CASCADE,
+    share_id INTEGER NOT NULL REFERENCES shares(id) ON DELETE CASCADE,
+    remote_path_key TEXT,
+    payload_json TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS snaffler_matches (
+    id INTEGER PRIMARY KEY,
+    scan_id TEXT NOT NULL REFERENCES scans(id) ON DELETE CASCADE,
+    share_id INTEGER REFERENCES shares(id) ON DELETE CASCADE,
+    remote_path_key TEXT,
+    payload_json TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS matches_scan_share_idx ON snaffler_matches(scan_id, share_id);
+CREATE INDEX IF NOT EXISTS downloads_scan_share_idx ON downloads(scan_id, share_id);
+CREATE INDEX IF NOT EXISTS matches_lookup_idx ON snaffler_matches(scan_id, share_id, remote_path_key);
+CREATE INDEX IF NOT EXISTS downloads_lookup_idx ON downloads(scan_id, share_id, remote_path_key);
+"""
+
+
+def _execute_script(connection: sqlite3.Connection, script: str) -> None:
+    """Run a multi-statement script without ``executescript``'s implicit COMMIT."""
+    statement = ""
+    for line in script.splitlines(keepends=True):
+        statement += line
+        if sqlite3.complete_statement(statement):
+            connection.execute(statement)
+            statement = ""
+    if statement.strip():
+        connection.execute(statement)
+
+
+def _compact(connection: sqlite3.Connection) -> None:
+    """VACUUM into packed pages, then return the WAL's copy to the disk.
+
+    The temporary copy is kept in memory for databases up to 1 GiB so the
+    transient disk cost is the WAL alone. A failure (for example a full disk)
+    leaves the database valid, merely unpacked.
+    """
+    pages, page_size = (
+        int(connection.execute(f"PRAGMA {name}").fetchone()[0])
+        for name in ("page_count", "page_size")
+    )
+    in_memory = pages * page_size <= 1 << 30
+    if in_memory:
+        connection.execute("PRAGMA temp_store=MEMORY")
+    # Takes effect with this VACUUM; see ScanStore._configure.
+    connection.execute("PRAGMA auto_vacuum=INCREMENTAL")
+    try:
+        connection.execute("VACUUM")
+    except sqlite3.Error:
+        pass
+    finally:
+        if in_memory:
+            connection.execute("PRAGMA temp_store=DEFAULT")
+    connection.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+
+
+def _create_catalog(connection: sqlite3.Connection) -> None:
+    _execute_script(connection, _COMMON_DDL)
+    _execute_script(connection, _CATALOG_TABLES)
+    for statement in _CATALOG_WRITE_INDEXES:
+        connection.execute(statement)
+    _execute_script(connection, _CATALOG_TRIGGERS)
+    _execute_script(connection, _CATALOG_VIEWS)
+    connection.execute(
+        "INSERT OR IGNORE INTO metadata(key, value) VALUES (?, ?)",
+        (_PUBLIC_ID_KEY, secrets.randbits(63)),
+    )
 
 
 def _file_payload(row: sqlite3.Row) -> Dict[str, Any]:
@@ -259,12 +706,27 @@ class ScanStore:
         # share_id per (host, share): only _share_id resolves it; add_file hits
         # this cache instead of a hosts/shares JOIN per file.
         self._share_ids: Dict[Tuple[str, str], int] = {}
+        # Catalog directory and extension ids; bounded, refilled from SQL.
+        self._dir_ids: Dict[Tuple[str, str, str], int] = {}
+        self._ext_ids: Dict[str, int] = {}
+        # Discovery order of this scan's observations (resumes continue it).
+        self._seq = int(
+            self.connection.execute(
+                """SELECT coalesce(max((SELECT max(seq) FROM scan_observations o
+                                        WHERE o.share_id = s.id)), 0)
+                   FROM shares s JOIN hosts h ON h.id = s.host_id WHERE h.scan_id = ?""",
+                (self.scan_id,),
+            ).fetchone()[0]
+        )
 
     def _configure(self) -> None:
-        self.connection.execute("PRAGMA journal_mode=WAL")
         # Incremental auto-vacuum lets later deletes (resumed scans, pruned runs)
-        # return pages instead of leaving the file at its high-water mark.
+        # return pages instead of leaving the file at its high-water mark. It
+        # must precede journal_mode=WAL, which writes the header of a new file
+        # and would freeze auto_vacuum at NONE; existing files adopt it at
+        # their next VACUUM.
         self.connection.execute("PRAGMA auto_vacuum=INCREMENTAL")
+        self.connection.execute("PRAGMA journal_mode=WAL")
         self.connection.execute("PRAGMA foreign_keys=ON")
         self.connection.execute("PRAGMA synchronous=NORMAL")
         self.connection.execute("PRAGMA busy_timeout=5000")
@@ -275,281 +737,63 @@ class ScanStore:
             raise ValueError(
                 f"database schema {version} is newer than supported schema {SCHEMA_VERSION}"
             )
-        if version == 1:
-            self._migrate_v1_to_v2()
-            version = SCHEMA_VERSION
-        elif version == 2:
-            self._migrate_v2_to_v3()
-            version = 3
-        if version == 3:
-            self._migrate_v3_to_v4()
-        self.connection.executescript(_files_ddl("files"))
-        self.connection.executescript(
-            """
-            CREATE TABLE IF NOT EXISTS metadata (
-                key TEXT PRIMARY KEY,
-                value INTEGER NOT NULL
-            );
-            INSERT OR IGNORE INTO metadata(key, value) VALUES ('revision', 0);
-            CREATE TABLE IF NOT EXISTS scans (
-                id TEXT PRIMARY KEY,
-                short_id TEXT NOT NULL UNIQUE,
-                mode TEXT NOT NULL,
-                status TEXT NOT NULL,
-                started_at_utc TEXT NOT NULL,
-                updated_at_utc TEXT NOT NULL,
-                finished_at_utc TEXT,
-                run_dir TEXT NOT NULL,
-                domain TEXT NOT NULL DEFAULT '',
-                username TEXT NOT NULL DEFAULT '',
-                summary_json TEXT,
-                snaffler_summary_json TEXT
-            );
-            CREATE TABLE IF NOT EXISTS hosts (
-                id INTEGER PRIMARY KEY,
-                scan_id TEXT NOT NULL REFERENCES scans(id) ON DELETE CASCADE,
-                host TEXT NOT NULL,
-                display_name TEXT,
-                status TEXT NOT NULL,
-                error TEXT,
-                scan_timestamp_utc TEXT NOT NULL,
-                UNIQUE(scan_id, host)
-            );
-            CREATE TABLE IF NOT EXISTS shares (
-                id INTEGER PRIMARY KEY,
-                host_id INTEGER NOT NULL REFERENCES hosts(id) ON DELETE CASCADE,
-                name TEXT NOT NULL,
-                status TEXT NOT NULL,
-                payload_json TEXT NOT NULL,
-                UNIQUE(host_id, name)
-            );
-            CREATE TABLE IF NOT EXISTS scan_files (
-                scan_id TEXT NOT NULL REFERENCES scans(id) ON DELETE CASCADE,
-                share_id INTEGER NOT NULL REFERENCES shares(id) ON DELETE CASCADE,
-                file_id INTEGER NOT NULL REFERENCES files(id) ON DELETE CASCADE,
-                size_bytes INTEGER,
-                readable_size TEXT,
-                mtime_utc TEXT,
-                scan_timestamp_utc TEXT,
-                PRIMARY KEY(scan_id, file_id)
-            );
-            CREATE TABLE IF NOT EXISTS downloads (
-                id INTEGER PRIMARY KEY,
-                scan_id TEXT NOT NULL REFERENCES scans(id) ON DELETE CASCADE,
-                share_id INTEGER NOT NULL REFERENCES shares(id) ON DELETE CASCADE,
-                remote_path_key TEXT,
-                payload_json TEXT NOT NULL
-            );
-            CREATE TABLE IF NOT EXISTS snaffler_matches (
-                id INTEGER PRIMARY KEY,
-                scan_id TEXT NOT NULL REFERENCES scans(id) ON DELETE CASCADE,
-                share_id INTEGER REFERENCES shares(id) ON DELETE CASCADE,
-                remote_path_key TEXT,
-                payload_json TEXT NOT NULL
-            );
-            CREATE INDEX IF NOT EXISTS scan_files_scan_idx ON scan_files(scan_id, share_id);
-            CREATE INDEX IF NOT EXISTS scan_files_file_idx ON scan_files(file_id);
-            CREATE INDEX IF NOT EXISTS matches_scan_share_idx ON snaffler_matches(scan_id, share_id);
-            CREATE INDEX IF NOT EXISTS downloads_scan_share_idx ON downloads(scan_id, share_id);
-            CREATE INDEX IF NOT EXISTS matches_lookup_idx ON snaffler_matches(scan_id, share_id, remote_path_key);
-            CREATE INDEX IF NOT EXISTS downloads_lookup_idx ON downloads(scan_id, share_id, remote_path_key);
-            """
-        )
+        if 0 < version < SCHEMA_VERSION:
+            raise ValueError(
+                f"database schema {version} is not supported; "
+                f"recreate the workspace to upgrade to schema {SCHEMA_VERSION}"
+            )
+        _create_catalog(self.connection)
         self.connection.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
         self.connection.commit()
         # A fresh inventory has no rows yet: build_file_indexes() creates the
         # query indexes after the bulk load so their leaves are packed. A
         # reopened inventory already holds rows, so pack any missing index now.
-        if self.connection.execute("SELECT 1 FROM files LIMIT 1").fetchone():
+        if self.connection.execute("SELECT 1 FROM catalog_files LIMIT 1").fetchone():
             self.build_file_indexes()
-        # New inventories stay substring-indexed as they grow. Existing large
-        # inventories are backfilled by the WebUI's background worker.
+        # New inventories stay substring-indexed as they grow.
         if (
-            not self.connection.execute("SELECT 1 FROM files LIMIT 1").fetchone()
+            not self.connection.execute(
+                "SELECT 1 FROM catalog_files LIMIT 1"
+            ).fetchone()
             and search_supported()
         ):
             ensure_search_index(self.connection)
+            self.connection.commit()
 
     def build_file_indexes(self) -> None:
-        """Create the catalog query indexes once the bulk load has finished.
+        """Create the catalog sort indexes once the bulk load has finished.
 
         Creating them on an empty table and then inserting rows in discovery
         order leaves the B-tree leaves roughly 30% empty. Building them after
-        the rows exist lets SQLite sort and write packed leaves, which is worth
-        tens of MiB on a multi-million-row inventory. ``IF NOT EXISTS`` makes
-        this a cheap no-op when the indexes are already present.
+        the rows exist lets SQLite sort and write packed leaves. When anything
+        was built, the substring index is merged into one segment and the
+        planner statistics are refreshed. A no-op when everything exists.
         """
         with self._lock:
-            for statement in _FILES_INDEXES:
-                self.connection.execute(statement)
-            self.connection.commit()
-
-    def _migrate_v2_to_v3(self) -> None:
-        """Replace the wide catalog indexes with the narrow set.
-
-        The old sort indexes repeated remote_path or file_name as a tie-break,
-        which roughly doubled their size. Dropping them here lets
-        ``build_file_indexes`` recreate the narrow definitions packed.
-        """
-        with self._lock:
-            for name in _FILES_INDEXES_V2:
-                self.connection.execute(f"DROP INDEX IF EXISTS {name}")
-            self.connection.execute("PRAGMA user_version=3")
-            self.connection.commit()
-
-    def _migrate_v3_to_v4(self) -> None:
-        """Derive file_name, parent_path and unc_path from remote_path.
-
-        Rebuilds the catalog table so those columns become VIRTUAL generated
-        columns instead of three more stored copies of the path. Row ids are
-        preserved because ``scan_files`` references them. The same rebuild is
-        skipped when the columns are already generated (for example after the
-        v1 to v2 rebuild, which already writes the current shape).
-        """
-        connection = self.connection
-        hidden = {
-            str(row[1]): int(row[6])
-            for row in connection.execute("PRAGMA table_xinfo(files)")
-        }
-        if hidden.get("file_name", 0) in (2, 3):
-            connection.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
-            connection.commit()
-            return
-        with self._lock:
-            previous = connection.isolation_level
-            connection.isolation_level = None
-            connection.execute("PRAGMA foreign_keys=OFF")
-            try:
-                connection.execute("BEGIN IMMEDIATE")
-                for trigger in (
-                    "files_search_insert",
-                    "files_search_delete",
-                    "files_search_update",
-                ):
-                    connection.execute(f"DROP TRIGGER IF EXISTS {trigger}")
-                connection.execute("DROP TABLE IF EXISTS files_search")
-                connection.execute("DROP TABLE IF EXISTS files_v4")
-                connection.execute(_files_ddl("files_v4"))
-                connection.execute(
-                    "INSERT INTO files_v4(id,public_id,host,share,remote_path,"
-                    "extension,size_bytes,mtime_utc,scan_timestamp_utc) "
-                    "SELECT id,public_id,host,share,remote_path,extension,"
-                    "size_bytes,mtime_utc,scan_timestamp_utc FROM files"
+            existing = {
+                str(row[0])
+                for row in self.connection.execute(
+                    "SELECT name FROM sqlite_master WHERE type='index'"
                 )
-                connection.execute("DROP TABLE files")
-                connection.execute("ALTER TABLE files_v4 RENAME TO files")
-                for statement in _FILES_INDEXES:
-                    connection.execute(statement)
-                connection.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
-                connection.execute("COMMIT")
-            except BaseException:
-                connection.execute("ROLLBACK")
-                raise
-            finally:
-                connection.execute("PRAGMA foreign_keys=ON")
-                connection.isolation_level = previous
-            try:
-                connection.execute("VACUUM")
-            except sqlite3.Error:
-                pass
-
-    def _migrate_v1_to_v2(self) -> None:
-        """Rebuild the inventory around non-duplicated file metadata.
-
-        Version 1 stored ``search_text`` and ``readable_size`` as real columns
-        and repeated the whole file payload in ``scan_files``. The rebuild
-        preserves row ids (``scan_files`` references them) and assumes no
-        scanner is live: the workspace lock is held before this runs.
-        """
-        connection = self.connection
-        previous = connection.isolation_level
-        connection.isolation_level = None
-        # RENAME/DROP with foreign keys on would cascade through scan_files.
-        connection.execute("PRAGMA foreign_keys=OFF")
-        try:
-            connection.execute("BEGIN IMMEDIATE")
-            for trigger in (
-                "files_search_insert",
-                "files_search_delete",
-                "files_search_update",
-            ):
-                connection.execute(f"DROP TRIGGER IF EXISTS {trigger}")
-            connection.execute("DROP TABLE IF EXISTS files_search")
-            connection.execute("DROP TABLE IF EXISTS files_v2")
-            connection.execute(_files_ddl("files_v2"))
-            connection.execute(
-                "INSERT INTO files_v2(id,public_id,host,share,remote_path,"
-                "extension,size_bytes,mtime_utc,scan_timestamp_utc) "
-                "SELECT id,public_id,host,share,remote_path,extension,"
-                "size_bytes,mtime_utc,scan_timestamp_utc FROM files"
-            )
-            connection.execute("DROP TABLE files")
-            connection.execute("ALTER TABLE files_v2 RENAME TO files")
-            for statement in _FILES_INDEXES:
-                connection.execute(statement)
-            columns = {
-                str(row[1])
-                for row in connection.execute("PRAGMA table_info(scan_files)")
             }
-            for name, definition in (
-                ("size_bytes", "INTEGER"),
-                ("readable_size", "TEXT"),
-                ("mtime_utc", "TEXT"),
-                ("scan_timestamp_utc", "TEXT"),
-            ):
-                if name not in columns:
-                    connection.execute(
-                        f"ALTER TABLE scan_files ADD COLUMN {name} {definition}"
-                    )
-            if "payload_json" in columns:
-                # Keep the per-scan observation (size, mtime, timestamp) so a
-                # historical ranking still sees the values it saw then; only
-                # the duplicated immutable metadata is dropped.
-                connection.execute(
-                    "UPDATE scan_files SET "
-                    "size_bytes=COALESCE(size_bytes,"
-                    "json_extract(payload_json,'$.size_bytes')), "
-                    "readable_size=COALESCE(readable_size,"
-                    "json_extract(payload_json,'$.readable_size')), "
-                    "mtime_utc=COALESCE(mtime_utc,"
-                    "json_extract(payload_json,'$.mtime_utc')), "
-                    "scan_timestamp_utc=COALESCE(scan_timestamp_utc,"
-                    "json_extract(payload_json,'$.scan_timestamp_utc'))"
-                )
-                connection.execute(
-                    "ALTER TABLE scan_files DROP COLUMN payload_json"
-                )
-            if (
-                connection.execute(
-                    "SELECT 1 FROM sqlite_master WHERE name='directory_work'"
-                ).fetchone()
-                is not None
-            ):
-                entries = connection.execute(
-                    "SELECT rowid,entries_json FROM directory_work "
-                    "WHERE entries_json IS NOT NULL AND typeof(entries_json)='text'"
-                ).fetchall()
-                for rowid, value in entries:
-                    connection.execute(
-                        "UPDATE directory_work SET entries_json=? WHERE rowid=?",
-                        (zlib.compress(value.encode("utf-8"), 6), rowid),
-                    )
-            connection.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
-            connection.execute("COMMIT")
-        except BaseException:
-            connection.execute("ROLLBACK")
-            raise
-        finally:
-            connection.execute("PRAGMA foreign_keys=ON")
-        try:
-            # Rebuilding frees the old payload pages into the freelist. VACUUM
-            # returns them and applies the incremental auto-vacuum mode used for
-            # later deletes. One-time cost on first open; a disk that cannot hold
-            # the second copy keeps the pages in the freelist instead.
-            connection.execute("VACUUM")
-        except sqlite3.Error:
-            pass
-        connection.isolation_level = previous
+            missing = [
+                statement
+                for statement in _CATALOG_INDEXES
+                if statement.split(" IF NOT EXISTS ")[1].split()[0] not in existing
+            ]
+            if not missing:
+                return
+            for statement in missing:
+                self.connection.execute(statement)
+            optimize_search_index(self.connection)
+            self.connection.execute("PRAGMA analysis_limit=1000")
+            self.connection.execute("ANALYZE")
+            self.connection.commit()
+            # First build after a bulk load: the writer's lookup index and the
+            # WITHOUT ROWID observation b-trees were filled in discovery
+            # order (~88% full) and the FTS merge freed its old segments.
+            # One rewrite packs them; later scans only append.
+            _compact(self.connection)
 
     def _select_resume(self, value: str, mode: str) -> Tuple[str, str, str]:
         if value:
@@ -678,50 +922,105 @@ class ScanStore:
         self._share_ids[key] = value
         return value
 
+    def _dir_id(self, host: str, share: str, folder: str) -> int:
+        key = (host, share, folder)
+        cached = self._dir_ids.get(key)
+        if cached is not None:
+            return cached
+        row = self.connection.execute(
+            "SELECT id FROM catalog_dirs WHERE host=?1 COLLATE NOCASE "
+            "AND share=?2 COLLATE NOCASE AND path=?3 COLLATE NOCASE "
+            "AND host=?1 AND share=?2 AND path=?3",
+            key,
+        ).fetchone()
+        if row is None:
+            value = int(
+                self.connection.execute(
+                    "INSERT INTO catalog_dirs(host, share, path) VALUES (?, ?, ?) RETURNING id",
+                    key,
+                ).fetchone()[0]
+            )
+        else:
+            value = int(row[0])
+        if len(self._dir_ids) >= 100_000:
+            self._dir_ids.clear()
+        self._dir_ids[key] = value
+        return value
+
+    def _ext_id(self, extension: str) -> int:
+        cached = self._ext_ids.get(extension)
+        if cached is not None:
+            return cached
+        row = self.connection.execute(
+            "SELECT id FROM catalog_extensions WHERE extension=?", (extension,)
+        ).fetchone()
+        if row is None:
+            value = int(
+                self.connection.execute(
+                    "INSERT INTO catalog_extensions(extension) VALUES (?) RETURNING id",
+                    (extension,),
+                ).fetchone()[0]
+            )
+        else:
+            value = int(row[0])
+        self._ext_ids[extension] = value
+        return value
+
     def add_file(self, host: str, share: str, payload: Dict[str, Any]) -> bool:
         remote = str(payload["remote_path"])
-        # file_name, parent_path and unc_path are derived from remote_path by the
-        # table, so only the extension is computed here: Path.suffix semantics
-        # (dotfiles, .tar.gz) cannot be reproduced by a generated expression.
+        # The directory part keeps its trailing "/" so remote_path is exactly
+        # path || name. The extension is still taken from the payload's file
+        # name: Path.suffix semantics (dotfiles, .tar.gz) are not a function of
+        # the stored name alone.
+        cut = remote.rfind("/") + 1
+        folder, name = remote[:cut], remote[cut:]
         extension = Path(str(payload["file_name"])).suffix.lower()
+        size = int(payload.get("size_bytes") or 0)
+        mtime = encode_timestamp(str(payload.get("mtime_utc") or ""))
+        stamp = encode_timestamp(str(payload.get("scan_timestamp_utc") or ""))
         with self._lock:
+            dir_id = self._dir_id(host, share, folder)
+            values = (self._ext_id(extension), size, *mtime, *stamp)
             row = self.connection.execute(
-                """INSERT INTO files
-                   (public_id, host, share, remote_path, extension, size_bytes,
-                    mtime_utc, scan_timestamp_utc)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                   ON CONFLICT(host, share, remote_path) DO UPDATE SET
-                    extension=excluded.extension, size_bytes=excluded.size_bytes,
-                    mtime_utc=excluded.mtime_utc,
-                    scan_timestamp_utc=excluded.scan_timestamp_utc
-                   RETURNING id""",
-                (
-                    secrets.token_urlsafe(16),
-                    host,
-                    share,
-                    remote,
-                    extension,
-                    int(payload.get("size_bytes") or 0),
-                    str(payload.get("mtime_utc") or ""),
-                    str(payload.get("scan_timestamp_utc") or ""),
-                ),
+                "SELECT id, ext_id, size_bytes, mtime, mtime_us, scan_ts, scan_ts_us "
+                "FROM catalog_files WHERE dir_id=? AND name=? COLLATE NOCASE AND name=?",
+                (dir_id, name, name),
             ).fetchone()
-            file_id = int(row[0])
+            if row is None:
+                file_id = int(
+                    self.connection.execute(
+                        "INSERT INTO catalog_files(dir_id, name, ext_id, size_bytes, mtime, "
+                        "mtime_us, scan_ts, scan_ts_us) VALUES (?, ?, ?, ?, ?, ?, ?, ?) "
+                        "RETURNING id",
+                        (dir_id, name, *values),
+                    ).fetchone()[0]
+                )
+            else:
+                file_id = int(row[0])
+                if tuple(row[1:]) != values:
+                    self.connection.execute(
+                        "UPDATE catalog_files SET ext_id=?, size_bytes=?, mtime=?, mtime_us=?, "
+                        "scan_ts=?, scan_ts_us=? WHERE id=?",
+                        (*values, file_id),
+                    )
             share_id = self._share_id(host, share)
+            # The observation equals the file row just written, so it is
+            # stored as shared (NULL) values; see scan_observations.
             cursor = self.connection.execute(
-                """INSERT OR IGNORE INTO scan_files
-                   (scan_id, share_id, file_id, size_bytes, readable_size,
-                    mtime_utc, scan_timestamp_utc) VALUES (?, ?, ?, ?, ?, ?, ?)""",
-                (
-                    self.scan_id,
-                    share_id,
-                    file_id,
-                    int(payload.get("size_bytes") or 0),
-                    str(payload.get("readable_size") or ""),
-                    str(payload.get("mtime_utc") or ""),
-                    str(payload.get("scan_timestamp_utc") or ""),
-                ),
+                "INSERT OR IGNORE INTO scan_observations(file_id, share_id, seq, readable_size) "
+                "VALUES (:file, :share, :seq, CASE WHEN :readable IS "
+                + _readable_sql(":size")
+                + " THEN NULL ELSE :readable END)",
+                {
+                    "file": file_id,
+                    "share": share_id,
+                    "seq": self._seq + 1,
+                    "readable": str(payload.get("readable_size") or ""),
+                    "size": size,
+                },
             )
+            if cursor.rowcount > 0:
+                self._seq += 1
             self._touch()
             return cursor.rowcount > 0
 
@@ -744,7 +1043,12 @@ class ScanStore:
         with self._lock:
             cursor = self.connection.execute(
                 "INSERT INTO downloads(scan_id, share_id, remote_path_key, payload_json) VALUES (?, ?, ?, ?)",
-                (self.scan_id, self._share_id(host, share), _path_key(stored.get("remote_path")), _json(stored)),
+                (
+                    self.scan_id,
+                    self._share_id(host, share),
+                    _path_key(stored.get("remote_path")),
+                    _json(stored),
+                ),
             )
             self._touch()
             if cursor.lastrowid is None:
@@ -756,7 +1060,12 @@ class ScanStore:
         with self._lock:
             self.connection.execute(
                 "UPDATE downloads SET remote_path_key=?, payload_json=? WHERE id=? AND scan_id=?",
-                (_path_key(stored.get("remote_path")), _json(stored), download_id, self.scan_id),
+                (
+                    _path_key(stored.get("remote_path")),
+                    _json(stored),
+                    download_id,
+                    self.scan_id,
+                ),
             )
             self._touch()
 
@@ -772,7 +1081,12 @@ class ScanStore:
             self.connection.execute(
                 """INSERT INTO snaffler_matches(scan_id, share_id, remote_path_key, payload_json)
                    VALUES (?, ?, ?, ?)""",
-                (self.scan_id, share_id, _path_key(payload.get("remote_path")), _json(payload)),
+                (
+                    self.scan_id,
+                    share_id,
+                    _path_key(payload.get("remote_path")),
+                    _json(payload),
+                ),
             )
             self._touch()
 
@@ -790,11 +1104,13 @@ class ScanStore:
                    (SELECT COUNT(*) FROM hosts WHERE scan_id=?),
                    (SELECT COUNT(*) FROM shares s JOIN hosts h ON h.id=s.host_id
                       WHERE h.scan_id=?),
-                   (SELECT COUNT(*) FROM scan_files WHERE scan_id=?),
+                   ((SELECT COUNT(*) FROM scan_observations o JOIN shares s ON s.id=o.share_id
+                       JOIN hosts h ON h.id=s.host_id WHERE h.scan_id=?)
+                    + (SELECT COUNT(*) FROM scan_files_unmapped WHERE scan_id=?)),
                    (SELECT COUNT(*) FROM downloads WHERE scan_id=?
                       AND {_SCAN_DOWNLOAD_FILTER}),
                    (SELECT COUNT(*) FROM snaffler_matches WHERE scan_id=?)""",
-                (self.scan_id,) * 5,
+                (self.scan_id,) * 6,
             ).fetchone()
             download_rows = [
                 json.loads(row[0])
@@ -913,15 +1229,10 @@ class ScanStore:
                     property_value("status", share["status"], not first_property)
                     handle.write("," + _json("discovered_files") + ":[")
                     rows = self.connection.execute(
-                        """SELECT f.host, f.share, f.remote_path, f.unc_path,
-                                  f.file_name,
-                                  COALESCE(sf.size_bytes, f.size_bytes) AS size_bytes,
-                                  COALESCE(sf.readable_size, f.readable_size) AS readable_size,
-                                  COALESCE(sf.mtime_utc, f.mtime_utc) AS mtime_utc,
-                                  COALESCE(sf.scan_timestamp_utc, f.scan_timestamp_utc) AS scan_timestamp_utc
-                           FROM scan_files sf JOIN files f ON f.id=sf.file_id
-                           WHERE sf.scan_id=? AND sf.share_id=? ORDER BY sf.rowid""",
-                        (self.scan_id, share["id"]),
+                        # Every row of this scan's share is a mapped observation.
+                        f"SELECT {_OBSERVED_COLUMNS} {_OBSERVED_FROM} "
+                        "WHERE o.share_id=? ORDER BY o.seq",
+                        (share["id"],),
                     )
                     for index, row in enumerate(rows):
                         if index:
@@ -1080,14 +1391,12 @@ class ScanStore:
             (
                 {**_file_payload(row), "can_read": None, "can_write": None}
                 for row in self.connection.execute(
-                    """SELECT f.host, f.share, f.remote_path, f.unc_path,
-                              f.file_name,
-                              COALESCE(sf.size_bytes, f.size_bytes) AS size_bytes,
-                              COALESCE(sf.readable_size, f.readable_size) AS readable_size,
-                              COALESCE(sf.mtime_utc, f.mtime_utc) AS mtime_utc,
-                              COALESCE(sf.scan_timestamp_utc, f.scan_timestamp_utc) AS scan_timestamp_utc
-                       FROM scan_files sf JOIN files f ON f.id=sf.file_id
-                       WHERE sf.scan_id=? ORDER BY sf.rowid""",
+                    f"""SELECT {_OBSERVED_COLUMNS} {_OBSERVED_FROM}
+                       WHERE o.share_id IN (SELECT s.id FROM shares s
+                                            JOIN hosts h ON h.id=s.host_id WHERE h.scan_id=?1)
+                       UNION ALL
+                       SELECT {_UNMAPPED_COLUMNS} {_UNMAPPED_FROM} WHERE u.scan_id=?1
+                       ORDER BY seq""",
                     (self.scan_id,),
                 )
             ),
@@ -1156,45 +1465,12 @@ class ScanStore:
                 self._lock_file.close()
 
 
-
-def migrate_inventory(path: Path) -> bool:
-    """Bring an inventory database to the current schema before a reader opens it.
-
-    Safe to call with a triage/result database path: a migration requires both
-    schema version 1 and a ``files`` table, so unrelated databases are left
-    alone. Returns True when the migration ran.
-    """
-    database = Path(path)
-    if not database.is_file():
-        return False
-    connection = sqlite3.connect(database, timeout=5)
-    try:
-        version = int(connection.execute("PRAGMA user_version").fetchone()[0])
-        if version not in (1, 2, 3):
-            return False
-        if (
-            connection.execute(
-                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='files'"
-            ).fetchone()
-            is None
-        ):
-            return False
-        store = ScanStore.__new__(ScanStore)
-        store.connection = connection
-        store._lock = threading.RLock()
-        if version == 1:
-            # The v1 rebuild already writes the current table shape.
-            store._migrate_v1_to_v2()
-        elif version == 2:
-            store._migrate_v2_to_v3()
-            store._migrate_v3_to_v4()
-            store.build_file_indexes()
-        else:
-            store._migrate_v3_to_v4()
-            store.build_file_indexes()
-        return True
-    finally:
-        connection.close()
-
-
-__all__ = ["SCHEMA_VERSION", "ScanStore", "WorkspaceBusyError", "migrate_inventory"]
+__all__ = [
+    "SCHEMA_VERSION",
+    "ScanStore",
+    "WorkspaceBusyError",
+    "public_id",
+    "public_id_key",
+    "register_public_id_function",
+    "resolve_public_id",
+]

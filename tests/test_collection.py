@@ -8,7 +8,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from shrawler.collection import CollectionBusyError, CollectionQueue, main
-from shrawler.store import ScanStore
+from shrawler.store import ScanStore, public_id, public_id_key
 from shrawler.triage.rules import load
 from shrawler.triage.storage import connect_readonly, rank
 
@@ -112,11 +112,11 @@ class CollectionTests(unittest.TestCase):
         store.finish("completed", {})
         store.close()
         with connect_readonly(self.database) as source:
-            return str(
-                source.execute(
-                    "SELECT public_id FROM files WHERE remote_path=?", (path,)
-                ).fetchone()[0]
-            )
+            key = public_id_key(source)
+            row = source.execute(
+                "SELECT id FROM files WHERE remote_path=?", (path,)
+            ).fetchone()
+            return public_id(key, int(row[0]))
 
     def test_unrated_selection_becomes_an_ad_hoc_manifest(self):
         late = self.capture_later("/Deployments/late.config")

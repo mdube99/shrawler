@@ -36,12 +36,20 @@ from .nemesis import DeliveryStore, NemesisConfig
 from .output import escape_terminal
 from .search_index import (
     available as search_index_available,
+    bounded_ids as search_bounded_ids,
     candidates as search_candidates,
     ensure as ensure_search_index,
+    plan_term as search_plan_term,
+    predicate as search_predicate,
     supported as search_index_supported,
 )
 from .smb import SMBAuth, close_smb, connect_smb
-from .store import SCHEMA_VERSION, migrate_inventory
+from .store import (
+    SCHEMA_VERSION,
+    public_id,
+    public_id_key,
+    resolve_public_id,
+)
 from .triage.jev.config import PRIORITY_NAMES, JevConfig, priority_score
 from .triage.jev.service import JevBusyError, JevService
 from .triage.jev.storage import JevStore, assessment_path
@@ -290,10 +298,12 @@ class FileRecord:
     jev_priority_name: str = ""
     combined_score: Optional[int] = None
     combined_coverage: str = "none"
+    catalog_id: int = field(default=0, repr=False, compare=False)
 
     def public(self) -> Dict[str, Any]:
         value = asdict(self)
         value.pop("search_text")
+        value.pop("catalog_id", None)
         value["rule_matches"] = list(self.rule_matches)
         value["permissions"] = self.permissions or {}
         return value
@@ -835,12 +845,9 @@ class DatabaseIndex:
         self.path = path.expanduser().resolve()
         if not self.path.is_file():
             raise ValueError(f"DATABASE does not exist: {self.path}")
-        # A reader may be the first process to touch a pre-normalization
-        # inventory; migrate it before the schema check rejects it.
-        migrate_inventory(self.path)
-        # The ranking and assessment files are keyed by catalog integer ids in
-        # the current schema; migrate them once at startup rather than on every
-        # query.
+        self._public_id_key: Optional[bytes] = None
+        # The ranking and assessment files are keyed by catalog integer ids;
+        # ensure any legacy result schema is rejected clearly before queries.
         _ensure_result_schema(triage_result_path(self.path), self.path)
         jev_path = assessment_path(self.path)
         if jev_path.is_file():
@@ -854,15 +861,39 @@ class DatabaseIndex:
         with self._connect() as connection:
             version = int(connection.execute("PRAGMA user_version").fetchone()[0])
             if version != SCHEMA_VERSION:
-                raise ValueError(f"unsupported Shrawler database schema {version}")
+                raise ValueError(
+                    f"database schema {version} is not supported; "
+                    f"recreate the workspace to upgrade to schema {SCHEMA_VERSION}"
+                )
+            self._public_id_key = public_id_key(connection)
             connection.execute("SELECT 1 FROM files LIMIT 1").fetchone()
 
     SORT_INDEXES = (
-        ("path", "files_path_sort_idx", "CREATE INDEX IF NOT EXISTS files_path_sort_idx ON files(host COLLATE NOCASE, share COLLATE NOCASE, remote_path COLLATE NOCASE, public_id)"),
-        ("filename", "files_name_sort_idx", "CREATE INDEX IF NOT EXISTS files_name_sort_idx ON files(file_name COLLATE NOCASE, public_id)"),
-        ("file type", "files_type_sort_idx", "CREATE INDEX IF NOT EXISTS files_type_sort_idx ON files(extension COLLATE NOCASE, public_id)"),
-        ("size", "files_size_sort_idx", "CREATE INDEX IF NOT EXISTS files_size_sort_idx ON files(size_bytes, public_id)"),
-        ("modified date", "files_modified_sort_idx", "CREATE INDEX IF NOT EXISTS files_modified_sort_idx ON files(mtime_utc, public_id)"),
+        (
+            "path",
+            "catalog_dirs_sort_idx",
+            "CREATE INDEX IF NOT EXISTS catalog_dirs_sort_idx ON catalog_dirs(host COLLATE NOCASE, share COLLATE NOCASE, path COLLATE NOCASE)",
+        ),
+        (
+            "filename",
+            "catalog_files_name_idx",
+            "CREATE INDEX IF NOT EXISTS catalog_files_name_idx ON catalog_files(name COLLATE NOCASE)",
+        ),
+        (
+            "file type",
+            "catalog_files_ext_idx",
+            "CREATE INDEX IF NOT EXISTS catalog_files_ext_idx ON catalog_files(ext_id)",
+        ),
+        (
+            "size",
+            "catalog_files_size_idx",
+            "CREATE INDEX IF NOT EXISTS catalog_files_size_idx ON catalog_files(size_bytes)",
+        ),
+        (
+            "modified date",
+            "catalog_files_mtime_idx",
+            "CREATE INDEX IF NOT EXISTS catalog_files_mtime_idx ON catalog_files(mtime, mtime_us)",
+        ),
     )
 
     def missing_sort_indexes(self) -> List[Tuple[str, str]]:
@@ -873,7 +904,11 @@ class DatabaseIndex:
                     "SELECT name FROM sqlite_master WHERE type='index'"
                 )
             }
-        return [(label, statement) for label, name, statement in self.SORT_INDEXES if name not in existing]
+        return [
+            (label, statement)
+            for label, name, statement in self.SORT_INDEXES
+            if name not in existing
+        ]
 
     def ensure_sort_indexes(
         self, progress: Optional[Callable[[str, int, int], None]] = None
@@ -882,7 +917,9 @@ class DatabaseIndex:
         statements = self.missing_sort_indexes()
         connection = sqlite3.connect(self.path, timeout=60)
         try:
-            connection.create_function("path_key", 1, self._path_key, deterministic=True)
+            connection.create_function(
+                "path_key", 1, self._path_key, deterministic=True
+            )
             connection.execute("PRAGMA busy_timeout=60000")
             for position, (label, statement) in enumerate(statements, 1):
                 if progress:
@@ -898,12 +935,18 @@ class DatabaseIndex:
         """Backfill indexed evidence paths for databases created before this feature."""
         connection = sqlite3.connect(self.path, timeout=60)
         try:
-            connection.create_function("path_key", 1, self._path_key, deterministic=True)
+            connection.create_function(
+                "path_key", 1, self._path_key, deterministic=True
+            )
             connection.execute("PRAGMA busy_timeout=60000")
             for position, table in enumerate(("snaffler_matches", "downloads"), 1):
-                columns = {row[1] for row in connection.execute(f"PRAGMA table_info({table})")}
+                columns = {
+                    row[1] for row in connection.execute(f"PRAGMA table_info({table})")
+                }
                 if "remote_path_key" not in columns:
-                    connection.execute(f"ALTER TABLE {table} ADD COLUMN remote_path_key TEXT")
+                    connection.execute(
+                        f"ALTER TABLE {table} ADD COLUMN remote_path_key TEXT"
+                    )
                     connection.commit()
                 if progress:
                     progress(f"{table} evidence", position, 2)
@@ -983,10 +1026,11 @@ class DatabaseIndex:
             if part
         )
 
-    @staticmethod
-    def _record(row: sqlite3.Row) -> FileRecord:
-        return FileRecord(
-            str(row["public_id"]),
+    def _record(self, row: sqlite3.Row) -> FileRecord:
+        assert self._public_id_key is not None
+        file_id = int(row["id"])
+        record = FileRecord(
+            public_id(self._public_id_key, file_id),
             str(row["host"]),
             str(row["share"]),
             str(row["remote_path"]),
@@ -999,21 +1043,30 @@ class DatabaseIndex:
             str(row["scan_timestamp_utc"]),
             str(row["search_text"]),
         )
+        record.catalog_id = file_id
+        return record
 
     @staticmethod
     def _latest_observation() -> str:
-        return """(SELECT observation.rowid FROM scan_files observation
-                   JOIN scans observation_scan ON observation_scan.id=observation.scan_id
+        # Query the normalized observation table directly: the scan_files view
+        # adds joins that defeat the (file_id, share_id) primary key and force a
+        # full scan in this correlated subquery.
+        return """(SELECT observation.share_id FROM scan_observations observation
+                   JOIN shares observation_share ON observation_share.id=observation.share_id
+                   JOIN hosts observation_host ON observation_host.id=observation_share.host_id
+                   JOIN scans observation_scan ON observation_scan.id=observation_host.scan_id
                    WHERE observation.file_id=files.id
-                   ORDER BY observation_scan.started_at_utc DESC, observation.rowid DESC
+                   ORDER BY observation_scan.started_at_utc DESC, observation.seq DESC
                    LIMIT 1)"""
 
     @classmethod
     def _evidence_join(cls, table: str) -> str:
         # table is an internal constant, never a request parameter.
-        return f"""JOIN scan_files sf ON sf.file_id=files.id
-                       AND sf.rowid={cls._latest_observation()}
-                   JOIN {table} evidence ON evidence.scan_id=sf.scan_id
+        return f"""JOIN scan_observations sf ON sf.file_id=files.id
+                       AND sf.share_id={cls._latest_observation()}
+                   JOIN shares sf_share ON sf_share.id=sf.share_id
+                   JOIN hosts sf_host ON sf_host.id=sf_share.host_id
+                   JOIN {table} evidence ON evidence.scan_id=sf_host.scan_id
                        AND evidence.share_id=sf.share_id
                         AND evidence.remote_path_key=path_key(files.remote_path)"""
 
@@ -1028,19 +1081,28 @@ class DatabaseIndex:
     def _observation_target(
         connection: sqlite3.Connection, public_id: str
     ) -> Optional[sqlite3.Row]:
+        file_id = resolve_public_id(connection, public_id)
+        if file_id is None:
+            return None
         return connection.execute(
-            """SELECT sf.scan_id AS scan_id, sf.share_id AS share_id,
+            """SELECT sf_host.scan_id AS scan_id, sf.share_id AS share_id,
                       files.remote_path AS remote_path
                FROM files
-               JOIN scan_files sf ON sf.file_id=files.id
-                 AND sf.rowid=(SELECT observation.rowid FROM scan_files observation
+               JOIN scan_observations sf ON sf.file_id=files.id
+                 AND sf.share_id=(SELECT observation.share_id FROM scan_observations observation
+                     JOIN shares observation_share
+                       ON observation_share.id=observation.share_id
+                     JOIN hosts observation_host
+                       ON observation_host.id=observation_share.host_id
                      JOIN scans observation_scan
-                       ON observation_scan.id=observation.scan_id
+                       ON observation_scan.id=observation_host.scan_id
                      WHERE observation.file_id=files.id
                      ORDER BY observation_scan.started_at_utc DESC,
-                              observation.rowid DESC LIMIT 1)
-               WHERE files.public_id=?""",
-            (public_id,),
+                              observation.seq DESC LIMIT 1)
+               JOIN shares sf_share ON sf_share.id=sf.share_id
+               JOIN hosts sf_host ON sf_host.id=sf_share.host_id
+               WHERE files.id=?""",
+            (file_id,),
         ).fetchone()
 
     @staticmethod
@@ -1154,36 +1216,40 @@ class DatabaseIndex:
         """Load only the selected files' latest evidence in bounded SQL batches."""
         with self._connect() as connection:
             for offset in range(0, len(records), 400):
-                batch = {record.id: record for record in records[offset : offset + 400]}
+                batch = {
+                    record.catalog_id: record
+                    for record in records[offset : offset + 400]
+                }
                 placeholders = ",".join("?" for _ in batch)
-                selected = f" WHERE files.public_id IN ({placeholders})"
+                selected = f" WHERE files.id IN ({placeholders})"
                 parameters = list(batch)
                 observations = connection.execute(
-                    f"""SELECT files.public_id, share.payload_json,
+                    f"""SELECT files.id, share.payload_json,
                                scan.started_at_utc
-                        FROM files JOIN scan_files sf ON sf.file_id=files.id
-                            AND sf.rowid={self._latest_observation()}
+                        FROM files JOIN scan_observations sf ON sf.file_id=files.id
+                            AND sf.share_id={self._latest_observation()}
                         JOIN shares share ON share.id=sf.share_id
-                        JOIN scans scan ON scan.id=sf.scan_id"""
+                        JOIN hosts sf_host ON sf_host.id=share.host_id
+                        JOIN scans scan ON scan.id=sf_host.scan_id"""
                     + selected,
                     parameters,
                 )
                 for row in observations:
-                    record = batch[str(row[0])]
+                    record = batch[int(row[0])]
                     payload: Dict[str, Any] = json.loads(row[1])
                     record.permissions = payload.get("permissions") or {}
                     record.collection_status = "not_collected"
                     record.metadata_scan_timestamp_utc = str(row[2])
                 for table in ("snaffler_matches", "downloads"):
                     evidence_rows = connection.execute(
-                        "SELECT files.public_id, evidence.payload_json FROM files "
+                        "SELECT files.id, evidence.payload_json FROM files "
                         + self._evidence_join(table)
                         + selected
                         + " ORDER BY evidence.id",
                         parameters,
                     )
                     for row in evidence_rows:
-                        record = batch[str(row[0])]
+                        record = batch[int(row[0])]
                         detail: Dict[str, Any] = json.loads(row[1])
                         if table == "snaffler_matches":
                             record.rule_matches += (detail,)
@@ -1191,7 +1257,9 @@ class DatabaseIndex:
                         count = detail.get("download_count")
                         row_count = int(count) if count is not None else 1
                         if row_count > 0:
-                            record.download_count = max(record.download_count, row_count)
+                            record.download_count = max(
+                                record.download_count, row_count
+                            )
                             record.collection_status = "collected"
                             record.collection_detail = detail
                             record.downloaded_at_utc = str(
@@ -1296,9 +1364,9 @@ class DatabaseIndex:
         ):
             if names:
                 clauses.append(
-                    f"""{prefix}EXISTS (SELECT 1 FROM scan_files sf
+                    f"""{prefix}EXISTS (SELECT 1 FROM scan_observations sf
                     JOIN shares sh ON sh.id=sf.share_id
-                    WHERE sf.file_id=files.id AND sf.rowid={cls._latest_observation()}
+                    WHERE sf.file_id=files.id AND sf.share_id={cls._latest_observation()}
                     AND ("""
                     + " OR ".join("json_extract(sh.payload_json, ?)=1" for _ in names)
                     + "))"
@@ -1359,19 +1427,23 @@ class DatabaseIndex:
                 "hosts": [
                     str(row[0])
                     for row in connection.execute(
-                        "SELECT DISTINCT host FROM files ORDER BY host COLLATE NOCASE"
+                        "SELECT host FROM catalog_dirs GROUP BY host "
+                        "HAVING sum(file_count) > 0 ORDER BY host COLLATE NOCASE, host"
                     )
                 ],
                 "shares": [
                     str(row[0])
                     for row in connection.execute(
-                        "SELECT DISTINCT share FROM files ORDER BY share COLLATE NOCASE"
+                        "SELECT share FROM catalog_dirs GROUP BY share "
+                        "HAVING sum(file_count) > 0 ORDER BY share COLLATE NOCASE, share"
                     )
                 ],
                 "extensions": [
                     str(row[0])
                     for row in connection.execute(
-                        "SELECT DISTINCT extension FROM files ORDER BY extension"
+                        "SELECT extension FROM catalog_extensions e WHERE EXISTS "
+                        "(SELECT 1 FROM catalog_files WHERE ext_id = e.id) "
+                        "ORDER BY extension"
                     )
                 ],
                 "rules": [
@@ -1420,7 +1492,8 @@ class DatabaseIndex:
                 file_count, host_count = self._status_cache[1:]
             else:
                 counts = connection.execute(
-                    "SELECT COUNT(*), COUNT(DISTINCT host) FROM files"
+                    "SELECT coalesce(sum(file_count), 0), count(DISTINCT host) "
+                    "FROM catalog_dirs WHERE file_count > 0"
                 ).fetchone()
                 file_count, host_count = int(counts[0]), int(counts[1])
                 self._status_cache = (now, file_count, host_count)
@@ -1533,10 +1606,172 @@ class DatabaseIndex:
 
     def get(self, public_id: str) -> Optional[FileRecord]:
         with self._connect() as connection:
+            file_id = resolve_public_id(connection, public_id)
+            if file_id is None:
+                return None
             row = connection.execute(
-                "SELECT * FROM files WHERE public_id=?", (public_id,)
+                "SELECT * FROM files WHERE id=?", (file_id,)
             ).fetchone()
         return self._enrich([self._record(row)])[0] if row else None
+
+    def _search_catalog(
+        self,
+        q: str,
+        host: FacetValue,
+        share: FacetValue,
+        extension: FacetValue,
+        page: int,
+        per_page: int,
+        sort: str,
+        direction: str,
+        include_total: bool,
+    ) -> Dict[str, Any]:
+        """Index-backed catalog search: resolve ids from the normalized tables.
+
+        Only used when no ranking/assessment run and no evidence facet is in
+        play; the presentation columns are still rendered through the ``files``
+        view. Sorting walks the directory/name/size indexes, so a deep page
+        never materializes a temporary sort.
+        """
+        if direction not in {"asc", "desc"}:
+            raise ValueError("Invalid inventory sort direction")
+        order_keys = {
+            "path": [
+                "d.host COLLATE NOCASE",
+                "d.share COLLATE NOCASE",
+                "d.path COLLATE NOCASE",
+                "d.id",
+                "f.name COLLATE NOCASE",
+                "f.id",
+            ],
+            "location": [
+                "d.host COLLATE NOCASE",
+                "d.share COLLATE NOCASE",
+                "d.path COLLATE NOCASE",
+                "d.id",
+                "f.name COLLATE NOCASE",
+                "f.id",
+            ],
+            "file": ["f.name COLLATE NOCASE", "f.id"],
+            "type": ["e.extension COLLATE NOCASE", "e.id", "f.id"],
+            "size": ["f.size_bytes", "f.id"],
+            "modified": ["f.mtime", "f.mtime_us", "f.id"],
+        }
+        if sort not in order_keys:
+            raise ValueError("Invalid inventory sort")
+        hosts = _facet_values(host)
+        shares = _facet_values(share)
+        extensions = _facet_values(extension)
+        terms = list(dict.fromkeys(term for term in q.casefold().split() if term))
+        where: List[str] = []
+        values: List[Any] = []
+        # Only join the dictionary tables a query actually needs. Both joins
+        # cost a primary-key lookup per row, so an unconditional join turns a
+        # deep page over an otherwise flat index into hundreds of ms: every
+        # skipped row still pays for the join it does not use.
+        needs_dirs = sort in ("path", "location") or bool(hosts) or bool(shares)
+        needs_extension = sort == "type" or bool(extensions)
+        source = "catalog_files f"
+        if needs_dirs:
+            source += " JOIN catalog_dirs d ON d.id=f.dir_id"
+        if needs_extension:
+            source += " JOIN catalog_extensions e ON e.id=f.ext_id"
+        with self._connect() as connection:
+            connection.execute("BEGIN")
+            if hosts:
+                where.append(f"d.host IN ({','.join('?' for _ in hosts)})")
+                values.extend(hosts)
+            if shares:
+                where.append(f"d.share IN ({','.join('?' for _ in shares)})")
+                values.extend(shares)
+            if extensions:
+                where.append(f"e.extension IN ({','.join('?' for _ in extensions)})")
+                values.extend(extensions)
+            if terms:
+                plans = [search_plan_term(connection, term) for term in terms]
+                for plan in plans:
+                    sql, params = search_predicate(plan, "f")
+                    where.append(sql)
+                    values.extend(params)
+                # A term (or the whole query) with bounded candidates is driven
+                # by its id list; a term whose name match is unbounded makes the
+                # intersection unbounded and is answered by walking the sort
+                # index with the predicate.
+                bounded = search_bounded_ids(connection, plans)
+                if bounded is not None:
+                    where.append("f.id IN (SELECT value FROM json_each(?))")
+                    values.append(json.dumps(sorted(bounded)))
+            clause = (" WHERE " + " AND ".join(where)) if where else ""
+            total = None
+            if include_total:
+                if not terms and not extensions:
+                    dir_where: List[str] = []
+                    dir_values: List[Any] = []
+                    if hosts:
+                        dir_where.append(f"host IN ({','.join('?' for _ in hosts)})")
+                        dir_values.extend(hosts)
+                    if shares:
+                        dir_where.append(f"share IN ({','.join('?' for _ in shares)})")
+                        dir_values.extend(shares)
+                    dir_clause = (
+                        " WHERE " + " AND ".join(dir_where) if dir_where else ""
+                    )
+                    total = int(
+                        connection.execute(
+                            "SELECT coalesce(sum(file_count), 0) FROM catalog_dirs"
+                            + dir_clause,
+                            dir_values,
+                        ).fetchone()[0]
+                    )
+                else:
+                    total = int(
+                        connection.execute(
+                            f"SELECT COUNT(*) FROM {source}{clause}", values
+                        ).fetchone()[0]
+                    )
+            revision_row = connection.execute(
+                "SELECT value FROM metadata WHERE key='revision'"
+            ).fetchone()
+            revision = int(revision_row[0]) if revision_row else 0
+            order = ", ".join(f"{key} {direction.upper()}" for key in order_keys[sort])
+            per_page = min(max(per_page, 1), self.page_size, 500)
+            page = max(page, 1)
+            start = (page - 1) * per_page
+            fetch = per_page if include_total else per_page + 1
+            ids = [
+                int(row[0])
+                for row in connection.execute(
+                    f"SELECT f.id FROM {source}{clause} ORDER BY {order} "
+                    "LIMIT ? OFFSET ?",
+                    (*values, fetch, start),
+                )
+            ]
+            has_next = (
+                len(ids) > per_page if total is None else start + per_page < total
+            )
+            ids = ids[:per_page]
+            rows = (
+                {
+                    int(row["id"]): row
+                    for row in connection.execute(
+                        "SELECT * FROM files WHERE id IN "
+                        "(SELECT value FROM json_each(?))",
+                        (json.dumps(ids),),
+                    )
+                }
+                if ids
+                else {}
+            )
+            records = [self._record(rows[file_id]) for file_id in ids]
+            items = [record.public() for record in self._enrich(records)]
+        return {
+            "items": items,
+            "page": page,
+            "per_page": per_page,
+            "total": total,
+            "has_next": has_next,
+            "revision": revision,
+        }
 
     def search(
         self,
@@ -1560,6 +1795,30 @@ class DatabaseIndex:
         jev_run: str = "",
         exclude: Optional[Mapping[str, FacetValue]] = None,
     ) -> Dict[str, Any]:
+        if (
+            sort in {"", "path", "location", "file", "type", "size", "modified"}
+            and not rule
+            and not triage
+            and not permission
+            and not collection
+            and not activity
+            and not exclude
+            and not ranking_run
+            and not ranking_category
+            and ranking_min == 0
+            and not jev_run
+        ):
+            return self._search_catalog(
+                q,
+                host,
+                share,
+                extension,
+                page,
+                per_page,
+                sort or "path",
+                direction,
+                include_total,
+            )
         where, where_values = self._where(
             q,
             host,
@@ -1613,16 +1872,22 @@ class DatabaseIndex:
             else "NULL AS combined_score"
         )
         ranking_projection = (
-            "ranking.run_id AS ranking_run_id, ranking.priority AS ranking_priority, "
-            f"{ranking_score} AS ranking_score"
-            if ranking_run
-            else "'' AS ranking_run_id, NULL AS ranking_priority, NULL AS ranking_score"
-        ) + ", " + jev_projection + ", " + combined_projection
+            (
+                "ranking.run_id AS ranking_run_id, ranking.priority AS ranking_priority, "
+                f"{ranking_score} AS ranking_score"
+                if ranking_run
+                else "'' AS ranking_run_id, NULL AS ranking_priority, NULL AS ranking_score"
+            )
+            + ", "
+            + jev_projection
+            + ", "
+            + combined_projection
+        )
         values = join_values + jev_join_values + where_values
         if ranking_run and ranking_min > 0:
             where = where.replace("ranking_score >= ?", f"{ranking_score} >= ?")
         ranking_source = "files" + joins + jev_join
-        ranking_order_id = "files.public_id"
+        ranking_order_id = "files.id"
         if sort == "priority" and ranking_run and direction == "desc" and not jev_join:
             # These are inner joins: the indexed score is never NULL. Using
             # COALESCE or the inventory's ID in ORDER BY forces a temporary sort.
@@ -1645,8 +1910,7 @@ class DatabaseIndex:
                 values = [ranking_run, ranking_category, *where_values]
             else:
                 ranking_source = (
-                    "triage.triage_files ranking "
-                    "JOIN files ON files.id=ranking.file_id"
+                    "triage.triage_files ranking JOIN files ON files.id=ranking.file_id"
                 )
                 values = [ranking_run, *where_values]
             where = (
@@ -1699,14 +1963,14 @@ class DatabaseIndex:
             # regardless of direction.
             order = (
                 " ORDER BY (jev_result.choice IS NULL) ASC, "
-                f"{jev_order} {direction.upper()}, files.public_id {direction.upper()}"
+                f"{jev_order} {direction.upper()}, files.id {direction.upper()}"
             )
         else:
             # Equal scores always break by ascending file id. That matches the
             # primary triage_priority/triage_category_score indexes and lets the
             # direction-specific duplicates stay deleted.
             tie_direction = (
-                "ASC" if ranking_order_id != "files.public_id" else direction.upper()
+                "ASC" if ranking_order_id != "files.id" else direction.upper()
             )
             order = (
                 " ORDER BY "
@@ -1725,7 +1989,7 @@ class DatabaseIndex:
             connection.execute("BEGIN")
             candidate_ids = search_candidates(connection, q)
             if candidate_ids is not None:
-                if ranking_order_id != "files.public_id":
+                if ranking_order_id != "files.id":
                     # SQLite otherwise favors walking the entire score index,
                     # even for a handful of candidate IDs. CROSS JOIN pins the
                     # bounded inventory lookups as the outer loop.
@@ -1839,6 +2103,50 @@ class DatabaseIndex:
         inventory readers on one selection contract instead of two.
         """
         self._resolve_jev_run(jev_run)
+        fast = (
+            not q
+            and not host
+            and not share
+            and not extension
+            and not rule
+            and not triage
+            and not permission
+            and not collection
+            and not activity
+            and not exclude
+            and not ranking_run
+            and not ranking_category
+            and not ranking_min
+            and not jev_run
+        )
+        if fast:
+            with self._connect() as connection:
+                revision_row = connection.execute(
+                    "SELECT value FROM metadata WHERE key='revision'"
+                ).fetchone()
+                rows = list(
+                    connection.execute(
+                        "SELECT host AS name, sum(file_count) AS file_count, "
+                        "coalesce(sum(size_bytes), 0) AS size_bytes FROM catalog_dirs "
+                        "GROUP BY host HAVING sum(file_count) > 0 "
+                        "ORDER BY host COLLATE NOCASE, host"
+                    )
+                )
+            hosts = [
+                {
+                    "name": str(row["name"]),
+                    "file_count": int(row["file_count"]),
+                    "size_bytes": int(row["size_bytes"]),
+                    "shares": [],
+                    "loaded": False,
+                }
+                for row in rows
+            ]
+            return {
+                "total": sum(row["file_count"] for row in hosts),
+                "hosts": hosts,
+                "revision": int(revision_row[0]) if revision_row else 0,
+            }
         where, where_values = self._where(
             q,
             host,
@@ -1932,6 +2240,112 @@ class DatabaseIndex:
         if not list_shares and len(shares) != 1:
             raise ValueError("tree branch requires a single share")
         host = hosts[0]
+        fast = (
+            not q
+            and not extension
+            and not rule
+            and not triage
+            and not permission
+            and not collection
+            and not activity
+            and not exclude
+            and not ranking_run
+            and not ranking_category
+            and not ranking_min
+            and not jev_run
+            and (not list_shares or not shares)
+        )
+        if fast:
+            with self._connect() as connection:
+                if list_shares:
+                    rows = list(
+                        connection.execute(
+                            "SELECT share AS name, sum(file_count) AS file_count, "
+                            "coalesce(sum(size_bytes), 0) AS size_bytes FROM catalog_dirs "
+                            "WHERE host=?1 COLLATE NOCASE AND host=?1 "
+                            "GROUP BY share HAVING sum(file_count) > 0 "
+                            "ORDER BY share COLLATE NOCASE, share",
+                            (host,),
+                        )
+                    )
+                    return {
+                        "shares": [
+                            {
+                                "name": str(row["name"]),
+                                "host": host,
+                                "file_count": int(row["file_count"]),
+                                "size_bytes": int(row["size_bytes"]),
+                                "folders": [],
+                                "files": [],
+                                "loaded": False,
+                            }
+                            for row in rows
+                        ]
+                    }
+
+                base = "/" + parent.replace("\\", "/").strip("/")
+                if base != "/":
+                    base += "/"
+                dir_rows = list(
+                    connection.execute(
+                        "SELECT path, file_count, size_bytes FROM catalog_dirs "
+                        "WHERE host=?1 COLLATE NOCASE AND share=?2 COLLATE NOCASE "
+                        "AND host=?1 AND share=?2 AND path>=?3 AND path<?4 "
+                        "AND file_count > 0",
+                        (host, shares[0], base, base[:-1] + "0"),
+                    )
+                )
+                folders: Dict[str, Dict[str, Any]] = {}
+                for row in dir_rows:
+                    remainder = str(row["path"])[len(base) :]
+                    if not remainder:
+                        continue
+                    segment = remainder.split("/", 1)[0]
+                    entry = folders.setdefault(
+                        segment,
+                        {
+                            "name": segment,
+                            "host": host,
+                            "share": shares[0],
+                            "path": base.rstrip("/") + "/" + segment,
+                            "file_count": 0,
+                            "size_bytes": 0,
+                            "folders": [],
+                            "files": [],
+                            "loaded": False,
+                        },
+                    )
+                    entry["file_count"] += int(row["file_count"])
+                    entry["size_bytes"] += int(row["size_bytes"] or 0)
+                file_rows = list(
+                    connection.execute(
+                        "SELECT f.id FROM catalog_files f "
+                        "JOIN catalog_dirs d ON d.id=f.dir_id "
+                        "WHERE d.host=?1 COLLATE NOCASE AND d.share=?2 COLLATE NOCASE "
+                        "AND d.host=?1 AND d.share=?2 "
+                        "AND d.path=?3 COLLATE NOCASE AND d.path=?3 "
+                        "ORDER BY f.name COLLATE NOCASE, f.id",
+                        (host, shares[0], base),
+                    )
+                )
+                ids = [int(row[0]) for row in file_rows]
+                records: List[FileRecord] = []
+                if ids:
+                    rows = {
+                        int(row["id"]): row
+                        for row in connection.execute(
+                            "SELECT * FROM files WHERE id IN "
+                            "(SELECT value FROM json_each(?))",
+                            (json.dumps(ids),),
+                        )
+                    }
+                    records = [self._record(rows[file_id]) for file_id in ids]
+            return {
+                "folders": sorted(
+                    folders.values(), key=lambda value: value["name"].casefold()
+                ),
+                "files": [r.public() for r in self._enrich(records)],
+            }
         where, where_values = self._where(
             q,
             host,
@@ -1981,11 +2395,17 @@ class DatabaseIndex:
             else "NULL AS combined_score"
         )
         ranking_projection = (
-            "ranking.run_id AS ranking_run_id, ranking.priority AS ranking_priority, "
-            f"{ranking_score} AS ranking_score"
-            if ranking_run
-            else "'' AS ranking_run_id, NULL AS ranking_priority, NULL AS ranking_score"
-        ) + ", " + jev_projection + ", " + combined_projection
+            (
+                "ranking.run_id AS ranking_run_id, ranking.priority AS ranking_priority, "
+                f"{ranking_score} AS ranking_score"
+                if ranking_run
+                else "'' AS ranking_run_id, NULL AS ranking_priority, NULL AS ranking_score"
+            )
+            + ", "
+            + jev_projection
+            + ", "
+            + combined_projection
+        )
         base_values = join_values + where_values
         if ranking_run and ranking_min > 0:
             where = where.replace("ranking_score >= ?", f"{ranking_score} >= ?")
@@ -2023,9 +2443,7 @@ class DatabaseIndex:
 
         normalized_parent = parent.replace("\\", "/").rstrip("/") or "/"
         prefix = "/" if normalized_parent == "/" else normalized_parent + "/"
-        subtree_clause = (
-            "(files.parent_path=? OR files.parent_path LIKE ? ESCAPE '\\')"
-        )
+        subtree_clause = "(files.parent_path=? OR files.parent_path LIKE ? ESCAPE '\\')"
         escaped_parent = (
             normalized_parent.replace("\\", "\\\\")
             .replace("%", "\\%")
@@ -2264,7 +2682,9 @@ class WebServer(ThreadingHTTPServer):
     def handle_error(self, request: Any, client_address: Tuple[str, int]) -> None:
         _type, error, _traceback = sys.exc_info()
         if isinstance(error, (BrokenPipeError, ConnectionResetError)):
-            logging.debug("Client disconnected while sending response to %s:%s", *client_address)
+            logging.debug(
+                "Client disconnected while sending response to %s:%s", *client_address
+            )
             return
         super().handle_error(request, client_address)
 
@@ -2315,7 +2735,9 @@ class WebHandler(BaseHTTPRequestHandler):
         self._headers(status, content_type, len(body), extra_headers)
         self.wfile.write(body)
 
-    def _empty(self, status: int, extra_headers: Optional[Dict[str, str]] = None) -> None:
+    def _empty(
+        self, status: int, extra_headers: Optional[Dict[str, str]] = None
+    ) -> None:
         """Answer a validator hit. A 304 carries no body and no Content-Length."""
         self.send_response(status)
         for name, value in SECURITY_HEADERS.items():
@@ -2379,9 +2801,7 @@ class WebHandler(BaseHTTPRequestHandler):
             # they name their own assets, so caching one would strand the tab
             # on an older module graph.
             "Cache-Control": (
-                "no-store"
-                if suffix == ".html"
-                else "public, max-age=3600"
+                "no-store" if suffix == ".html" else "public, max-age=3600"
             ),
         }
         if suffix == ".html":
@@ -2641,7 +3061,9 @@ class WebHandler(BaseHTTPRequestHandler):
                 ranking_min,
                 filters[11] or "path",
                 filters[12]
-                or ("desc" if filters[11] in {"priority", "combined", "jev"} else "asc"),
+                or (
+                    "desc" if filters[11] in {"priority", "combined", "jev"} else "asc"
+                ),
             )
             if parsed.path == "/api/tree/branch":
                 try:
@@ -2689,7 +3111,7 @@ class WebHandler(BaseHTTPRequestHandler):
                 self._error(400, "Invalid pagination", "invalid_query")
             return
         match = re.fullmatch(
-            r"/api/files/([A-Za-z0-9_-]{16,32})(?:/(preview|download))?", parsed.path
+            r"/api/files/([A-Za-z0-9_-]{8,32})(?:/(preview|download))?", parsed.path
         )
         if not match:
             self._error(400, "Invalid file ID", "invalid_id")
@@ -3069,7 +3491,9 @@ class WebHandler(BaseHTTPRequestHandler):
 
 def run(config: WebConfig, auth: Optional[SMBAuth]) -> int:
     """Run the local WebUI with validated configuration and authentication."""
-    index = DatabaseIndex(config.database_path, config.page_size, scoring=config.scoring)
+    index = DatabaseIndex(
+        config.database_path, config.page_size, scoring=config.scoring
+    )
     runtime = Path(tempfile.mkdtemp(prefix="shrawler-web-"))
     os.chmod(runtime, 0o700)
     token = secrets.token_hex(32) if config.token_auth else ""
@@ -3113,8 +3537,11 @@ def run(config: WebConfig, auth: Optional[SMBAuth]) -> int:
     with index._connect() as connection:
         search_missing = not search_index_available(connection)
         evidence_missing = any(
-            "remote_path_key" not in {row[1] for row in connection.execute(f"PRAGMA table_info({table})")}
-            or connection.execute(f"SELECT 1 FROM {table} WHERE remote_path_key IS NULL LIMIT 1").fetchone()
+            "remote_path_key"
+            not in {row[1] for row in connection.execute(f"PRAGMA table_info({table})")}
+            or connection.execute(
+                f"SELECT 1 FROM {table} WHERE remote_path_key IS NULL LIMIT 1"
+            ).fetchone()
             for table in ("snaffler_matches", "downloads")
         )
     if search_missing and not search_index_supported():
@@ -3158,20 +3585,33 @@ def run(config: WebConfig, auth: Optional[SMBAuth]) -> int:
                     )
                     index.ensure_search_index()
                 state.index_status.update(
-                    status="completed", current="", completed=total_work, total=total_work,
+                    status="completed",
+                    current="",
+                    completed=total_work,
+                    total=total_work,
                     elapsed_seconds=round(time.monotonic() - started, 1),
                 )
-                print(f"Inventory optimization complete in {time.monotonic() - started:.1f}s.", flush=True)
+                print(
+                    f"Inventory optimization complete in {time.monotonic() - started:.1f}s.",
+                    flush=True,
+                )
             except (OSError, sqlite3.Error) as exc:
                 state.index_status.update(status="failed", error=str(exc))
-                print(f"Inventory optimization failed: {escape_terminal(exc)}", flush=True)
+                print(
+                    f"Inventory optimization failed: {escape_terminal(exc)}", flush=True
+                )
 
         threading.Thread(target=optimize, name="shrawler-indexer", daemon=True).start()
-        print(f"Optimizing inventory in background: {total_work} maintenance steps pending.", flush=True)
+        print(
+            f"Optimizing inventory in background: {total_work} maintenance steps pending.",
+            flush=True,
+        )
     print(f"WebUI listening on {escape_terminal(config.bind)}:{server.server_port}")
     print("Open WebUI: " + url)
     if config.bind in {"0.0.0.0", "::"}:
-        print("Remote clients should replace 127.0.0.1 with this server's IP address or hostname.")
+        print(
+            "Remote clients should replace 127.0.0.1 with this server's IP address or hostname."
+        )
     if not token:
         print("WebUI token authentication is disabled; use --token-auth to enable it.")
     print(

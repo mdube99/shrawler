@@ -8,6 +8,7 @@ locally sorted slice. Rule results stay in their own immutable view.
 
 from typing import Any, Dict, List, Optional
 
+from ...store import public_id_key, register_public_id_function
 from . import codec
 from .config import (
     PRIORITY_INSPECT_MIN,
@@ -63,10 +64,13 @@ def list_assessed(
     if directory_id is not None:
         clause += " AND f.directory_id=?"
         values.append(directory_id)
+    register_public_id_function(
+        store.connection, public_id_key(store.connection, "inventory")
+    )
     rows = list(
         store.connection.execute(
             "SELECT r.choice, r.distribution_json, r.deployment_revision, r.model, "
-            "i.public_id AS file_id, i.file_name, i.unc_path, i.extension, "
+            "public_id_token(i.id) AS file_id, i.file_name, i.unc_path, i.extension, "
             "i.size_bytes, i.mtime_utc "
             "FROM assessment_files f JOIN decision_results r ON r.id=f.result_id "
             "JOIN inventory.files i ON i.id=f.file_id "
@@ -92,10 +96,13 @@ def highlight_missed(
     deterministic rules left at 0."""
     if not 1 <= limit <= 10000 or offset < 0:
         raise ValueError("limit must be 1..10000 and offset nonnegative")
+    register_public_id_function(
+        store.connection, public_id_key(store.connection, "inventory")
+    )
     rows = list(
         store.connection.execute(
             "SELECT r.choice, r.distribution_json, r.deployment_revision, r.model, "
-            "i.public_id AS file_id, i.file_name, i.unc_path, i.extension, "
+            "public_id_token(i.id) AS file_id, i.file_name, i.unc_path, i.extension, "
             "i.size_bytes, i.mtime_utc "
             "FROM assessment_files f JOIN decision_results r ON r.id=f.result_id "
             "JOIN inventory.files i ON i.id=f.file_id "
